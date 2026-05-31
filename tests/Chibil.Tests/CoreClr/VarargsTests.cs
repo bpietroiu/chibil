@@ -133,4 +133,31 @@ int main(void){ return sum_via_ptr(3, 20, 22, 13); }   // 55
         var asm = System.Reflection.Assembly.Load(LinkSource(src));
         Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[]{ new string[0] }));
     }
+
+    [Fact]
+    public void Variadic_forwarding_via_va_list_param()
+    {
+        string src = @"
+typedef __builtin_va_list va_list;
+int vsum(int n, va_list ap){ int s=0; for(int i=0;i<n;i++) s+=__builtin_va_arg(ap,int); return s; }
+int sum(int n, ...){ va_list ap; __builtin_va_start(ap,n); int r=vsum(n,ap); __builtin_va_end(ap); return r; }
+int main(void){ return sum(3, 20, 22, 13); }   // 55
+";
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[]{ new string[0] }));
+    }
+
+    [Fact]
+    public void Variadic_forwarding_on_linux()
+    {
+        if (!WslRunner.Available()) return;
+        string src = @"
+typedef __builtin_va_list va_list;
+int vsum(int n, va_list ap){ int s=0; for(int i=0;i<n;i++) s+=__builtin_va_arg(ap,int); return s; }
+int sum(int n, ...){ va_list ap; __builtin_va_start(ap,n); int r=vsum(n,ap); __builtin_va_end(ap); return r; }
+int main(void){ return sum(3, 20, 22, 13); }
+";
+        var (exit, outp) = WslRunner.Run(LinkSource(src), WslRunner.NetCoreRuntimeConfig);
+        Assert.True(exit == 55, $"exit {exit}: {outp}");
+    }
 }
