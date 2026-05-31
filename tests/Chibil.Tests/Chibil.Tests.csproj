@@ -18,6 +18,7 @@
       cannot be compiled into a normal project directly.
     -->
     <Compile Include="..\..\tools\CoffObjModel.cs" />
+    <Compile Include="..\..\tools\chibil-link\ObjectFile.cs" />
   </ItemGroup>
 
   <ItemGroup>

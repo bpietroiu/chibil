@@ -101,6 +101,27 @@ public struct CoffSymbol
     public byte NumberOfAuxSymbols;
 }
 
+// Ported verbatim from coffobjdumper.cs — keep in sync with that file.
+public readonly struct MethodBodyLocation
+{
+    public int SectionNumber { get; }
+    public int Offset { get; }
+
+    public MethodBodyLocation(int sectionNumber, int offset)
+        => (SectionNumber, Offset) = (sectionNumber, offset);
+}
+
+// Ported verbatim from coffobjdumper.cs — keep in sync with that file.
+public readonly struct FieldDataLocation
+{
+    public int SectionNumber { get; }
+    public int Offset { get; }
+    public string SymbolName { get; }
+
+    public FieldDataLocation(int sectionNumber, int offset, string symbolName)
+        => (SectionNumber, Offset, SymbolName) = (sectionNumber, offset, symbolName);
+}
+
 public class CoffFile
 {
     public CoffFileHeader Header;
@@ -112,6 +133,11 @@ public class CoffFile
     const int SectionHeaderSize = 40;
     const int SymbolSize = 18;
     const int RelocationSize = 10;
+
+    // Ported from coffobjdumper.cs — keep in sync with that file.
+    const ushort IMAGE_REL_I386_TOKEN = 0x000C;
+    const ushort IMAGE_REL_AMD64_TOKEN = 0x000D;
+    const byte IMAGE_SYM_CLASS_CLR_TOKEN = 107;
 
     public static CoffFile Parse(byte[] data)
     {
@@ -246,5 +272,128 @@ public class CoffFile
             relocs[i] = CoffRelocation.Read(FileData.AsSpan(offset + i * RelocationSize));
         }
         return relocs;
+    }
+
+    // ─── Body-location and token-reloc helpers ───────────────────────────────
+    // Ported verbatim from coffobjdumper.cs — keep in sync with that file.
+
+    /// <summary>
+    /// Builds a map of offset-within-section → resolved token value,
+    /// by examining relocations whose symbols have storage class CLR_TOKEN (107)
+    /// and names that are hex token strings. Architecture-independent: identifies
+    /// token relocs by symbol class rather than relocation type code.
+    /// </summary>
+    public Dictionary<int, int> BuildTokenRelocationMap(CoffSectionHeader section)
+    {
+        var map = new Dictionary<int, int>();
+        var relocs = GetRelocations(section);
+
+        foreach (var r in relocs)
+        {
+            if (r.SymbolTableIndex >= (uint)Symbols.Length)
+                continue;
+
+            var sym = Symbols[r.SymbolTableIndex];
+            if (sym.StorageClass == IMAGE_SYM_CLASS_CLR_TOKEN &&
+                sym.Name.Length == 8 &&
+                int.TryParse(sym.Name, System.Globalization.NumberStyles.HexNumber, null, out int token))
+            {
+                map[(int)r.VirtualAddress] = token;
+            }
+        }
+
+        return map;
+    }
+
+    public Dictionary<int, MethodBodyLocation> BuildMethodBodyLocationMap()
+    {
+        var map = new Dictionary<int, MethodBodyLocation>();
+
+        foreach (var sym in Symbols)
+        {
+            if (sym.StorageClass != IMAGE_SYM_CLASS_CLR_TOKEN ||
+                sym.SectionNumber <= 0 ||
+                sym.Name.Length != 8 ||
+                !int.TryParse(sym.Name, System.Globalization.NumberStyles.HexNumber, null, out int token) ||
+                (token & unchecked((int)0xFF000000)) != 0x06000000)
+            {
+                continue;
+            }
+
+            var section = GetSection(sym.SectionNumber);
+            if (sym.Value < section.SizeOfRawData)
+                map[token] = new MethodBodyLocation(sym.SectionNumber, (int)sym.Value);
+        }
+
+        return map;
+    }
+
+    public Dictionary<int, FieldDataLocation> BuildFieldDataLocationMap()
+    {
+        var map = new Dictionary<int, FieldDataLocation>();
+
+        for (int i = 0; i < Symbols.Length; i++)
+        {
+            var sym = Symbols[i];
+            if (sym.StorageClass != IMAGE_SYM_CLASS_CLR_TOKEN ||
+                sym.Name.Length != 8 ||
+                !int.TryParse(sym.Name, System.Globalization.NumberStyles.HexNumber, null, out int token) ||
+                (token & unchecked((int)0xFF000000)) != 0x04000000)
+            {
+                continue;
+            }
+
+            if (sym.SectionNumber > 0)
+            {
+                var section = GetSection(sym.SectionNumber);
+                if (sym.Value >= section.SizeOfRawData)
+                    continue;
+            }
+
+            map[token] = new FieldDataLocation(sym.SectionNumber, (int)sym.Value, FindAssociatedSymbolName(i, sym));
+        }
+
+        return map;
+    }
+
+    string FindAssociatedSymbolName(int tokenSymbolIndex, CoffSymbol tokenSymbol)
+    {
+        for (int i = tokenSymbolIndex - 1; i >= 0; i--)
+        {
+            var sym = Symbols[i];
+            if (sym.Name == "<aux>")
+                continue;
+
+            if (sym.StorageClass != IMAGE_SYM_CLASS_CLR_TOKEN &&
+                sym.SectionNumber == tokenSymbol.SectionNumber &&
+                sym.Value == tokenSymbol.Value)
+            {
+                return sym.Name;
+            }
+
+            break;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Apply token relocations to a copy of section data, returning patched bytes
+    /// where CLR token operand slots are filled in with actual token values.
+    /// </summary>
+    public byte[] GetPatchedSectionData(CoffSectionHeader section)
+    {
+        var data = GetSectionData(section).ToArray();
+        var tokenMap = BuildTokenRelocationMap(section);
+
+        foreach (var (offset, token) in tokenMap)
+        {
+            if (offset + 4 <= data.Length)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(offset), token);
+            }
+        }
+
+        return data;
     }
 }

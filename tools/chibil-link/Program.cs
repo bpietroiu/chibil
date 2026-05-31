@@ -23,11 +23,6 @@ public static class Program
     }
 }
 
-public sealed class LinkException : Exception
-{
-    public LinkException(string m) : base(m) { }
-}
-
 public sealed class LinkOptions
 {
     public List<string> Inputs = new();
