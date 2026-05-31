@@ -48,4 +48,22 @@ public class LinkerUnitTests
         object result = entry.Invoke(null, new object[] { new string[0] });
         Assert.Equal(55, (int)result);
     }
+
+    [Fact]
+    public void Linked_function_with_locals_runs_in_process()
+    {
+        // A loop forces a genuine local-variable signature (non-foldable); result must be 55.
+        byte[] obj = TestCompiler.CompileToObj(
+            "int main(){ int s = 0; for (int i = 1; i <= 10; i++) s += i; return s; }",
+            Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+
+        // Make sure this test actually exercises the locals path.
+        Assert.False(of.Methods.First(m => m.Name == "main").LocalSig.IsNil);
+
+        byte[] pe = ChibilLink.LinkPipeline.LinkToBytes(new[] { of }, new System.Collections.Generic.List<string>());
+        var asm = System.Reflection.Assembly.Load(pe);
+        object result = asm.EntryPoint.Invoke(null, new object[] { new string[0] });
+        Assert.Equal(55, (int)result);
+    }
 }

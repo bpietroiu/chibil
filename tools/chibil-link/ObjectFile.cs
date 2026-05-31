@@ -55,7 +55,15 @@ public sealed unsafe class ObjectFile
             if (!bodyLoc.TryGetValue(token, out var loc)) continue;                    // no body
 
             var sec = of.Coff.GetSection(loc.SectionNumber);
-            byte[] secData = of.Coff.GetSectionData(sec).ToArray();
+            // Read PATCHED section data: in a managed COFF obj, the fat method
+            // header's LocalVarSigTok (and the IL operand tokens) are filled in by
+            // CLR token relocations. The raw bytes carry 0 there, so the local-var
+            // signature would parse as nil. The patched bytes have the ORIGINAL
+            // tokens stamped in, which MethodBodyBlock.Create then surfaces as the
+            // original StandaloneSignatureHandle. (RelocationFixer still remaps the
+            // original IL operand tokens via TokenRelocs, which come from the
+            // relocation TABLE and are independent of whether bytes are patched.)
+            byte[] secData = of.Coff.GetPatchedSectionData(sec);
             var relocMap = of.Coff.BuildTokenRelocationMap(sec); // section-offset -> token
 
             MethodBodyBlock body;
@@ -67,12 +75,16 @@ public sealed unsafe class ObjectFile
             byte[] il = body.GetILBytes();
 
             // Translate section-relative reloc offsets to IL-relative offsets.
-            // TODO(D1): body.Size = header + IL + EH regions, so (Size - il.Length)
-            // over-counts the header by the EH-region size when exception regions
-            // exist, shifting reloc offsets. Exact for EH-free methods (all current
-            // chibil output). D1 validates offsets; switch to a direct header-size
-            // read there: tiny header = 1 byte when (b & 3)==2, fat = 12 when (b & 3)==3.
-            int ilStartInSection = loc.Offset + (body.Size - il.Length); // header precedes IL
+            // Compute the header size directly from the body's first byte rather
+            // than (body.Size - il.Length): body.Size includes 4-byte-aligned EH
+            // regions, which would over-count the header when EH regions exist.
+            byte firstByte = secData[loc.Offset];
+            int headerSize = (firstByte & 0x03) == 0x02 ? 1   // tiny header
+                           : (firstByte & 0x03) == 0x03 ? 12  // fat header
+                           : throw new LinkException(
+                                 $"{path}: method '{of.Md.GetString(md.Name)}' has an " +
+                                 $"unrecognized method-body header byte 0x{firstByte:X2}.");
+            int ilStartInSection = loc.Offset + headerSize; // header precedes IL
             var ilRelocs = new Dictionary<int, int>();
             foreach (var kv in relocMap)
             {

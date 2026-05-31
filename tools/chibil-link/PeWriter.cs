@@ -139,6 +139,7 @@ public sealed class PeWriter
                 name,
                 sig,
                 bodyOffsets[i],
+                // Phase 0: no Param rows are emitted, so all methods point at row 1
                 parameterList: MetadataTokens.ParameterHandle(1));
             AssertRow(slot.PredictedRow, MetadataTokens.GetRowNumber(h),
                 slot.Method == null ? "entry MethodDef" : $"MethodDef '{slot.Method.Name}'");

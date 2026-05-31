@@ -63,9 +63,7 @@ public sealed class MetadataMerger
     // Output <Module> TypeDef is row 1; methods all hang off it.
     public const int ModuleTypeDefRow = 1;
 
-    // Running output-row counters.
-    private int _outAssemblyRefRow;
-    private int _outTypeRefRow;
+    // Running output-row counter for predicted MethodDef rows.
     private int _outMethodRow;
 
     public MetadataMerger(IReadOnlyList<ObjectFile> objs)
@@ -157,7 +155,6 @@ public sealed class MetadataMerger
             AssemblyReferenceHandle outH = AddAssemblyRef(of, ar, name);
             _assemblyRefByName[name] = outH;
             map.SetAssemblyRef(inH, MetadataTokens.GetRowNumber(outH));
-            _outAssemblyRefRow = Math.Max(_outAssemblyRefRow, MetadataTokens.GetRowNumber(outH));
         }
     }
 
@@ -196,7 +193,6 @@ public sealed class MetadataMerger
                 Builder.GetOrAddString(md.GetString(tr.Namespace)),
                 Builder.GetOrAddString(md.GetString(tr.Name)));
             map.SetTypeRef(inH, MetadataTokens.GetRowNumber(outH));
-            _outTypeRefRow = Math.Max(_outTypeRefRow, MetadataTokens.GetRowNumber(outH));
         }
     }
 
@@ -227,10 +223,15 @@ public sealed class MetadataMerger
         return Builder.GetOrAddBlob(sigBuilder);
     }
 
-    /// <summary>Map the local-variable signature handle for a method (or nil).</summary>
+    /// <summary>Map the local-variable signature handle for a method (or nil).
+    /// Throws if a non-nil local-var sig fails to remap, converting a silent
+    /// runtime InvalidProgramException into a clear link error.</summary>
     public StandaloneSignatureHandle MapLocalSig(ObjectFile of, ObjMethod m)
     {
         if (m.LocalSig.IsNil) return default;
-        return _maps[of].MapStandaloneSig(m.LocalSig);
+        var mapped = _maps[of].MapStandaloneSig(m.LocalSig);
+        if (mapped.IsNil || MetadataTokens.GetRowNumber(mapped) == 0)
+            throw new LinkException($"lost local-variable signature for method {m.Name}");
+        return mapped;
     }
 }

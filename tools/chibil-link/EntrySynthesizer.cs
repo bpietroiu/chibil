@@ -78,14 +78,11 @@ public static class EntrySynthesizer
         }
         else
         {
-            // Phase 0 fallback for int main(int, char**): pass 0 / null.
-            // ldc.i4.0 ; ldnull ; call int32 main(int,char**) ; ret
-            il.WriteByte(0x16);                 // ldc.i4.0  (argc = 0)
-            il.WriteByte(0x14);                 // ldnull     (argv = null)
-            il.WriteByte(0x28);                 // call
-            il.WriteInt32(mainFinalToken);
-            il.WriteByte(0x2A);                 // ret
-            maxStack = 2;
+            // TODO: marshalling argv for int main(int, char**) is a later task.
+            // The previous fallback emitted `ldc.i4.0; ldnull; call; ret`, but
+            // `ldnull` for a char** pointer parameter is a verifier type mismatch,
+            // so reject it loudly instead of emitting invalid IL.
+            throw new LinkException("int main(int, char**) entry not yet supported");
         }
 
         return new Result
