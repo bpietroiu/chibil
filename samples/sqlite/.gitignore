@@ -1,0 +1,4 @@
+ref.exe
+app.dll
+app.runtimeconfig.json
+*.obj
