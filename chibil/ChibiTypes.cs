@@ -46,6 +46,8 @@ public enum CallConv
     Stdcall,  // __stdcall — for P/Invoke (Win32 API)
 }
 
+public enum TargetProfile { Ijw, CoreClr }
+
 // ═══════════════════════════════════════════════════════════════════
 //  CFile (← File in C)
 // ═══════════════════════════════════════════════════════════════════
@@ -419,6 +421,7 @@ public class CompilerOptions
     public bool OptFcommon = true;
     public string BaseFile;
     public DataModel DataModel = DataModel.LLP64;
+    public TargetProfile Target = TargetProfile.Ijw;   // default preserves existing IJW behaviour
 }
 
 // ═══════════════════════════════════════════════════════════════════

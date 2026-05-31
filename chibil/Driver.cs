@@ -159,6 +159,8 @@ public class Driver
             if (arg == "-L") { LdExtraArgs.Add("-L"); LdExtraArgs.Add(args[++i]); continue; }
             if (arg.StartsWith("-L")) { LdExtraArgs.Add("-L"); LdExtraArgs.Add(arg[2..]); continue; }
             if (arg == "-hashmap-test") { Console.WriteLine("OK"); Environment.Exit(0); }
+            if (arg == "--target=coreclr") { Options.Target = TargetProfile.CoreClr; continue; }
+            if (arg == "--target=ijw")     { Options.Target = TargetProfile.Ijw; continue; }
             // Ignored options
             if (arg.StartsWith("-O") || arg.StartsWith("-W") || arg.StartsWith("-g") || arg.StartsWith("-std=") ||
                 arg == "-ffreestanding" || arg == "-fno-builtin" || arg == "-fno-omit-frame-pointer" ||
