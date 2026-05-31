@@ -23,6 +23,8 @@ public class Driver
     private string _outputFile;
     private readonly List<string> InputPaths = new();
     private readonly List<string> Tmpfiles = new();
+    private bool _targetExplicit;
+    private readonly List<string> _coreClrLibs = new();
 
     public void Run(string[] args)
     {
@@ -31,6 +33,12 @@ public class Driver
         _preprocessor = new Preprocessor(tokenizer, Options, types);
         _preprocessor.InitMacros();
         ParseArgs(args);
+
+        // Auto-default to CoreCLR when not running on Windows, unless the user
+        // explicitly chose a target via --target=. On Windows the default stays
+        // IJW (MSVC link.exe); a Windows user can still opt into CoreCLR.
+        if (!_targetExplicit && !OperatingSystem.IsWindows())
+            Options.Target = TargetProfile.CoreClr;
 
         if (_optCc1)
         {
@@ -50,6 +58,8 @@ public class Driver
             if (input.StartsWith("-l"))
             {
                 ldArgs.Add(input);
+                // Also collect the bare lib name for the CoreCLR (chibil-link) path.
+                _coreClrLibs.Add(input[2..]);
                 continue;
             }
 
@@ -159,8 +169,8 @@ public class Driver
             if (arg == "-L") { LdExtraArgs.Add("-L"); LdExtraArgs.Add(args[++i]); continue; }
             if (arg.StartsWith("-L")) { LdExtraArgs.Add("-L"); LdExtraArgs.Add(arg[2..]); continue; }
             if (arg == "-hashmap-test") { Console.WriteLine("OK"); Environment.Exit(0); }
-            if (arg == "--target=coreclr") { Options.Target = TargetProfile.CoreClr; continue; }
-            if (arg == "--target=ijw")     { Options.Target = TargetProfile.Ijw; continue; }
+            if (arg == "--target=coreclr") { Options.Target = TargetProfile.CoreClr; _targetExplicit = true; continue; }
+            if (arg == "--target=ijw")     { Options.Target = TargetProfile.Ijw; _targetExplicit = true; continue; }
             // Ignored options
             if (arg.StartsWith("-O") || arg.StartsWith("-W") || arg.StartsWith("-g") || arg.StartsWith("-std=") ||
                 arg == "-ffreestanding" || arg == "-fno-builtin" || arg == "-fno-omit-frame-pointer" ||
@@ -337,12 +347,54 @@ public class Driver
 
     private void RunLinker(List<string> inputs, string output)
     {
+        if (Options.Target == TargetProfile.CoreClr)
+        {
+            // Route to the in-house linker. The MSVC ldArgs list contains both
+            // raw object paths and "-l<lib>" entries; the chibil-link command
+            // takes bare object paths plus the collected lib names.
+            var objs = inputs.Where(i => !i.StartsWith("-l") && !i.StartsWith("-Wl,")).ToList();
+            var cmd = BuildChibilLinkCommand(objs, output);
+            if (_optHashHashHash) Console.Error.WriteLine(string.Join(" ", cmd));
+            RunSubprocess(cmd);
+            return;
+        }
+
+        // IJW / MSVC link.exe path — unchanged.
         var arr = new List<string> { "link.exe", "/DEBUG", "/subsystem:console" };
         arr.Add($"/out:{output}");
         arr.Add("mscoree.lib");
         arr.AddRange(LdExtraArgs);
         arr.AddRange(inputs);
         RunSubprocess(arr.ToArray());
+    }
+
+    /// <summary>
+    /// Build the logical command line for the in-house linker (chibil-link).
+    /// The program name is emitted as the bare "chibil-link"; resolution is
+    /// left to the environment (PATH or the orchestrating build script driving
+    /// the tools via `dotnet run`). We deliberately do not do AOT/apphost path
+    /// resolution here.
+    /// </summary>
+    internal string[] BuildChibilLinkCommand(List<string> inputs, string output)
+    {
+        var arr = new List<string> { "chibil-link", "-o", output };
+        foreach (var lib in _coreClrLibs)   // the -l libs collected for the linker
+            arr.Add($"-l{lib}");
+        arr.AddRange(inputs);               // the .obj inputs
+        return arr.ToArray();
+    }
+
+    /// <summary>
+    /// Test-only shim that configures the relevant fields and invokes the
+    /// production seam <see cref="BuildChibilLinkCommand"/>.
+    /// </summary>
+    internal string[] BuildChibilLinkCommandForTest(
+        TargetProfile target, List<string> libs, List<string> inputs, string output)
+    {
+        Options.Target = target;
+        _coreClrLibs.Clear();
+        _coreClrLibs.AddRange(libs);
+        return BuildChibilLinkCommand(inputs, output);
     }
 
     private string FindLibpath()
