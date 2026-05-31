@@ -2268,7 +2268,6 @@ public class CodeGen
             {
                 // localloc 8*nVar bytes, keep base pointer in a scratch local.
                 EmitConstI4(8 * nVar);
-                Push();
                 _enc.OpCode(ILOpCode.Localloc); // size -> ptr (net 0)
                 int baseLocal = GetOrAddScratchLocal(_types.TyVaList);
                 _enc.StoreLocal(baseLocal); Pop();
@@ -2282,7 +2281,7 @@ public class CodeGen
                     _enc.LoadLocal(baseLocal); Push();
                     if (i != 0)
                     {
-                        EmitConstI4(i * 8); Push();
+                        EmitConstI4(i * 8);
                         _enc.OpCode(ILOpCode.Conv_i);
                         _enc.OpCode(ILOpCode.Add); Pop();
                     }
