@@ -37,6 +37,7 @@ public enum NodeKind
     FunCall, ExprStmt, StmtExpr,
     Var, VlaPtr, Num, Cast, MemZero,
     Asm, Cas, Exch,
+    VaStart, VaArg, VaEnd, VaCopy,
 }
 
 public enum CallConv

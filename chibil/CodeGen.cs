@@ -112,6 +112,11 @@ public class CodeGen
     private Dictionary<Obj, int> _paramSlots;
     private List<(CType ty, int slot)> _scratchLocals;
     private int _scratchLocalBase;
+    // Dedicated va_arg scratch locals (a pointer-to-va_list and a va_list);
+    // both are Ptr-typed, so GetOrAddScratchLocal would alias them to one slot.
+    // Allocate a distinct pair lazily, once per function.
+    private int _vaArgPApLocal = -1;
+    private int _vaArgApLocal = -1;
     private int _maxStack, _stackDepth;
     private Dictionary<string, LabelHandle> _labels;
     private int _labelCount;
@@ -1424,6 +1429,8 @@ public class CodeGen
         _localSlots = new Dictionary<Obj, int>();
         _paramSlots = new Dictionary<Obj, int>();
         _scratchLocals = new List<(CType, int)>();
+        _vaArgPApLocal = -1;
+        _vaArgApLocal = -1;
         _maxStack = 0;
         _stackDepth = 0;
         _labels = new Dictionary<string, LabelHandle>();
@@ -1730,6 +1737,10 @@ public class CodeGen
             case TypeKind.Double:
             case TypeKind.LDouble:
                 _enc.OpCode(ILOpCode.Ldind_r8); return;
+            case TypeKind.Ptr:
+                // Pointers are native-int sized; use ldind.i so the stack type is a
+                // native int (a valid address), not int64.
+                _enc.OpCode(ILOpCode.Ldind_i); return;
         }
 
         // Integer types
@@ -1770,6 +1781,9 @@ public class CodeGen
             case TypeKind.Double:
             case TypeKind.LDouble:
                 _enc.OpCode(ILOpCode.Stind_r8); Pop(2); return;
+            case TypeKind.Ptr:
+                // Pointers are native-int sized; store with stind.i.
+                _enc.OpCode(ILOpCode.Stind_i); Pop(2); return;
         }
 
         if (ty.Size == 1) _enc.OpCode(ILOpCode.Stind_i1);
@@ -2171,6 +2185,66 @@ public class CodeGen
             case NodeKind.Exch:
                 GenExch(node);
                 return;
+
+            case NodeKind.VaStart:
+            {
+                // ap = __va  (store the hidden trailing va-buffer pointer into ap)
+                GenAddr(node.Lhs);                       // &ap
+                int vaIdx = _paramSlots[_currentFn.VaPtr];
+                _enc.LoadArgument(vaIdx); Push();        // __va value (pointer)
+                Store(_types.TyVaList);                  // *(&ap) = __va  (Pop x2)
+                return;
+            }
+
+            case NodeKind.VaArg:
+            {
+                if (node.Ty.Kind == TypeKind.Struct || node.Ty.Kind == TypeKind.Union)
+                    Util.ErrorTok(node.Tok, "va_arg of struct type not supported");
+                // result = *(Ty*)ap ; ap += 8   (each slot is 8 bytes)
+                // Two distinct pointer-typed locals are required; GetOrAddScratchLocal
+                // would alias them (same Ptr kind/size), so allocate a fresh pair once.
+                if (_vaArgPApLocal < 0)
+                {
+                    _vaArgPApLocal = AddFreshScratchLocal(_types.PointerTo(_types.TyVaList));
+                    _vaArgApLocal = AddFreshScratchLocal(_types.TyVaList);
+                }
+                int pApLocal = _vaArgPApLocal;
+                int apLocal = _vaArgApLocal;
+
+                GenAddr(node.Lhs);                       // &ap
+                _enc.StoreLocal(pApLocal); Pop();        // pAp = &ap
+
+                _enc.LoadLocal(pApLocal); Push();        // pAp
+                Load(_types.TyVaList);                   // *pAp = ap (as i8)
+                _enc.OpCode(ILOpCode.Conv_i);            // -> native int (a real address)
+                _enc.StoreLocal(apLocal); Pop();         // apLocal = ap
+
+                // result = *(Ty*)ap  (left on the stack as the node's value)
+                _enc.LoadLocal(apLocal); Push();         // ap (native int)
+                Load(node.Ty);                           // *(Ty*)ap
+
+                // *pAp = ap + 8
+                _enc.LoadLocal(pApLocal); Push();        // pAp
+                _enc.LoadLocal(apLocal); Push();         // pAp, ap
+                EmitConstI4(8);                          // pAp, ap, 8
+                _enc.OpCode(ILOpCode.Conv_i);            // (size as native int)
+                _enc.OpCode(ILOpCode.Add); Pop();        // pAp, ap+8
+                Store(_types.TyVaList);                  // *pAp = ap+8  (Pop x2)
+                return;
+            }
+
+            case NodeKind.VaEnd:
+                // no-op (void); evaluate nothing, push nothing
+                return;
+
+            case NodeKind.VaCopy:
+            {
+                // dst = src  (pointer copy)
+                GenAddr(node.Lhs);                       // &dst
+                GenExpr(node.Rhs);                       // src (va_list pointer value)
+                Store(_types.TyVaList);
+                return;
+            }
         }
 
         // Binary operations
@@ -2243,33 +2317,26 @@ public class CodeGen
             int nFixed = 0;
             for (CType p = funcTy.Params; p != null; p = p.Next) nFixed++;
 
-            // Push the fixed args.
+            // Skip to the variadic args (those past the fixed prototype).
             Node arg = node.Args;
-            for (int i = 0; i < nFixed; i++)
-            {
-                GenExpr(arg);
-                argCount++;
-                arg = arg.Next;
-            }
+            for (int i = 0; i < nFixed; i++) arg = arg.Next;
 
             // Collect the remaining (variadic) args.
             var varArgs = new List<Node>();
             for (Node v = arg; v != null; v = v.Next) varArgs.Add(v);
             int nVar = varArgs.Count;
 
-            if (nVar == 0)
-            {
-                // No variadic args — pass a null va-buffer pointer.
-                _enc.OpCode(ILOpCode.Ldc_i4_0);
-                _enc.OpCode(ILOpCode.Conv_u);
-                Push();
-            }
-            else
+            // IMPORTANT: `localloc` requires the evaluation stack to be empty
+            // except for the size operand. Therefore the va-buffer must be built
+            // BEFORE the fixed args are pushed. We pack into a scratch local, then
+            // push the fixed args, then push the buffer pointer last.
+            int baseLocal = -1;
+            if (nVar != 0)
             {
                 // localloc 8*nVar bytes, keep base pointer in a scratch local.
                 EmitConstI4(8 * nVar);
                 _enc.OpCode(ILOpCode.Localloc); // size -> ptr (net 0)
-                int baseLocal = GetOrAddScratchLocal(_types.TyVaList);
+                baseLocal = GetOrAddScratchLocal(_types.TyVaList);
                 _enc.StoreLocal(baseLocal); Pop();
 
                 for (int i = 0; i < nVar; i++)
@@ -2291,7 +2358,27 @@ public class CodeGen
                         EmitCast(va.Ty, promoted);
                     Store(promoted); // stind into slot, pops addr+value
                 }
+            }
 
+            // Push the fixed args (after the buffer is fully built).
+            arg = node.Args;
+            for (int i = 0; i < nFixed; i++)
+            {
+                GenExpr(arg);
+                argCount++;
+                arg = arg.Next;
+            }
+
+            // Push the hidden va-buffer pointer last.
+            if (nVar == 0)
+            {
+                // No variadic args — pass a null va-buffer pointer.
+                _enc.OpCode(ILOpCode.Ldc_i4_0);
+                _enc.OpCode(ILOpCode.Conv_u);
+                Push();
+            }
+            else
+            {
                 _enc.LoadLocal(baseLocal); Push();
             }
             argCount++; // the hidden va-buffer pointer

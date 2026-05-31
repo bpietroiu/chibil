@@ -22,15 +22,16 @@ static class WslRunner
             File.WriteAllBytes(Path.Combine(winDir, "app.dll"), pe);
             File.WriteAllText(Path.Combine(winDir, "app.runtimeconfig.json"), runtimeConfig);
             string wslPath = "/mnt/" + char.ToLower(winDir[0]) + winDir[2..].Replace('\\', '/');
+            // Read the child exit code from wsl.exe's OWN process exit code, which
+            // faithfully propagates the inner command's status. (A trailing
+            // `; echo EXIT=$?` is unreliable here: in this wsl/bash relay the
+            // sequencing resets $? to 0, so it would always report 0.)
             using var p = Process.Start(new ProcessStartInfo("wsl",
-                $"-u root -- bash -lc \"cd '{wslPath}' && dotnet app.dll; echo EXIT=$?\"")
+                $"-u root -- bash -lc \"cd '{wslPath}' && dotnet app.dll\"")
             { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
             string outp = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
             p.WaitForExit(30000);
-            int exit = 0;
-            var m = System.Text.RegularExpressions.Regex.Match(outp, @"EXIT=(-?\d+)");
-            if (m.Success) exit = int.Parse(m.Groups[1].Value);
-            return (exit, outp);
+            return (p.ExitCode, outp);
         } finally { try { Directory.Delete(winDir, true); } catch { } }
     }
 
