@@ -161,15 +161,25 @@ public sealed class MetadataMerger
         foreach (var of in _objs)
             CopyTypeRefs(of);
 
+        // ── Value-type TypeDefs + HasFieldRVA fields (string literals / globals)
+        //    Predicted here so field/IL signatures referencing them remap, and
+        //    field-data RVAs can be assigned by the writer. Must run BEFORE the
+        //    StandAloneSig rewrite below so any value-type TypeDef referenced by
+        //    a local-variable signature is already predicted (mapped).
+        foreach (var of in _objs)
+            CopyDataFieldsAndTypeDefs(of);
+
+        // ── Value-type TypeDefs referenced ONLY by local-variable signatures
+        //    (e.g. a `char b[16]` fixed-array local with no field) — these have
+        //    no HasFieldRVA field to pull them in, so ensure them here before the
+        //    StandAloneSig rewrite, or their token in the local sig maps to row 0
+        //    ("a valid typedef/typeref token is expected to follow VALUETYPE").
+        foreach (var of in _objs)
+            EnsureStandaloneSigTypeDefs(of);
+
         // ── StandAloneSigs (local-variable sigs) ──────────────────────────────
         foreach (var of in _objs)
             CopyStandaloneSigs(of);
-
-        // ── Value-type TypeDefs + HasFieldRVA fields (string literals / globals)
-        //    Predicted here so field/IL signatures referencing them remap, and
-        //    field-data RVAs can be assigned by the writer.
-        foreach (var of in _objs)
-            CopyDataFieldsAndTypeDefs(of);
 
         // ── Predict MethodDef rows in a fixed order: per object, methods in the
         //    order they appear in ObjectFile.Methods. Entry method appended last
@@ -360,6 +370,102 @@ public sealed class MetadataMerger
                 Alignment = align,
                 PredictedRow = _outFieldRow,
             });
+        }
+    }
+
+    /// <summary>
+    /// Ensure every value-type TypeDef referenced by any local-variable
+    /// signature in <paramref name="of"/> is copied/predicted. A fixed-array
+    /// local such as <c>char b[16]</c> introduces a <c>$ArrayType$…</c> TypeDef
+    /// that may be referenced ONLY by the local sig (no HasFieldRVA field pulls
+    /// it in), so without this pass its token in the rewritten local sig would
+    /// map to row 0 and the loader rejects the image.
+    /// </summary>
+    private void EnsureStandaloneSigTypeDefs(ObjectFile of)
+    {
+        var md = of.Md;
+        for (int r = 1; r <= md.GetTableRowCount(TableIndex.StandAloneSig); r++)
+        {
+            var ss = md.GetStandaloneSignature(MetadataTokens.StandaloneSignatureHandle(r));
+            var reader = md.GetBlobReader(ss.Signature);
+            SignatureHeader header = reader.ReadSignatureHeader();
+            if (header.Kind != SignatureKind.LocalVariables) continue;
+            int varCount = reader.ReadCompressedInteger();
+            for (int i = 0; i < varCount; i++)
+                ScanSigTypeForTypeDefs(of, ref reader);
+        }
+    }
+
+    /// <summary>Walk one Type element of a signature blob, recursing through
+    /// composite forms, and copy any embedded value-type/class TypeDef. Advances
+    /// the reader past the Type exactly as the rewriter would.</summary>
+    private void ScanSigTypeForTypeDefs(ObjectFile of, ref BlobReader reader)
+    {
+    again:
+        var tc = reader.ReadSignatureTypeCode();
+        switch (tc)
+        {
+            case SignatureTypeCode.RequiredModifier:
+            case SignatureTypeCode.OptionalModifier:
+            {
+                EntityHandle modH = reader.ReadTypeHandle();
+                if (modH.Kind == HandleKind.TypeDefinition)
+                    EnsureTypeDefCopied(of, (TypeDefinitionHandle)modH);
+                goto again;
+            }
+            case SignatureTypeCode.Pinned:
+            case SignatureTypeCode.ByReference:
+                goto again;
+            case SignatureTypeCode.Pointer:
+            case SignatureTypeCode.SZArray:
+                ScanSigTypeForTypeDefs(of, ref reader);
+                return;
+            case SignatureTypeCode.Array:
+            {
+                ScanSigTypeForTypeDefs(of, ref reader); // element type
+                reader.ReadCompressedInteger();         // rank
+                int boundsCount = reader.ReadCompressedInteger();
+                for (int b = 0; b < boundsCount; b++) reader.ReadCompressedInteger();
+                int loCount = reader.ReadCompressedInteger();
+                for (int l = 0; l < loCount; l++) reader.ReadCompressedSignedInteger();
+                return;
+            }
+            case SignatureTypeCode.GenericTypeInstance:
+            {
+                reader.ReadByte();                       // Class/ValueType tag
+                EntityHandle genH = reader.ReadTypeHandle();
+                if (genH.Kind == HandleKind.TypeDefinition)
+                    EnsureTypeDefCopied(of, (TypeDefinitionHandle)genH);
+                int args = reader.ReadCompressedInteger();
+                for (int a = 0; a < args; a++) ScanSigTypeForTypeDefs(of, ref reader);
+                return;
+            }
+            case SignatureTypeCode.TypeHandle:
+            {
+                // Step back to read the raw Class/ValueType tag, then the token.
+                reader.Offset -= 1;
+                reader.ReadByte();
+                EntityHandle th = reader.ReadTypeHandle();
+                if (th.Kind == HandleKind.TypeDefinition)
+                    EnsureTypeDefCopied(of, (TypeDefinitionHandle)th);
+                return;
+            }
+            case SignatureTypeCode.GenericTypeParameter:
+            case SignatureTypeCode.GenericMethodParameter:
+                reader.ReadCompressedInteger();
+                return;
+            case SignatureTypeCode.FunctionPointer:
+            {
+                var h = reader.ReadSignatureHeader();
+                if (h.IsGeneric) reader.ReadCompressedInteger();
+                int count = reader.ReadCompressedInteger();
+                ScanSigTypeForTypeDefs(of, ref reader); // return type
+                for (int p = 0; p < count; p++) ScanSigTypeForTypeDefs(of, ref reader);
+                return;
+            }
+            default:
+                // Primitive (I4, U4, Void, String, etc.) — single byte, done.
+                return;
         }
     }
 

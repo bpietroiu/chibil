@@ -2646,6 +2646,12 @@ public class CodeGen
     // double (the parser already applies float->double, but be defensive).
     private CType VaPromote(CType ty)
     {
+        // Array / function args decay to pointer when passed (incl. through
+        // varargs): a string literal "%s" arg is an array lvalue but the IL
+        // pushes its address (char*), so the concrete vararg signature must
+        // encode a pointer, not the array value type.
+        if (ty.Kind == TypeKind.Array) return _types.PointerTo(ty.Base);
+        if (ty.Kind == TypeKind.Func) return _types.PointerTo(ty);
         if (ty.Kind == TypeKind.Float) return _types.TyDouble;
         if (TypeSystem.IsInteger(ty) && ty.Size < _types.TyInt.Size)
             return ty.IsUnsigned ? _types.TyUint : _types.TyInt;

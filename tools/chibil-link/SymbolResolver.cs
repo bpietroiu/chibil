@@ -36,9 +36,22 @@ public static class SymbolResolver
         foreach (var of in objs)
             table.AddDefined(of, merger);
 
-        // Synthesized P/Invoke methods, deduped by name across all objects: a
-        // single native import shared by every object that references it.
-        var pinvokeByName = new Dictionary<string, int>();
+        // Synthesized P/Invoke methods, deduped by (native name + concrete
+        // signature blob) across all objects. A native variadic callee (e.g.
+        // snprintf) produces one MemberRef per call-site argument shape — all
+        // named the same but with DIFFERENT signature blobs (e.g. `"%d"` → int
+        // vs `"%s"` → char*). Each distinct concrete signature must get its OWN
+        // pinvokeimpl MethodDef (all bound to the same native entry name), and
+        // each original MemberRef token is redirected to the stub matching ITS
+        // signature. Deduping by bare name alone would bind every call site to
+        // one stub with one signature → arg-marshalling mismatch.
+        //
+        // Key: (name, hex-encoded signature blob bytes). The blob bytes are the
+        // pre-rewrite call-site signature; two MemberRefs that round-trip to the
+        // same emitted pinvokeimpl signature always share identical source bytes
+        // (the rewrite is a deterministic per-object token remap), so identical
+        // (name, sig) reuse one stub while distinct signatures fork.
+        var pinvokeByNameSig = new Dictionary<(string Name, string Sig), int>();
 
         foreach (var of in objs)
         {
@@ -66,12 +79,16 @@ public static class SymbolResolver
                     continue;
                 }
 
-                // Native import: synthesize (or reuse) a P/Invoke stub.
-                if (!pinvokeByName.TryGetValue(name, out int pinvokeToken))
+                // Native import: synthesize (or reuse) a P/Invoke stub keyed on
+                // this MemberRef's OWN concrete signature, so distinct vararg
+                // shapes get distinct stubs.
+                byte[] sigBytes = md.GetBlobBytes(mr.Signature);
+                var key = (name, Convert.ToHexString(sigBytes));
+                if (!pinvokeByNameSig.TryGetValue(key, out int pinvokeToken))
                 {
                     var sigReader = md.GetBlobReader(mr.Signature);
                     pinvokeToken = SynthesizePInvoke(merger, of, name, sigReader, libs);
-                    pinvokeByName[name] = pinvokeToken;
+                    pinvokeByNameSig[key] = pinvokeToken;
                 }
                 map.RecordExternal(originalToken, pinvokeToken);
             }

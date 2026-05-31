@@ -216,4 +216,94 @@ int main(void){ return sum(3, 20, 22, 13); }
         var (exit, outp) = WslRunner.Run(LinkSource(src), WslRunner.NetCoreRuntimeConfig);
         Assert.True(exit == 55, $"exit {exit}: {outp}");
     }
+
+    [Fact]
+    public void Native_snprintf_int_runs_on_linux()
+    {
+        if (!WslRunner.Available()) return;
+        string src = @"
+typedef unsigned long size_t;
+int __cdecl snprintf(char*, size_t, const char*, ...);
+int __cdecl strcmp(const char*, const char*);
+int main(void){ char b[16]; snprintf(b, 16, ""%d"", 42); return strcmp(b, ""42"")==0 ? 55 : 1; }
+";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        byte[] pe = ChibilLink.LinkPipeline.LinkToBytes(new[]{of}, new System.Collections.Generic.List<string>{ "c" });
+        var (exit, outp) = WslRunner.Run(pe, WslRunner.NetCoreRuntimeConfig);
+        Assert.True(exit == 55, $"exit {exit}: {outp}");
+    }
+
+    [Fact]
+    public void Native_snprintf_two_signatures_on_linux()
+    {
+        if (!WslRunner.Available()) return;
+        string src = @"
+typedef unsigned long size_t;
+int __cdecl snprintf(char*, size_t, const char*, ...);
+int __cdecl strcmp(const char*, const char*);
+int main(void){
+  char a[16], b[16];
+  snprintf(a, 16, ""%d"", 42);       /* 4th param int */
+  snprintf(b, 16, ""%s"", ""hi"");   /* 4th param char* */
+  return (strcmp(a,""42"")==0 && strcmp(b,""hi"")==0) ? 55 : 1;
+}
+";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        byte[] pe = ChibilLink.LinkPipeline.LinkToBytes(new[]{of}, new System.Collections.Generic.List<string>{ "c" });
+        var (exit, outp) = WslRunner.Run(pe, WslRunner.NetCoreRuntimeConfig);
+        Assert.True(exit == 55, $"exit {exit}: {outp}");
+    }
+
+    [Fact]
+    public void Native_snprintf_int_runs_via_dotnet_host_windows()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        string src = @"
+typedef unsigned long size_t;
+int __cdecl _snprintf(char*, size_t, const char*, ...);
+int __cdecl strcmp(const char*, const char*);
+int main(void){ char b[16]; _snprintf(b, 16, ""%d"", 42); return strcmp(b, ""42"")==0 ? 55 : 1; }
+";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        byte[] pe = ChibilLink.LinkPipeline.LinkToBytes(new[]{of}, new System.Collections.Generic.List<string>{ "msvcrt.dll" });
+        int exit = DotnetHostRunner.RunPeViaDotnetHost(pe, out string outp);
+        Assert.True(exit == 55, $"exit {exit}: {outp}");
+    }
+
+    // Per spec §7, native FLOAT varargs do NOT work through a monomorphized
+    // concrete cdecl P/Invoke, on EITHER platform — and this is fundamental, not
+    // a missing AL byte:
+    //   • A C variadic callee reads a float/double vararg per the *variadic* ABI.
+    //     On SysV x64 the caller must set AL = number of vector registers used;
+    //     on Win64 a float vararg must be duplicated into BOTH the XMM register
+    //     AND its shadow GP register.
+    //   • Our call site lowers to a FIXED (non-variadic) cdecl signature whose 4th
+    //     param is `double` (R8). The CLR marshals that via the managed cdecl ABI:
+    //     XMM only, AL unset, no GP shadow. The native libc/msvcrt then reads the
+    //     wrong register and formats garbage.
+    // Empirically verified on Windows: msvcrt `_snprintf("%.1f", 3.5)` writes
+    // "0.0" (the double never reaches the variadic read site). Integer / pointer
+    // / string varargs are unaffected and pass on both platforms (see the int and
+    // two-signature tests above). Skipped rather than asserted because the
+    // monomorphized-cdecl approach cannot satisfy the variadic FP register
+    // contract without a real variadic-call thunk.
+    [Fact(Skip = "Native float varargs need the variadic FP-register contract (SysV AL / Win64 XMM+GP shadow) that a concrete cdecl P/Invoke cannot express; msvcrt _snprintf(\"%.1f\",3.5) observed writing \"0.0\". Integer/ptr/string varargs work — see the int and two-signature tests.")]
+    public void Native_snprintf_float_caveat_documented()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        string src = @"
+typedef unsigned long size_t;
+int __cdecl _snprintf(char*, size_t, const char*, ...);
+int __cdecl strcmp(const char*, const char*);
+int main(void){ char b[32]; _snprintf(b, 32, ""%.1f"", 3.5); return strcmp(b, ""3.5"")==0 ? 55 : 1; }
+";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        byte[] pe = ChibilLink.LinkPipeline.LinkToBytes(new[]{of}, new System.Collections.Generic.List<string>{ "msvcrt.dll" });
+        int exit = DotnetHostRunner.RunPeViaDotnetHost(pe, out string outp);
+        Assert.True(exit == 55, $"Windows float vararg expected 55, got {exit}: {outp}");
+    }
 }
