@@ -44,6 +44,14 @@ public sealed class MetadataMerger
     // Dedup AssemblyRefs by name -> output AssemblyReferenceHandle.
     private readonly Dictionary<string, AssemblyReferenceHandle> _assemblyRefByName = new();
 
+    // Dedup TypeRefs across objects, keyed by (mapped resolution-scope token,
+    // namespace, name) -> output TypeReferenceHandle. Two objects that reference
+    // the same corlib type must share one output row.
+    private readonly Dictionary<(int scope, string ns, string name), TypeReferenceHandle> _typeRefByKey = new();
+
+    // Dedup ModuleRefs (P/Invoke native libraries) by name.
+    private readonly Dictionary<string, EntityHandle> _moduleRefByName = new();
+
     /// <summary>The core-library AssemblyRef actually emitted (mscorlib facade
     /// kept verbatim, or remapped). Recorded for diagnostics.</summary>
     public string CoreLibReferenceUsed { get; private set; } = "mscorlib (verbatim)";
@@ -53,10 +61,24 @@ public sealed class MetadataMerger
     // ReserveEntryRow() as the final entry (with Obj == null).
     public sealed class MethodSlot
     {
-        public ObjectFile Obj;          // null => synthesized entry
-        public ObjMethod Method;        // null => synthesized entry
+        public ObjectFile Obj;          // null => synthesized entry / P/Invoke
+        public ObjMethod Method;        // null => synthesized entry / P/Invoke
         public int PredictedRow;        // 1-based MethodDef row
+        public PInvokeStub PInvoke;     // non-null => synthesized native import (no body)
     }
+
+    /// <summary>A synthesized P/Invoke MethodDef reserved during prediction and
+    /// populated (AddMethodDefinition + AddMethodImport) by the writer in plan
+    /// order. Has no body, so it is excluded from body-stream emission.</summary>
+    public sealed class PInvokeStub
+    {
+        public string Name;
+        public BlobHandle SignatureBlob;     // already rewritten into the shared heap
+        public EntityHandle ModuleRef;       // native library ModuleRef
+    }
+
+    // P/Invoke stubs reserved during resolution, in row order. Appended to Plan.
+    public readonly List<MethodSlot> PInvokeSlots = new();
 
     public readonly List<MethodSlot> Plan = new();
 
@@ -65,6 +87,40 @@ public sealed class MetadataMerger
 
     // Running output-row counter for predicted MethodDef rows.
     private int _outMethodRow;
+
+    // ── Defined data fields (HasFieldRVA globals / string literals) ───────────
+    // A value-type TypeDef referenced by a copied field signature (e.g.
+    // $ArrayType$..., a sized array value type). Copied AFTER <Module> (row 1).
+    public sealed class CopiedTypeDef
+    {
+        public string Name;
+        public string Namespace;
+        public EntityHandle BaseType;   // mapped base (System.ValueType TypeRef)
+        public int LayoutSize;          // ClassLayout size (>=0 => emit)
+        public int LayoutPack;          // ClassLayout packing
+        public int PredictedRow;        // 1-based output TypeDef row (>=2)
+    }
+
+    // A field with RVA-mapped initial data (string literal / initialized global).
+    public sealed class CopiedField
+    {
+        public ObjectFile Obj;
+        public FieldAttributes Attributes;
+        public string Name;
+        public BlobHandle SignatureBlob;   // rewritten into shared heap
+        public byte[] Data;                // initial bytes for the mapped-field-data blob
+        public int Alignment;
+        public int PredictedRow;           // 1-based output Field row
+    }
+
+    public readonly List<CopiedTypeDef> CopiedTypeDefs = new();
+    public readonly List<CopiedField> CopiedFields = new();
+
+    // Dedup value-type TypeDefs by (name, size) across objects.
+    private readonly Dictionary<(string name, int size), CopiedTypeDef> _typeDefByKey = new();
+
+    private int _outTypeDefRow = ModuleTypeDefRow;   // row 1 = <Module>
+    private int _outFieldRow;
 
     public MetadataMerger(IReadOnlyList<ObjectFile> objs)
     {
@@ -111,6 +167,12 @@ public sealed class MetadataMerger
         foreach (var of in _objs)
             CopyStandaloneSigs(of);
 
+        // ── Value-type TypeDefs + HasFieldRVA fields (string literals / globals)
+        //    Predicted here so field/IL signatures referencing them remap, and
+        //    field-data RVAs can be assigned by the writer.
+        foreach (var of in _objs)
+            CopyDataFieldsAndTypeDefs(of);
+
         // ── Predict MethodDef rows in a fixed order: per object, methods in the
         //    order they appear in ObjectFile.Methods. Entry method appended last
         //    via ReserveEntryRow().
@@ -124,6 +186,33 @@ public sealed class MetadataMerger
                 Plan.Add(new MethodSlot { Obj = of, Method = m, PredictedRow = _outMethodRow });
             }
         }
+    }
+
+    /// <summary>Expose the shared builder under the spec's short name <c>Md</c>.</summary>
+    public MetadataBuilder Md => Builder;
+
+    /// <summary>Dedup ModuleRef rows by native-library name. Returns the
+    /// ModuleReference handle for use as a MethodImport scope.</summary>
+    public EntityHandle GetOrAddModuleRef(string name)
+    {
+        if (_moduleRefByName.TryGetValue(name, out var existing))
+            return existing;
+        var h = Builder.AddModuleReference(Builder.GetOrAddString(name));
+        _moduleRefByName[name] = h;
+        return h;
+    }
+
+    /// <summary>Reserve (predict) the MethodDef row for a synthesized P/Invoke
+    /// stub and record it in the Plan. The actual AddMethodDefinition +
+    /// AddMethodImport are performed by the writer in plan order so the body
+    /// offsets of bodied methods stay consistent. Returns the reserved token.</summary>
+    public int ReservePInvokeRow(PInvokeStub stub)
+    {
+        _outMethodRow++;
+        var slot = new MethodSlot { PredictedRow = _outMethodRow, PInvoke = stub };
+        Plan.Add(slot);
+        PInvokeSlots.Add(slot);
+        return MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(_outMethodRow));
     }
 
     /// <summary>Reserve the MethodDef row for the synthesized entry method.
@@ -188,10 +277,21 @@ public sealed class MetadataMerger
             EntityHandle outScope = tr.ResolutionScope.IsNil
                 ? default
                 : map.MapEntity(tr.ResolutionScope);
+            string ns = md.GetString(tr.Namespace);
+            string name = md.GetString(tr.Name);
+
+            var key = (outScope.IsNil ? 0 : MetadataTokens.GetToken(outScope), ns, name);
+            if (_typeRefByKey.TryGetValue(key, out var existing))
+            {
+                map.SetTypeRef(inH, MetadataTokens.GetRowNumber(existing));
+                continue;
+            }
+
             var outH = Builder.AddTypeReference(
                 outScope,
-                Builder.GetOrAddString(md.GetString(tr.Namespace)),
-                Builder.GetOrAddString(md.GetString(tr.Name)));
+                Builder.GetOrAddString(ns),
+                Builder.GetOrAddString(name));
+            _typeRefByKey[key] = outH;
             map.SetTypeRef(inH, MetadataTokens.GetRowNumber(outH));
         }
     }
@@ -210,6 +310,188 @@ public sealed class MetadataMerger
             var outH = Builder.AddStandaloneSignature(Builder.GetOrAddBlob(sigBuilder));
             map.SetStandaloneSig(inH, MetadataTokens.GetRowNumber(outH));
         }
+    }
+
+    /// <summary>
+    /// Copy every HasFieldRVA field (string literals / initialized globals)
+    /// defined in <paramref name="of"/>, along with the value-type TypeDefs its
+    /// signature references, predicting their output rows and capturing the
+    /// initial data bytes for the mapped-field-data blob the writer emits.
+    /// Only fields whose data lives in a real section are copied (a BSS/common
+    /// global with no initializer is not a data symbol and is out of scope).
+    /// </summary>
+    private void CopyDataFieldsAndTypeDefs(ObjectFile of)
+    {
+        var md = of.Md;
+        var map = _maps[of];
+        var dataLoc = of.Coff.BuildFieldDataLocationMap();
+
+        for (int r = 1; r <= md.GetTableRowCount(TableIndex.Field); r++)
+        {
+            var fh = MetadataTokens.FieldDefinitionHandle(r);
+            var fd = md.GetFieldDefinition(fh);
+            if ((fd.Attributes & FieldAttributes.HasFieldRVA) == 0) continue;
+
+            int token = MetadataTokens.GetToken(fh);
+            if (!dataLoc.TryGetValue(token, out var loc) || loc.SectionNumber <= 0)
+                continue; // uninitialized (BSS/common) — no data to copy.
+
+            // Ensure the value-type TypeDef(s) referenced by the field signature
+            // are copied first, so the rewritten signature resolves.
+            EnsureFieldTypeDefs(of, fd);
+
+            int size = GetFieldDataSize(md, fd);
+            int align = GetFieldDataAlignment(md, fd, size);
+
+            var sec = of.Coff.GetSection(loc.SectionNumber);
+            byte[] secData = of.Coff.GetPatchedSectionData(sec);
+            byte[] data = new byte[size];
+            Array.Copy(secData, loc.Offset, data, 0, Math.Min(size, secData.Length - loc.Offset));
+
+            var sigReader = md.GetBlobReader(fd.Signature);
+            var sigB = new BlobBuilder();
+            EcmaSignatureRewriter.RewriteFieldSignature(sigReader, map, sigB);
+
+            _outFieldRow++;
+            map.SetField(fh, _outFieldRow);
+            CopiedFields.Add(new CopiedField
+            {
+                Obj = of,
+                Attributes = fd.Attributes,
+                Name = md.GetString(fd.Name),
+                SignatureBlob = Builder.GetOrAddBlob(sigB),
+                Data = data,
+                Alignment = align,
+                PredictedRow = _outFieldRow,
+            });
+        }
+    }
+
+    /// <summary>Copy (deduped) the value-type TypeDef(s) the field signature
+    /// references, mapping their input handle to the predicted output row.</summary>
+    private void EnsureFieldTypeDefs(ObjectFile of, FieldDefinition fd)
+    {
+        var md = of.Md;
+        var sigReader = md.GetBlobReader(fd.Signature);
+        sigReader.ReadSignatureHeader(); // FIELD
+    again:
+        SignatureTypeCode tc = sigReader.ReadSignatureTypeCode();
+        if (tc == SignatureTypeCode.OptionalModifier || tc == SignatureTypeCode.RequiredModifier)
+        {
+            sigReader.ReadTypeHandle();
+            goto again;
+        }
+        if (tc != SignatureTypeCode.TypeHandle) return; // primitive field, no TypeDef.
+
+        sigReader.Offset -= 1;
+        sigReader.ReadByte(); // raw 0x11/0x12 tag
+        EntityHandle th = sigReader.ReadTypeHandle();
+        if (th.Kind != HandleKind.TypeDefinition) return; // TypeRef/Spec already handled.
+
+        EnsureTypeDefCopied(of, (TypeDefinitionHandle)th);
+    }
+
+    private void EnsureTypeDefCopied(ObjectFile of, TypeDefinitionHandle inH)
+    {
+        var md = of.Md;
+        var map = _maps[of];
+
+        if (MetadataTokens.GetRowNumber(map.MapTypeDef(inH)) != 0) return; // already mapped
+
+        var td = md.GetTypeDefinition(inH);
+        string name = md.GetString(td.Name);
+        string ns = md.GetString(td.Namespace);
+        var layout = td.GetLayout();
+        int size = layout.IsDefault ? -1 : layout.Size;
+
+        if (_typeDefByKey.TryGetValue((name, size), out var existing))
+        {
+            map.SetTypeDef(inH, existing.PredictedRow);
+            return;
+        }
+
+        EntityHandle baseType = td.BaseType.IsNil ? default : map.MapEntity(td.BaseType);
+
+        _outTypeDefRow++;
+        var copied = new CopiedTypeDef
+        {
+            Name = name,
+            Namespace = ns,
+            BaseType = baseType,
+            LayoutSize = size,
+            LayoutPack = layout.IsDefault ? 0 : layout.PackingSize,
+            PredictedRow = _outTypeDefRow,
+        };
+        _typeDefByKey[(name, size)] = copied;
+        CopiedTypeDefs.Add(copied);
+        map.SetTypeDef(inH, copied.PredictedRow);
+    }
+
+    private static int GetFieldDataSize(MetadataReader md, FieldDefinition fd)
+    {
+        var sr = md.GetBlobReader(fd.Signature);
+        sr.ReadSignatureHeader();
+    again:
+        SignatureTypeCode tc = sr.ReadSignatureTypeCode();
+        switch (tc)
+        {
+            case SignatureTypeCode.OptionalModifier:
+            case SignatureTypeCode.RequiredModifier:
+                sr.ReadTypeHandle(); goto again;
+            case SignatureTypeCode.Boolean:
+            case SignatureTypeCode.SByte:
+            case SignatureTypeCode.Byte: return 1;
+            case SignatureTypeCode.Char:
+            case SignatureTypeCode.Int16:
+            case SignatureTypeCode.UInt16: return 2;
+            case SignatureTypeCode.Int32:
+            case SignatureTypeCode.UInt32:
+            case SignatureTypeCode.Single: return 4;
+            case SignatureTypeCode.Int64:
+            case SignatureTypeCode.UInt64:
+            case SignatureTypeCode.Double: return 8;
+            case SignatureTypeCode.IntPtr:
+            case SignatureTypeCode.UIntPtr: return 8; // CoreCLR targets are 64-bit here
+            case SignatureTypeCode.TypeHandle:
+                {
+                    sr.Offset -= 1; sr.ReadByte();
+                    EntityHandle th = sr.ReadTypeHandle();
+                    if (th.Kind != HandleKind.TypeDefinition)
+                        throw new LinkException($"field '{md.GetString(fd.Name)}' RVA data references a non-TypeDef value type.");
+                    var td = md.GetTypeDefinition((TypeDefinitionHandle)th);
+                    var lay = td.GetLayout();
+                    if (lay.IsDefault || lay.Size == 0)
+                        throw new LinkException($"field '{md.GetString(fd.Name)}' value type '{md.GetString(td.Name)}' has no ClassLayout size.");
+                    return lay.Size;
+                }
+            default:
+                throw new LinkException($"cannot size FieldRVA data for field '{md.GetString(fd.Name)}' (sig 0x{(byte)tc:X2}).");
+        }
+    }
+
+    private static int GetFieldDataAlignment(MetadataReader md, FieldDefinition fd, int size)
+    {
+        var sr = md.GetBlobReader(fd.Signature);
+        sr.ReadSignatureHeader();
+    again:
+        SignatureTypeCode tc = sr.ReadSignatureTypeCode();
+        if (tc == SignatureTypeCode.OptionalModifier || tc == SignatureTypeCode.RequiredModifier)
+        {
+            sr.ReadTypeHandle(); goto again;
+        }
+        if (tc == SignatureTypeCode.TypeHandle)
+        {
+            sr.Offset -= 1; sr.ReadByte();
+            EntityHandle th = sr.ReadTypeHandle();
+            if (th.Kind == HandleKind.TypeDefinition)
+            {
+                var td = md.GetTypeDefinition((TypeDefinitionHandle)th);
+                var lay = td.GetLayout();
+                int pack = lay.IsDefault ? 0 : lay.PackingSize;
+                if (pack > 0) return pack;
+            }
+        }
+        return Math.Min(size, 8);
     }
 
     /// <summary>Rewrite a method's signature blob into the shared heap.</summary>

@@ -44,6 +44,13 @@ public sealed class TokenMap
     // input MethodDef row → output MemberRef row.
     private readonly Dictionary<int, int> _methodDefAsMemberRef = new();
 
+    // External symbol resolution overrides (chibil-link cross-object / P/Invoke):
+    // input ORIGINAL token (any table, e.g. a <Module> MemberRef) → resolved
+    // output token. Consulted FIRST by MapToken so an unmapped external reference
+    // (which would otherwise have no row) redirects to the defining method's
+    // merged MethodDef or to a synthesized P/Invoke MethodDef.
+    private readonly Dictionary<int, int> _externalOverride = new();
+
     public TokenMap(MetadataReader reader, MetadataBuilder builder)
     {
         _reader = reader;
@@ -170,9 +177,21 @@ public sealed class TokenMap
     public int MapToken(int inputToken)
     {
         if (inputToken == 0) return 0;
+        if (_externalOverride.TryGetValue(inputToken, out int overridden))
+            return overridden;
         EntityHandle h = MetadataTokens.EntityHandle(inputToken);
         return MetadataTokens.GetToken(MapEntity(h));
     }
+
+    /// <summary>
+    /// Records an external-symbol resolution: maps an input ORIGINAL token
+    /// (e.g. a <c>&lt;Module&gt;</c> MemberRef referencing a function defined in
+    /// another object, or an unresolved native import) to a resolved output
+    /// token. Consulted FIRST by <see cref="MapToken"/>. Used only by the
+    /// chibil-link symbol resolver; leaves all other consumers unaffected.
+    /// </summary>
+    public void RecordExternal(int originalToken, int mergedTarget)
+        => _externalOverride[originalToken] = mergedTarget;
 
     // ─── User strings ────────────────────────────────────────────────────────
 

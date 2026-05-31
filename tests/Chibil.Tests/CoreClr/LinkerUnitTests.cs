@@ -66,4 +66,31 @@ public class LinkerUnitTests
         object result = asm.EntryPoint.Invoke(null, new object[] { new string[0] });
         Assert.Equal(55, (int)result);
     }
+
+    [Fact]
+    public void Linked_cross_object_call_runs_in_process()
+    {
+        byte[] a = TestCompiler.CompileToObj("int add(int,int); int main(){return add(50,5);}", Chibil.TargetProfile.CoreClr, "main.c");
+        byte[] b = TestCompiler.CompileToObj("int add(int x,int y){return x+y;}", Chibil.TargetProfile.CoreClr, "add.c");
+        var ofa = ObjectFile.Load(a, "main.obj");
+        var ofb = ObjectFile.Load(b, "add.obj");
+        byte[] pe = ChibilLink.LinkPipeline.LinkToBytes(new[] { ofa, ofb }, new System.Collections.Generic.List<string>());
+        var asm = System.Reflection.Assembly.Load(pe);
+        object r = asm.EntryPoint.Invoke(null, new object[] { new string[0] });
+        Assert.Equal(55, (int)r);
+    }
+
+    [Fact]
+    public void Linked_pinvoke_puts_runs_via_dotnet_host()
+    {
+        Assert.True(DotnetHostRunner.DotnetAvailable(), "dotnet host not available on PATH");
+        byte[] obj = TestCompiler.CompileToObj(
+            "int puts(const char*); int main(){ puts(\"hello from chibil pinvoke\"); return 0; }",
+            Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        byte[] pe = ChibilLink.LinkPipeline.LinkToBytes(new[] { of }, new System.Collections.Generic.List<string> { "msvcrt.dll" });
+        int exit = DotnetHostRunner.RunPeViaDotnetHost(pe, out string stdout);
+        Assert.True(exit == 0, $"expected exit 0, got {exit}. Output:\n{stdout}");
+        Assert.Contains("hello from chibil pinvoke", stdout);
+    }
 }

@@ -50,6 +50,12 @@ public sealed class PeWriter
         var merger = new MetadataMerger(_objs);
         merger.MergeAndPredict();
 
+        // Resolve cross-object references and synthesize native P/Invoke stubs.
+        // Runs after defined-method prediction (so the export table is complete)
+        // and before the entry row, reserving any P/Invoke MethodDef rows in the
+        // plan so the row-prediction assertions below still hold.
+        SymbolResolver.Resolve(merger, _objs, _libs);
+
         // Reserve the entry method's row (last in the plan) so its token is known.
         var (entryRow, entryHandle) = merger.ReserveEntryRow();
 
@@ -69,6 +75,15 @@ public sealed class PeWriter
         for (int i = 0; i < merger.Plan.Count; i++)
         {
             var slot = merger.Plan[i];
+
+            if (slot.PInvoke != null)
+            {
+                // P/Invoke stubs have NO body; they are not encoded into the
+                // method-body stream and carry a -1 body offset on their row.
+                bodyOffsets[i] = -1;
+                continue;
+            }
+
             byte[] il;
             int maxStack;
             StandaloneSignatureHandle localSig;
@@ -94,7 +109,29 @@ public sealed class PeWriter
             bodyOffsets[i] = offset;
         }
 
-        // ── Step 5a: <Module> TypeDef (row 1), owns all methods starting at 1 ──
+        // ── Step 5a0: data fields (string literals / initialized globals) ─────
+        // Copy each HasFieldRVA field's bytes into the mapped-field-data blob and
+        // emit a Field row + FieldRVA pointing at its offset. All such fields are
+        // owned by <Module>, so they occupy Field rows 1..N (matching the
+        // merger's predictions). The blob is handed to the PE builder, which
+        // places it in a data section and rewrites the FieldRVA placeholders.
+        var mappedFieldData = new BlobBuilder();
+        foreach (var cf in merger.CopiedFields)
+        {
+            int align = cf.Alignment <= 0 ? 1 : cf.Alignment;
+            while ((mappedFieldData.Count % align) != 0) mappedFieldData.WriteByte(0);
+            int dataOffset = mappedFieldData.Count;
+            mappedFieldData.WriteBytes(cf.Data);
+
+            var fh = mdBuilder.AddFieldDefinition(
+                cf.Attributes,
+                mdBuilder.GetOrAddString(cf.Name),
+                cf.SignatureBlob);
+            AssertRow(cf.PredictedRow, MetadataTokens.GetRowNumber(fh), $"Field '{cf.Name}'");
+            mdBuilder.AddFieldRelativeVirtualAddress(fh, dataOffset);
+        }
+
+        // ── Step 5a: <Module> TypeDef (row 1), owns all fields + methods ──────
         var moduleTypeDef = mdBuilder.AddTypeDefinition(
             default,
             default,
@@ -104,10 +141,54 @@ public sealed class PeWriter
             MetadataTokens.MethodDefinitionHandle(1));
         AssertRow(MetadataMerger.ModuleTypeDefRow, MetadataTokens.GetRowNumber(moduleTypeDef), "TypeDef <Module>");
 
+        // ── Step 5a1: value-type TypeDefs referenced by field signatures ──────
+        // These own no fields/methods, so their lists point past the end of the
+        // Field/MethodDef tables (1-based, exclusive upper bound = count + 1).
+        int totalFields = merger.CopiedFields.Count;
+        int totalMethods = merger.Plan.Count;
+        foreach (var ct in merger.CopiedTypeDefs)
+        {
+            var tdH = mdBuilder.AddTypeDefinition(
+                System.Reflection.TypeAttributes.SequentialLayout
+                    | System.Reflection.TypeAttributes.Sealed
+                    | System.Reflection.TypeAttributes.AnsiClass,
+                ct.Namespace.Length == 0 ? default : mdBuilder.GetOrAddString(ct.Namespace),
+                mdBuilder.GetOrAddString(ct.Name),
+                ct.BaseType,
+                MetadataTokens.FieldDefinitionHandle(totalFields + 1),
+                MetadataTokens.MethodDefinitionHandle(totalMethods + 1));
+            AssertRow(ct.PredictedRow, MetadataTokens.GetRowNumber(tdH), $"TypeDef '{ct.Name}'");
+            if (ct.LayoutSize >= 0)
+                mdBuilder.AddTypeLayout(tdH, (ushort)ct.LayoutPack, (uint)ct.LayoutSize);
+        }
+
         // ── Step 4: populate MethodDef rows in the predicted order ────────────
         for (int i = 0; i < merger.Plan.Count; i++)
         {
             var slot = merger.Plan[i];
+
+            if (slot.PInvoke != null)
+            {
+                var stub = slot.PInvoke;
+                var pinvokeH = mdBuilder.AddMethodDefinition(
+                    MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.PinvokeImpl,
+                    MethodImplAttributes.PreserveSig,
+                    mdBuilder.GetOrAddString(stub.Name),
+                    stub.SignatureBlob,
+                    bodyOffset: -1,                              // no body
+                    parameterList: MetadataTokens.ParameterHandle(1));
+                mdBuilder.AddMethodImport(
+                    pinvokeH,
+                    MethodImportAttributes.CallingConventionCDecl
+                        | MethodImportAttributes.ExactSpelling
+                        | MethodImportAttributes.CharSetAnsi,
+                    mdBuilder.GetOrAddString(stub.Name),
+                    (ModuleReferenceHandle)stub.ModuleRef);
+                AssertRow(slot.PredictedRow, MetadataTokens.GetRowNumber(pinvokeH),
+                    $"P/Invoke MethodDef '{stub.Name}'");
+                continue;
+            }
+
             BlobHandle sig;
             StringHandle name;
             MethodAttributes attrs;
@@ -169,6 +250,7 @@ public sealed class PeWriter
             peHeader,
             rootBuilder,
             ilBuilder,
+            mappedFieldData: mappedFieldData,
             entryPoint: entryHandle,
             flags: CorFlags.ILOnly);
 
