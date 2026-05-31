@@ -163,14 +163,20 @@ public class AuditBugTests : ChibiTestBase
     }
 
     [Fact]
-    public void VariadicDefError()
+    public void VariadicDefNowCompiles()
     {
-        CompileExpectingError("""
+        // Previously chibil rejected variadic function definitions ("variadic function
+        // definitions are not supported in MSIL mode"). They are now supported, lowered
+        // via the va-buffer ABI (hidden trailing pointer param). Compiling must succeed;
+        // end-to-end behaviour is covered by VarargsTests on the CoreCLR target.
+        // Compile() throws ChibiException on failure; reaching here means it compiled.
+        Compile("""
             int my_sum(int n, ...) {
-                return n;
+                __builtin_va_list ap; __builtin_va_start(ap, n);
+                int s = 0; for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int);
+                __builtin_va_end(ap); return s;
             }
             int main() { return 0; }
-            """)
-        .AssertErrorContains("variadic");
+            """);
     }
 }
