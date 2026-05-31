@@ -354,8 +354,7 @@ public class Driver
             // takes bare object paths plus the collected lib names.
             var objs = inputs.Where(i => !i.StartsWith("-l") && !i.StartsWith("-Wl,")).ToList();
             var cmd = BuildChibilLinkCommand(objs, output);
-            if (_optHashHashHash) Console.Error.WriteLine(string.Join(" ", cmd));
-            RunSubprocess(cmd);
+            RunSubprocess(cmd);   // RunSubprocess handles -### echoing uniformly
             return;
         }
 
