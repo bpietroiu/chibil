@@ -70,6 +70,11 @@ public class CodeGen
     // Bare-name NEP COFF symbols (func name → COFF symbol for the NEP thunk alias)
     private readonly Dictionary<string, CoffSymbolHandle> _nepBareNameSymbols = new();
 
+    // Method-body offsets in .text$mn (func → offset), captured during IL emission.
+    // Used in CoreCLR target mode to emit plain bare-name function aliases without
+    // the IJW NEP thunk.
+    private readonly Dictionary<Obj, int> _methodBodyOffsets = new();
+
     // Anonymous global counter and TU hash
     private int _anonGlobalCounter;
     private string _tuHash;
@@ -878,7 +883,8 @@ public class CodeGen
         RegisterFunctions(prog);
 
         // Phase 3b: Pre-register __unep@ fields for address-taken cdecl functions
-        RegisterUnepFields(prog);
+        // (IJW-only — pure MSIL objects have no __unep@ machinery).
+        if (_options.Target == TargetProfile.Ijw) RegisterUnepFields(prog);
 
         // Phase 4: Register global fields
         RegisterGlobalFields(prog);
@@ -1468,10 +1474,11 @@ public class CodeGen
         var methodDef = _methodDefs[fn];
         string mangledName = MangleFunctionName(fn);
 
-        _bodyEncoder.AddMethodBody(methodDef, mangledName, _enc,
+        int bodyOffset = _bodyEncoder.AddMethodBody(methodDef, mangledName, _enc,
             maxStack: _maxStack, localVariablesSignature: localsSig, attributes: MethodBodyAttributes.InitLocals,
             debugName: fn.Name,
             localSlots: localSlotList.Count > 0 ? localSlotList.ToArray() : null);
+        _methodBodyOffsets[fn] = bodyOffset;
 
         _currentFn = null;
     }
@@ -2733,6 +2740,31 @@ public class CodeGen
     }
 
     /// <summary>
+    /// CoreCLR target mode: emit a plain bare-name external COFF symbol for each
+    /// live function definition, aliasing its managed method body in <c>.text$mn</c>.
+    /// This replaces the IJW <see cref="EmitNepMachinery"/> path — no <c>.nep</c>
+    /// thunk, no <c>__mep@</c> slot, no <c>.rdata$ilfixup</c> entry — while still
+    /// giving other translation units a bare name (e.g. <c>fib</c> / <c>_fib</c>)
+    /// to resolve C functions against.
+    /// </summary>
+    private void EmitPureMsilFunctionSymbols(Obj prog)
+    {
+        for (Obj fn = prog; fn != null; fn = fn.Next)
+        {
+            if (!fn.IsFunction || !fn.IsDefinition || !fn.IsLive) continue;
+            if (!_methodBodyOffsets.TryGetValue(fn, out int bodyOffset)) continue;
+
+            // Static functions use TU-hash-scoped bare names to avoid cross-TU collisions
+            string bareName = fn.IsStatic ? $"{fn.Name}_?A0x{_tuHash}" : fn.Name;
+            var bareSym = _symtab.AddExternalDataSymbol(
+                SymPrefix + bareName, LogicalSection.Text, bodyOffset);
+            _nepBareNameSymbols[bareName] = bareSym;
+            if (fn.IsStatic && !_nepBareNameSymbols.ContainsKey(fn.Name))
+                _nepBareNameSymbols[fn.Name] = bareSym;
+        }
+    }
+
+    /// <summary>
     /// Emit NEP machinery for a single method: __mep@ slot, thunk, bare-name alias, ilfixup.
     /// </summary>
     private CoffSymbolHandle EmitNepForMethod(int methodToken, string bareName, string mangledSuffix)
@@ -2831,22 +2863,25 @@ public class CodeGen
             }
         }
 
-        // Pre-allocate __unep@ data slots
-        foreach (var (funcName, unepField) in _unepFields)
+        // Pre-allocate __unep@ data slots (IJW-only).
+        if (_options.Target == TargetProfile.Ijw)
         {
-            Obj fn = null;
-            for (Obj f = prog; f != null; f = f.Next)
-                if (f.IsFunction && f.Name == funcName) { fn = f; break; }
-            if (fn == null) continue;
+            foreach (var (funcName, unepField) in _unepFields)
+            {
+                Obj fn = null;
+                for (Obj f = prog; f != null; f = f.Next)
+                    if (f.IsFunction && f.Name == funcName) { fn = f; break; }
+                if (fn == null) continue;
 
-            string mangledName = MangleFunctionName(fn);
-            string unepName = $"__unep@{mangledName}";
+                string mangledName = MangleFunctionName(fn);
+                string unepName = $"__unep@{mangledName}";
 
-            int slotOffset = _dataStream.Count;
-            for (int i = 0; i < PtrSize; i++) _dataStream.WriteByte(0);
-            _unepSlotOffsets[funcName] = slotOffset;
+                int slotOffset = _dataStream.Count;
+                for (int i = 0; i < PtrSize; i++) _dataStream.WriteByte(0);
+                _unepSlotOffsets[funcName] = slotOffset;
 
-            _symtab.AddDataClrToken(unepName, unepField, LogicalSection.Data, slotOffset, out _);
+                _symtab.AddDataClrToken(unepName, unepField, LogicalSection.Data, slotOffset, out _);
+            }
         }
     }
 
@@ -3017,6 +3052,11 @@ public class CodeGen
         byte[] pathHash = SHA256.HashData(Encoding.UTF8.GetBytes(sourceFile));
         _tuHash = BitConverter.ToString(pathHash, 0, 4).Replace("-", "").ToLowerInvariant();
 
+        // In CoreCLR target mode, skip the /clr mixed-mode IJW machinery
+        // (.nep section, .rdata$ilfixup, __unep@/__mep@ symbols, the
+        // __CxxPureMSILEntry IJW shim body). The default Ijw path is unchanged.
+        bool ijw = _options.Target == TargetProfile.Ijw;
+
         // Scan for address-taken functions before metadata registration
         ScanAddressTaken(prog);
 
@@ -3029,11 +3069,13 @@ public class CodeGen
         // Pass 2: IL Emission
         EmitFunctions(prog);
 
-        // Post-pass: __CxxPureMSILEntry
-        EmitCxxPureMSILEntry();
+        // Post-pass: __CxxPureMSILEntry (IJW shim body)
+        if (ijw) EmitCxxPureMSILEntry();
 
-        // NEP machinery (creates bare-name symbols for functions)
-        EmitNepMachinery(prog);
+        // NEP machinery (creates bare-name symbols for functions).
+        // In CoreCLR mode, emit plain bare-name aliases instead (no thunk/mep/ilfixup).
+        if (ijw) EmitNepMachinery(prog);
+        else EmitPureMsilFunctionSymbols(prog);
 
         // Global data relocations — AFTER NEP so bare-name symbols exist
         EmitGlobalDataRelocations(prog);

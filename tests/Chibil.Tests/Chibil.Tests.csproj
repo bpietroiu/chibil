@@ -10,6 +10,17 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!--
+      COFF object parser (CoffFile) used by CoreCLR emit tests. This is a
+      project-compilable extract of the parsing types that also live in
+      tools/coffobjdumper.cs; that file is a single-file `dotnet run` script
+      carrying #:property file-based-app directives + a top-level Main, so it
+      cannot be compiled into a normal project directly.
+    -->
+    <Compile Include="..\..\tools\CoffObjModel.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
     <PackageReference Include="xunit" Version="2.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
