@@ -1075,8 +1075,11 @@ public class CodeGen
         string mangledName = MangleFunctionName(fn);
         _symtab.PreRegisterFunctionClrToken(mangledName, methodDef);
 
-        // If this is main, register __CxxPureMSILEntry
-        if (fn.Name == "main")
+        // If this is main and targeting IJW, register __CxxPureMSILEntry.
+        // In CoreCLR mode the shim is never emitted, so skip registration to
+        // avoid orphaned MethodDef rows and COFF symbols pointing at byte 0 of
+        // .text$mn.
+        if (fn.Name == "main" && _options.Target == TargetProfile.Ijw)
         {
             _hasMain = true;
             _mainMethod = methodDef;

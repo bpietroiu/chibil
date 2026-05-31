@@ -157,7 +157,11 @@ public class CoffFile
 
     static CoffSymbol[] ParseSymbols(byte[] data, int symTabOffset, int count)
     {
-        // String table immediately follows the symbol table
+        // String table immediately follows the symbol table.
+        // Note: coffobjdumper.cs additionally reads the first 4 bytes here as
+        // stringTableSize for a bounds-validation check; that read is
+        // intentionally omitted in this extract because the model only needs the
+        // offset, not the size.
         int stringTableOffset = symTabOffset + count * SymbolSize;
 
         var symbols = new CoffSymbol[count];

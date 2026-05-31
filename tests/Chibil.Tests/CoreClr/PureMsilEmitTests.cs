@@ -36,4 +36,12 @@ public class PureMsilEmitTests
         var coff = CoffFile.Parse(obj);
         Assert.NotNull(coff.FindSection(".nep"));
     }
+
+    [Fact]
+    public void CoreClr_obj_has_no_cxxpuremsilentry_symbol()
+    {
+        byte[] obj = TestCompiler.CompileToObj("int main(){return 0;}", TargetProfile.CoreClr);
+        var coff = CoffFile.Parse(obj);
+        Assert.DoesNotContain(coff.Symbols, s => s.Name.Contains("__CxxPureMSILEntry"));
+    }
 }
