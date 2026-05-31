@@ -20,6 +20,10 @@ public class TypeSystem
     public readonly CType TyFloat = new(TypeKind.Float, 4, 4);
     public readonly CType TyDouble = new(TypeKind.Double, 8, 8);
 
+    // __builtin_va_list — pointer-width type (pointer to char) so pointer
+    // arithmetic / ldind work on it. Initialized in the constructor.
+    public readonly CType TyVaList;
+
     // Data-model-dependent singletons
     public readonly CType TyLong;
     public readonly CType TyUlong;
@@ -39,6 +43,7 @@ public class TypeSystem
         TyLongLong = new CType(TypeKind.LLong, 8, 8);
         TyUlongLong = new CType(TypeKind.LLong, 8, 8, isUnsigned: true);
         TyLdouble = new CType(TypeKind.LDouble, dm.LDoubleSize, dm.LDoubleAlign);
+        TyVaList = PointerTo(TyChar);
     }
 
     public static bool IsInteger(CType ty)

@@ -148,7 +148,8 @@ public class Parser
                 "__restrict__", "_Noreturn", "float", "double", "typeof", "inline",
                 "_Thread_local", "__thread", "_Atomic", "__declspec",
                 "__cdecl", "__clrcall", "__stdcall",
-                "__int8", "__int16", "__int32", "__int64" };
+                "__int8", "__int16", "__int32", "__int64",
+                "__builtin_va_list" };
             foreach (string k in kw) _typenameMap[k] = true;
         }
         string text = Util.GetTokenText(tok);
@@ -276,13 +277,14 @@ public class Parser
 
             CType ty2 = FindTypedef(tok);
             if (Util.Equal(tok, "struct") || Util.Equal(tok, "union") || Util.Equal(tok, "enum") ||
-                Util.Equal(tok, "typeof") || ty2 != null)
+                Util.Equal(tok, "typeof") || Util.Equal(tok, "__builtin_va_list") || ty2 != null)
             {
                 if (counter != 0) break;
                 if (Util.Equal(tok, "struct")) ty = StructDecl(ref tok, tok.Next);
                 else if (Util.Equal(tok, "union")) ty = UnionDecl(ref tok, tok.Next);
                 else if (Util.Equal(tok, "enum")) ty = EnumSpecifier(ref tok, tok.Next);
                 else if (Util.Equal(tok, "typeof")) ty = TypeofSpecifier(ref tok, tok.Next);
+                else if (Util.Equal(tok, "__builtin_va_list")) { ty = _types.TyVaList; tok = tok.Next; }
                 else { ty = ty2; tok = tok.Next; }
                 counter += OTHER; continue;
             }
@@ -1751,6 +1753,32 @@ public class Parser
         if (param != null) { CreateParamLvars(param.Next); if (param.Name == null) Util.ErrorTok(param.NamePos, "parameter name omitted"); NewLvar(GetIdent(param.Name), param); }
     }
 
+    // Append a hidden trailing parameter (e.g. the variadic `__va` pointer).
+    // It must be the LAST entry in fn.Params so CodeGen assigns it the highest
+    // argument index (after all fixed params). NewLvar prepends to _locals/_scope,
+    // so we re-thread the lvar to the tail of fn.Params here.
+    private Obj AddHiddenParam(Obj fn, string name, CType ty)
+    {
+        Obj v = NewLvar(name, ty);
+        // NewLvar prepended v to _locals (== fn.Params head). Detach it.
+        if (fn.Params == v) fn.Params = v.Next;
+        else
+        {
+            for (Obj p = fn.Params; p != null; p = p.Next)
+                if (p.Next == v) { p.Next = v.Next; break; }
+        }
+        v.Next = null;
+        // Append v to the tail of fn.Params (or make it the sole param).
+        if (fn.Params == null) fn.Params = v;
+        else
+        {
+            Obj tail = fn.Params;
+            while (tail.Next != null) tail = tail.Next;
+            tail.Next = v;
+        }
+        return v;
+    }
+
     private void ResolveGotoLabels()
     {
         for (Node x = _gotos; x != null; x = x.GotoNext)
@@ -1838,9 +1866,14 @@ public class Parser
         _currentFn = fn; _locals = null; EnterScope();
         CreateParamLvars(ty.Params);
         fn.Params = _locals;
+        // A real C variadic function ("int f(int a, ...)") has an explicit
+        // prototype (Params != null). Give it a hidden trailing __va pointer
+        // parameter that the caller fills with a packed va-buffer.
+        // The K&R unprototyped case ("int f()") also sets IsVariadic but has
+        // Params == null; that is a different mechanism and must NOT get a
+        // hidden param.
         if (ty.IsVariadic && ty.Params != null)
-            Util.ErrorTok(ty.Name, "variadic function definitions are not supported in MSIL mode");
-        if (ty.IsVariadic) fn.VaArea = NewLvar("__va_area__", TypeSystem.ArrayOf(_types.TyChar, 136));
+            fn.VaPtr = AddHiddenParam(fn, "__va", _types.TyVaList);
         fn.AllocaBottom = NewLvar("__alloca_size__", _types.PointerTo(_types.TyChar));
         tok = Util.Skip(tok, "{");
         byte[] nameBytes = Encoding.UTF8.GetBytes(fn.Name);

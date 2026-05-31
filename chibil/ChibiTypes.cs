@@ -201,7 +201,7 @@ public class Obj
     public Obj Params;
     public Node Body;
     public Obj Locals;
-    public Obj VaArea;
+    public Obj VaPtr;
     public Obj AllocaBottom;
     public int StackSize;
 

@@ -1036,6 +1036,11 @@ public class CodeGen
         // Parameter count
         int paramCount = 0;
         for (CType p = funcTy.Params; p != null; p = p.Next) paramCount++;
+        // Real variadic definitions (explicit prototype + ...) carry a hidden
+        // trailing va-buffer pointer param. K&R unprototyped functions also set
+        // IsVariadic but have Params == null and must be left unchanged.
+        bool hasVaPtr = funcTy.IsVariadic && funcTy.Params != null;
+        if (hasVaPtr) paramCount++;
         sig.WriteCompressedInteger(paramCount);
 
         // Return type
@@ -1044,6 +1049,8 @@ public class CodeGen
         // Parameters
         for (CType p = funcTy.Params; p != null; p = p.Next)
             EncodeType(sig, p);
+        if (hasVaPtr)
+            EncodeType(sig, _types.TyVaList); // hidden __va pointer
 
         // Method attributes
         MethodAttributes attrs = MethodAttributes.Assembly | MethodAttributes.Static;
@@ -1065,6 +1072,12 @@ public class CodeGen
         {
             string paramName = p.Name != null ? Util.GetTokenText(p.Name) : $"_a{paramIdx}";
             _md.AddParameter(ParameterAttributes.None, _md.GetOrAddString(paramName), paramIdx);
+            _nextParamRow++;
+            paramIdx++;
+        }
+        if (hasVaPtr)
+        {
+            _md.AddParameter(ParameterAttributes.None, _md.GetOrAddString("__va"), paramIdx);
             _nextParamRow++;
             paramIdx++;
         }
@@ -1145,10 +1158,18 @@ public class CodeGen
         sig.WriteByte(0x00); // DEFAULT
         int paramCount = 0;
         for (CType p = funcTy.Params; p != null; p = p.Next) paramCount++;
+        // Real variadic callees (explicit prototype + ...) carry a hidden
+        // trailing va-buffer pointer param so a forward-declared MemberRef
+        // matches the definition's MethodDef sig. K&R unprototyped (Params==null)
+        // are left unchanged.
+        bool hasVaPtr = funcTy.IsVariadic && funcTy.Params != null;
+        if (hasVaPtr) paramCount++;
         sig.WriteCompressedInteger(paramCount);
         EncodeReturnType(sig, funcTy);
         for (CType p = funcTy.Params; p != null; p = p.Next)
             EncodeType(sig, p);
+        if (hasVaPtr)
+            EncodeType(sig, _types.TyVaList); // hidden __va pointer
 
         var memberRef = _md.AddMemberReference(
             _moduleTypeDef, _md.GetOrAddString(fn.Name), _md.GetOrAddBlob(sig));
@@ -1420,7 +1441,6 @@ public class CodeGen
             if (local.IsLocal && !_paramSlots.ContainsKey(local))
             {
                 if (local == fn.AllocaBottom) continue; // skip alloca bottom
-                if (local == fn.VaArea) continue; // skip va_area
                 _localSlots[local] = localIdx++;
             }
         }
@@ -2212,10 +2232,78 @@ public class CodeGen
 
         // Push arguments
         int argCount = 0;
-        for (Node arg = node.Args; arg != null; arg = arg.Next)
+        // Only REAL variadic callees (explicit prototype + ...) use the hidden
+        // va-buffer pointer. K&R unprototyped functions (Params==null) also set
+        // IsVariadic but are emitted/called as plain functions.
+        if (funcTy.IsVariadic && funcTy.Params != null)
         {
-            GenExpr(arg);
-            argCount++;
+            // Variadic callee: pass fixed args directly, then a hidden trailing
+            // pointer to a caller-packed va-buffer (8-byte slots, one per vararg).
+            // No CLR vararg calling convention is used (unsupported on CoreCLR).
+            int nFixed = 0;
+            for (CType p = funcTy.Params; p != null; p = p.Next) nFixed++;
+
+            // Push the fixed args.
+            Node arg = node.Args;
+            for (int i = 0; i < nFixed; i++)
+            {
+                GenExpr(arg);
+                argCount++;
+                arg = arg.Next;
+            }
+
+            // Collect the remaining (variadic) args.
+            var varArgs = new List<Node>();
+            for (Node v = arg; v != null; v = v.Next) varArgs.Add(v);
+            int nVar = varArgs.Count;
+
+            if (nVar == 0)
+            {
+                // No variadic args — pass a null va-buffer pointer.
+                _enc.OpCode(ILOpCode.Ldc_i4_0);
+                _enc.OpCode(ILOpCode.Conv_u);
+                Push();
+            }
+            else
+            {
+                // localloc 8*nVar bytes, keep base pointer in a scratch local.
+                EmitConstI4(8 * nVar);
+                Push();
+                _enc.OpCode(ILOpCode.Localloc); // size -> ptr (net 0)
+                int baseLocal = GetOrAddScratchLocal(_types.TyVaList);
+                _enc.StoreLocal(baseLocal); Pop();
+
+                for (int i = 0; i < nVar; i++)
+                {
+                    Node va = varArgs[i];
+                    CType promoted = VaPromote(va.Ty);
+
+                    // slot address = base + i*8
+                    _enc.LoadLocal(baseLocal); Push();
+                    if (i != 0)
+                    {
+                        EmitConstI4(i * 8); Push();
+                        _enc.OpCode(ILOpCode.Conv_i);
+                        _enc.OpCode(ILOpCode.Add); Pop();
+                    }
+                    // value (promoted)
+                    GenExpr(va);
+                    if (promoted != va.Ty)
+                        EmitCast(va.Ty, promoted);
+                    Store(promoted); // stind into slot, pops addr+value
+                }
+
+                _enc.LoadLocal(baseLocal); Push();
+            }
+            argCount++; // the hidden va-buffer pointer
+        }
+        else
+        {
+            for (Node arg = node.Args; arg != null; arg = arg.Next)
+            {
+                GenExpr(arg);
+                argCount++;
+            }
         }
 
         if (isIndirect)
@@ -2376,6 +2464,17 @@ public class CodeGen
     }
 
     // ─── Type cast ───────────────────────────────────────────────
+
+    // Default argument promotions for an argument passed through `...`:
+    // integer types of rank < int are promoted to int; float is promoted to
+    // double (the parser already applies float->double, but be defensive).
+    private CType VaPromote(CType ty)
+    {
+        if (ty.Kind == TypeKind.Float) return _types.TyDouble;
+        if (TypeSystem.IsInteger(ty) && ty.Size < _types.TyInt.Size)
+            return ty.IsUnsigned ? _types.TyUint : _types.TyInt;
+        return ty;
+    }
 
     private void EmitCast(CType from, CType to)
     {
