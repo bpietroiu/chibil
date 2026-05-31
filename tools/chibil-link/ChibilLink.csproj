@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>chibil-link</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Reuse the COFF parser and asm2obj metadata-merge machinery without duplicating it -->
+    <Compile Include="..\CoffObjModel.cs" />
+    <Compile Include="..\asm2obj\TokenMap.cs" />
+    <Compile Include="..\asm2obj\EcmaSignatureRewriter.cs" />
+    <!-- EcmaSignatureRewriter depends on ISignatureModifierInjector defined here -->
+    <Compile Include="..\asm2obj\SignatureModifierPlan.cs" />
+  </ItemGroup>
+</Project>
