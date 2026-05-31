@@ -77,9 +77,6 @@ public sealed class MetadataMerger
         public EntityHandle ModuleRef;       // native library ModuleRef
     }
 
-    // P/Invoke stubs reserved during resolution, in row order. Appended to Plan.
-    public readonly List<MethodSlot> PInvokeSlots = new();
-
     public readonly List<MethodSlot> Plan = new();
 
     // Output <Module> TypeDef is row 1; methods all hang off it.
@@ -104,7 +101,6 @@ public sealed class MetadataMerger
     // A field with RVA-mapped initial data (string literal / initialized global).
     public sealed class CopiedField
     {
-        public ObjectFile Obj;
         public FieldAttributes Attributes;
         public string Name;
         public BlobHandle SignatureBlob;   // rewritten into shared heap
@@ -116,8 +112,10 @@ public sealed class MetadataMerger
     public readonly List<CopiedTypeDef> CopiedTypeDefs = new();
     public readonly List<CopiedField> CopiedFields = new();
 
-    // Dedup value-type TypeDefs by (name, size) across objects.
-    private readonly Dictionary<(string name, int size), CopiedTypeDef> _typeDefByKey = new();
+    // Dedup value-type TypeDefs by (namespace, name, size) across objects.
+    // Namespace is included (mirroring TypeRef dedup) so identically-named types
+    // in different namespaces with the same size do not wrongly collide.
+    private readonly Dictionary<(string ns, string name, int size), CopiedTypeDef> _typeDefByKey = new();
 
     private int _outTypeDefRow = ModuleTypeDefRow;   // row 1 = <Module>
     private int _outFieldRow;
@@ -140,8 +138,8 @@ public sealed class MetadataMerger
             : map.MapToken(originalToken);
         if (mapped == 0 || (mapped & 0x00FFFFFF) == 0)
             throw new LinkException(
-                $"{of.Path}: IL references token 0x{originalToken:X8} which has no mapping " +
-                "(external symbol resolution is a later task).");
+                $"token 0x{originalToken:X8} in object '{of.Path}' has no mapping " +
+                "(unresolved external symbol or resolver bug)");
         return mapped;
     }
 
@@ -211,7 +209,6 @@ public sealed class MetadataMerger
         _outMethodRow++;
         var slot = new MethodSlot { PredictedRow = _outMethodRow, PInvoke = stub };
         Plan.Add(slot);
-        PInvokeSlots.Add(slot);
         return MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(_outMethodRow));
     }
 
@@ -356,7 +353,6 @@ public sealed class MetadataMerger
             map.SetField(fh, _outFieldRow);
             CopiedFields.Add(new CopiedField
             {
-                Obj = of,
                 Attributes = fd.Attributes,
                 Name = md.GetString(fd.Name),
                 SignatureBlob = Builder.GetOrAddBlob(sigB),
@@ -383,6 +379,7 @@ public sealed class MetadataMerger
         }
         if (tc != SignatureTypeCode.TypeHandle) return; // primitive field, no TypeDef.
 
+        // TypeHandle TypeCode (Class/ValueType) is a single byte per ECMA-335 II.23.2.4
         sigReader.Offset -= 1;
         sigReader.ReadByte(); // raw 0x11/0x12 tag
         EntityHandle th = sigReader.ReadTypeHandle();
@@ -404,7 +401,7 @@ public sealed class MetadataMerger
         var layout = td.GetLayout();
         int size = layout.IsDefault ? -1 : layout.Size;
 
-        if (_typeDefByKey.TryGetValue((name, size), out var existing))
+        if (_typeDefByKey.TryGetValue((ns, name, size), out var existing))
         {
             map.SetTypeDef(inH, existing.PredictedRow);
             return;
@@ -422,7 +419,7 @@ public sealed class MetadataMerger
             LayoutPack = layout.IsDefault ? 0 : layout.PackingSize,
             PredictedRow = _outTypeDefRow,
         };
-        _typeDefByKey[(name, size)] = copied;
+        _typeDefByKey[(ns, name, size)] = copied;
         CopiedTypeDefs.Add(copied);
         map.SetTypeDef(inH, copied.PredictedRow);
     }
@@ -454,6 +451,7 @@ public sealed class MetadataMerger
             case SignatureTypeCode.UIntPtr: return 8; // CoreCLR targets are 64-bit here
             case SignatureTypeCode.TypeHandle:
                 {
+                    // TypeHandle TypeCode (Class/ValueType) is a single byte per ECMA-335 II.23.2.4
                     sr.Offset -= 1; sr.ReadByte();
                     EntityHandle th = sr.ReadTypeHandle();
                     if (th.Kind != HandleKind.TypeDefinition)
@@ -481,6 +479,7 @@ public sealed class MetadataMerger
         }
         if (tc == SignatureTypeCode.TypeHandle)
         {
+            // TypeHandle TypeCode (Class/ValueType) is a single byte per ECMA-335 II.23.2.4
             sr.Offset -= 1; sr.ReadByte();
             EntityHandle th = sr.ReadTypeHandle();
             if (th.Kind == HandleKind.TypeDefinition)

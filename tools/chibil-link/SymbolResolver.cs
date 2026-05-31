@@ -81,10 +81,18 @@ public static class SymbolResolver
     private static int SynthesizePInvoke(
         MetadataMerger merger, ObjectFile of, string name, BlobReader signatureBlobReader, List<string> libs)
     {
+        // MVP limitation: when no -l flag is given we cannot bind this symbol.
         if (libs.Count == 0)
             throw new LinkException($"unresolved symbol '{name}' and no -l libraries given");
 
-        string lib = MapLib(libs[0]);               // MVP: first -l
+        // MVP limitation: always bind to the first -l library. When multiple
+        // -l flags are given we cannot determine which library exports this
+        // symbol without a symbol table, so we warn and fall through.
+        string lib = MapLib(libs[0]);
+        if (libs.Count > 1)
+            Console.Error.WriteLine(
+                $"chibil-link: warning: '{name}' bound to '{lib}' (first -l library); " +
+                $"per-symbol multi-library resolution is not yet implemented.");
         var moduleRef = merger.GetOrAddModuleRef(lib);
 
         // Copy the call-site signature, remapping tokens with this object's map.
