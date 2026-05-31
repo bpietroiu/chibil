@@ -1188,6 +1188,55 @@ public class CodeGen
         _symtab.AddExternalClrToken(mangledName, memberRef);
     }
 
+    /// <summary>
+    /// Layer 2: build a MemberRef for a native __cdecl variadic callee whose
+    /// signature is monomorphized to the concrete call site: the fixed prototype
+    /// params followed by the default-promoted types of the actual variadic args.
+    /// No hidden va-buffer pointer is emitted. Each call site may produce a
+    /// distinct MemberRef (different concrete arg types ⇒ different signature),
+    /// so this deliberately does NOT consult / populate the by-name
+    /// <c>_externalFuncRefs</c> cache (which holds one fixed-only signature per
+    /// name and would otherwise alias mismatched signatures).
+    /// </summary>
+    private MemberReferenceHandle RegisterConcreteVarargCall(Obj fn, CType funcTy, Node firstArg)
+    {
+        int nFixed = 0;
+        for (CType p = funcTy.Params; p != null; p = p.Next) nFixed++;
+
+        var sig = new BlobBuilder();
+        sig.WriteByte(0x00); // DEFAULT conv byte; cdecl is encoded via a modopt
+                             // on the return type (see EncodeReturnType), matching
+                             // how chibil encodes every other cdecl external.
+
+        // Param count = fixed params + concrete (variadic) args.
+        int totalArgs = 0;
+        for (Node a = firstArg; a != null; a = a.Next) totalArgs++;
+        sig.WriteCompressedInteger(totalArgs);
+
+        EncodeReturnType(sig, funcTy);
+
+        // Fixed params from the prototype.
+        for (CType p = funcTy.Params; p != null; p = p.Next)
+            EncodeType(sig, p);
+
+        // Concrete variadic args, with default argument promotions applied.
+        int idx = 0;
+        for (Node a = firstArg; a != null; a = a.Next, idx++)
+        {
+            if (idx < nFixed) continue;
+            EncodeType(sig, VaPromote(a.Ty));
+        }
+
+        var memberRef = _md.AddMemberReference(
+            _moduleTypeDef, _md.GetOrAddString(fn.Name), _md.GetOrAddBlob(sig));
+
+        string mangledName = MangleFunctionName(fn);
+        AddDecoratedNameAttribute(memberRef, mangledName);
+        _symtab.AddExternalClrToken(mangledName, memberRef);
+
+        return memberRef;
+    }
+
     private void AddDecoratedNameAttribute(EntityHandle target, string mangledName)
     {
         // DecoratedNameAttribute custom attribute
@@ -2305,6 +2354,46 @@ public class CodeGen
 
         // Push arguments
         int argCount = 0;
+
+        // ── Layer 2: native __cdecl variadic call (e.g. printf) ──────────
+        // A variadic callee that is an EXTERNAL declaration (not defined in this
+        // TU) is a native libc-style variadic. Its concrete arg types are known
+        // at the call site, so emit a normal external call whose MemberRef
+        // signature is fixed params + the concrete (default-promoted) variadic
+        // arg types — NO hidden va-buffer pointer, NO localloc packing.
+        // (chibil-link turns the unresolved external into a P/Invoke — task B2.)
+        // Locally-DEFINED variadics keep the va-buffer path (Layer 1) so the
+        // call matches the MethodDef's hidden __va param.
+        if (funcTy.IsVariadic && funcTy.Params != null && !isIndirect
+            && !node.Lhs.Var.IsDefinition)
+        {
+            int nFixed2 = 0;
+            for (CType p = funcTy.Params; p != null; p = p.Next) nFixed2++;
+
+            // Push every argument directly. Variadic args (those past the fixed
+            // prototype) get default argument promotions applied.
+            int idx = 0;
+            for (Node arg = node.Args; arg != null; arg = arg.Next, idx++)
+            {
+                GenExpr(arg);
+                if (idx >= nFixed2)
+                {
+                    CType promoted = VaPromote(arg.Ty);
+                    if (promoted != arg.Ty)
+                        EmitCast(arg.Ty, promoted);
+                }
+                argCount++;
+            }
+
+            var concreteRef = RegisterConcreteVarargCall(node.Lhs.Var, funcTy, node.Args);
+            _enc.Call(concreteRef);
+            Pop(argCount);
+
+            if (funcTy.ReturnTy.Kind != TypeKind.Void)
+                Push();
+            return;
+        }
+
         // Only REAL variadic callees (explicit prototype + ...) use the hidden
         // va-buffer pointer. K&R unprototyped functions (Params==null) also set
         // IsVariadic but are emitted/called as plain functions.

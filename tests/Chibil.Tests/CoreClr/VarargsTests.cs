@@ -1,3 +1,4 @@
+using System.Linq;
 using ChibilLink;
 using Xunit;
 
@@ -145,6 +146,61 @@ int main(void){ return sum(3, 20, 22, 13); }   // 55
 ";
         var asm = System.Reflection.Assembly.Load(LinkSource(src));
         Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[]{ new string[0] }));
+    }
+
+    [Fact]
+    public void Cdecl_variadic_call_emits_concrete_signature()
+    {
+        string src = @"
+typedef unsigned long size_t;
+int __cdecl snprintf(char*, size_t, const char*, ...);
+int main(void){ char b[16]; return snprintf(b, 16, ""%d"", 42); }
+";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        // snprintf must appear as a MemberRef. Decode its signature: cdecl, paramCount == 4
+        // (char*, size_t, const char*, int) — the trailing int is the promoted "%d" arg.
+        var refs = of.Md.MemberReferences
+            .Select(h => of.Md.GetMemberReference(h))
+            .Where(mr => of.Md.GetString(mr.Name) == "snprintf").ToList();
+        Assert.NotEmpty(refs);
+        bool foundConcrete = refs.Any(mr => {
+            var br = of.Md.GetBlobReader(mr.Signature);
+            byte conv = br.ReadByte();           // calling convention byte
+            int pc = br.ReadCompressedInteger(); // param count
+            if (pc != 4) return false;           // 3 fixed + 1 concrete vararg
+            // Skip the return type, then decode each param's leading SignatureTypeCode,
+            // skipping leading modopt/modreq custom-modifier chains. The 4th param must
+            // be Int32 (the promoted "%d" vararg) — Layer 1 would instead emit a trailing
+            // hidden va-buffer pointer (Pointer) here, so this distinguishes the paths.
+            byte SkipMods()
+            {
+                byte b;
+                while (true)
+                {
+                    b = br.ReadByte();
+                    // 0x20 = CMOD_REQD, 0x1F = CMOD_OPT
+                    if (b == 0x20 || b == 0x1F) { br.ReadCompressedInteger(); continue; }
+                    return b;
+                }
+            }
+            void SkipOneType()
+            {
+                byte b = SkipMods();
+                while (b == 0x0F /*Ptr*/ || b == 0x10 /*ByRef*/ || b == 0x1B /*FnPtr-ish*/)
+                {
+                    if (b == 0x0F) { b = SkipMods(); continue; }
+                    break;
+                }
+            }
+            SkipOneType();                       // return type
+            SkipOneType();                       // param 1: char*
+            SkipOneType();                       // param 2: size_t
+            SkipOneType();                       // param 3: const char*
+            byte last = SkipMods();              // param 4: leading type code
+            return last == 0x08;                 // ELEMENT_TYPE_I4 (Int32)
+        });
+        Assert.True(foundConcrete, "expected a snprintf MemberRef with 4 concrete params (3 fixed + promoted int), 4th param Int32 not a va-buffer pointer");
     }
 
     [Fact]
