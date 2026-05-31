@@ -1161,11 +1161,11 @@ public class Parser
         if (Util.Equal(tok, "__builtin_atomic_exchange"))
         { var node = NewNode(NodeKind.Exch, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); tok = Util.Skip(tok, ","); node.Rhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); return node; }
         if (Util.Equal(tok, "__builtin_va_start"))
-        { var node = NewNode(NodeKind.VaStart, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); tok = Util.Skip(tok, ","); node.Rhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); node.Ty = _types.TyVoid; return node; }
+        { var node = NewNode(NodeKind.VaStart, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); tok = Util.Skip(tok, ","); node.Rhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); _types.AddType(node.Lhs); _types.AddType(node.Rhs); node.Ty = _types.TyVoid; return node; }
         if (Util.Equal(tok, "__builtin_va_arg"))
-        { tok = Util.Skip(tok.Next, "("); Node ap = Assign(ref tok, tok); tok = Util.Skip(tok, ","); CType ty = Typename(ref tok, tok); rest = Util.Skip(tok, ")"); var node = NewNode(NodeKind.VaArg, tok); node.Lhs = ap; node.Ty = ty; return node; }
+        { tok = Util.Skip(tok.Next, "("); Node ap = Assign(ref tok, tok); tok = Util.Skip(tok, ","); CType ty = Typename(ref tok, tok); rest = Util.Skip(tok, ")"); var node = NewNode(NodeKind.VaArg, tok); node.Lhs = ap; _types.AddType(node.Lhs); node.Ty = ty; return node; }
         if (Util.Equal(tok, "__builtin_va_end"))
-        { var node = NewNode(NodeKind.VaEnd, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); node.Ty = _types.TyVoid; return node; }
+        { var node = NewNode(NodeKind.VaEnd, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); _types.AddType(node.Lhs); node.Ty = _types.TyVoid; return node; }
         if (Util.Equal(tok, "__builtin_va_copy"))
         { var node = NewNode(NodeKind.VaCopy, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); tok = Util.Skip(tok, ","); node.Rhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); _types.AddType(node.Lhs); _types.AddType(node.Rhs); node.Ty = _types.TyVoid; return node; }
         if (tok.Kind == TokenKind.Ident)

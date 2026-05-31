@@ -114,4 +114,23 @@ int main(void){ return mix(3, 10, 20LL, 25.0); }
         var (exit, outp) = WslRunner.Run(LinkSource(src), WslRunner.NetCoreRuntimeConfig);
         Assert.True(exit == 55, $"exit {exit}: {outp}");
     }
+
+    [Fact]
+    public void Variadic_va_start_with_indirect_ap()
+    {
+        // ap accessed through a pointer (Deref lvalue) — exercises the AddType path.
+        string src = @"
+typedef __builtin_va_list va_list;
+int sum_via_ptr(int n, ...){
+  va_list ap; va_list* pap = &ap;
+  __builtin_va_start(*pap, n);
+  int s=0; for(int i=0;i<n;i++) s+=__builtin_va_arg(*pap, int);
+  __builtin_va_end(*pap);
+  return s;
+}
+int main(void){ return sum_via_ptr(3, 20, 22, 13); }   // 55
+";
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[]{ new string[0] }));
+    }
 }
