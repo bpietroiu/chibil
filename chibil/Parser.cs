@@ -1167,7 +1167,7 @@ public class Parser
         if (Util.Equal(tok, "__builtin_va_end"))
         { var node = NewNode(NodeKind.VaEnd, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); node.Ty = _types.TyVoid; return node; }
         if (Util.Equal(tok, "__builtin_va_copy"))
-        { var node = NewNode(NodeKind.VaCopy, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); tok = Util.Skip(tok, ","); node.Rhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); node.Ty = _types.TyVoid; return node; }
+        { var node = NewNode(NodeKind.VaCopy, tok); tok = Util.Skip(tok.Next, "("); node.Lhs = Assign(ref tok, tok); tok = Util.Skip(tok, ","); node.Rhs = Assign(ref tok, tok); rest = Util.Skip(tok, ")"); _types.AddType(node.Lhs); _types.AddType(node.Rhs); node.Ty = _types.TyVoid; return node; }
         if (tok.Kind == TokenKind.Ident)
         {
             VarScope sc = FindVar(tok); rest = tok.Next;

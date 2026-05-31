@@ -49,4 +49,69 @@ int main(void){ return sum_n(3, 20, 22, 13); }
         var (exit, outp) = WslRunner.Run(pe, WslRunner.NetCoreRuntimeConfig);
         Assert.True(exit == 55, $"exit {exit}: {outp}");
     }
+
+    [Fact]
+    public void Variadic_mixed_types()
+    {
+        // int + long long + double, accumulated as long long, returned truncated to int.
+        string src = @"
+typedef __builtin_va_list va_list;
+long long mix(int n, ...){ va_list ap; __builtin_va_start(ap,n);
+  long long acc = __builtin_va_arg(ap, int);
+  acc += __builtin_va_arg(ap, long long);
+  acc += (long long)__builtin_va_arg(ap, double);
+  __builtin_va_end(ap); return acc; }
+int main(void){ return (int)mix(3, 10, 20LL, 25.0); }   // 10+20+25 = 55
+";
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[]{ new string[0] }));
+    }
+
+    [Fact]
+    public void Variadic_pointer_arg()
+    {
+        // pass a pointer through varargs, deref it.
+        string src = @"
+typedef __builtin_va_list va_list;
+int deref_first(int n, ...){ va_list ap; __builtin_va_start(ap,n);
+  int* p = __builtin_va_arg(ap, int*); __builtin_va_end(ap); return *p; }
+int main(void){ int x = 55; return deref_first(1, &x); }
+";
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[]{ new string[0] }));
+    }
+
+    [Fact]
+    public void Variadic_va_copy_reiterates()
+    {
+        // va_copy then iterate both copies; doubled sum.
+        string src = @"
+typedef __builtin_va_list va_list;
+int twice(int n, ...){ va_list a,b; __builtin_va_start(a,n);
+  __builtin_va_copy(b,a);
+  int s=0; for(int i=0;i<n;i++) s+=__builtin_va_arg(a,int);
+  for(int i=0;i<n;i++) s+=__builtin_va_arg(b,int);
+  __builtin_va_end(a); __builtin_va_end(b); return s; }
+int main(void){ return twice(3, 5, 10, 12); }   // (5+10+12)*2 = 54
+";
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(54, (int)asm.EntryPoint.Invoke(null, new object[]{ new string[0] }));
+    }
+
+    [Fact]
+    public void Variadic_mixed_types_on_linux()
+    {
+        if (!WslRunner.Available()) return;
+        string src = @"
+typedef __builtin_va_list va_list;
+int mix(int n, ...){ va_list ap; __builtin_va_start(ap,n);
+  long long acc = __builtin_va_arg(ap, int);
+  acc += __builtin_va_arg(ap, long long);
+  acc += (long long)__builtin_va_arg(ap, double);
+  __builtin_va_end(ap); return (int)acc; }
+int main(void){ return mix(3, 10, 20LL, 25.0); }
+";
+        var (exit, outp) = WslRunner.Run(LinkSource(src), WslRunner.NetCoreRuntimeConfig);
+        Assert.True(exit == 55, $"exit {exit}: {outp}");
+    }
 }

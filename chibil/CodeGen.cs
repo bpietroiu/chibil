@@ -2215,8 +2215,7 @@ public class CodeGen
                 _enc.StoreLocal(pApLocal); Pop();        // pAp = &ap
 
                 _enc.LoadLocal(pApLocal); Push();        // pAp
-                Load(_types.TyVaList);                   // *pAp = ap (as i8)
-                _enc.OpCode(ILOpCode.Conv_i);            // -> native int (a real address)
+                Load(_types.TyVaList);                   // *pAp = ap (native int: ldind.i)
                 _enc.StoreLocal(apLocal); Pop();         // apLocal = ap
 
                 // result = *(Ty*)ap  (left on the stack as the node's value)
@@ -2330,6 +2329,8 @@ public class CodeGen
             // except for the size operand. Therefore the va-buffer must be built
             // BEFORE the fixed args are pushed. We pack into a scratch local, then
             // push the fixed args, then push the buffer pointer last.
+            // NOTE: this means variadic args are evaluated before the fixed args;
+            // C leaves argument evaluation order unspecified, so this is permitted.
             int baseLocal = -1;
             if (nVar != 0)
             {
