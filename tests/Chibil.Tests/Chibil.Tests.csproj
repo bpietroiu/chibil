@@ -19,6 +19,10 @@
     -->
     <Compile Include="..\..\tools\CoffObjModel.cs" />
     <Compile Include="..\..\tools\chibil-link\ObjectFile.cs" />
+    <Compile Include="..\..\tools\chibil-link\MetadataMerger.cs" />
+    <Compile Include="..\..\tools\chibil-link\RelocationFixer.cs" />
+    <Compile Include="..\..\tools\chibil-link\EntrySynthesizer.cs" />
+    <Compile Include="..\..\tools\chibil-link\PeWriter.cs" />
   </ItemGroup>
 
   <ItemGroup>

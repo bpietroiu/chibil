@@ -48,7 +48,37 @@ public static class Linker
 {
     public static void Run(LinkOptions opts)
     {
-        // Filled in by later tasks (B2..F).
-        throw new LinkException("not implemented yet");
+        var objs = new List<ObjectFile>(opts.Inputs.Count);
+        foreach (string path in opts.Inputs)
+        {
+            byte[] bytes;
+            try { bytes = File.ReadAllBytes(path); }
+            catch (Exception ex) { throw new LinkException($"cannot read '{path}': {ex.Message}"); }
+            objs.Add(ObjectFile.Load(bytes, path));
+        }
+
+        byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries);
+        File.WriteAllBytes(opts.Output, pe);
+
+        WriteRuntimeConfig(opts.Output);
+    }
+
+    private static void WriteRuntimeConfig(string outputPath)
+    {
+        string dir = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+        string baseName = Path.GetFileNameWithoutExtension(outputPath);
+        string cfgPath = Path.Combine(dir ?? ".", baseName + ".runtimeconfig.json");
+        const string cfg =
+            "{\n" +
+            "  \"runtimeOptions\": {\n" +
+            "    \"tfm\": \"net10.0\",\n" +
+            "    \"rollForward\": \"Major\",\n" +
+            "    \"framework\": {\n" +
+            "      \"name\": \"Microsoft.NETCore.App\",\n" +
+            "      \"version\": \"10.0.0\"\n" +
+            "    }\n" +
+            "  }\n" +
+            "}\n";
+        File.WriteAllText(cfgPath, cfg);
     }
 }
