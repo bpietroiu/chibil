@@ -67,6 +67,11 @@ public sealed unsafe class ObjectFile
             byte[] il = body.GetILBytes();
 
             // Translate section-relative reloc offsets to IL-relative offsets.
+            // TODO(D1): body.Size = header + IL + EH regions, so (Size - il.Length)
+            // over-counts the header by the EH-region size when exception regions
+            // exist, shifting reloc offsets. Exact for EH-free methods (all current
+            // chibil output). D1 validates offsets; switch to a direct header-size
+            // read there: tiny header = 1 byte when (b & 3)==2, fat = 12 when (b & 3)==3.
             int ilStartInSection = loc.Offset + (body.Size - il.Length); // header precedes IL
             var ilRelocs = new Dictionary<int, int>();
             foreach (var kv in relocMap)
