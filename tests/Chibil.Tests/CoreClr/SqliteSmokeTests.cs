@@ -25,6 +25,8 @@ public class SqliteSmokeTests
         return dir?.FullName ?? throw new DirectoryNotFoundException("repo root (samples/sqlite) not found");
     }
 
+    internal static string RepoRootDir() => RepoRoot();
+
     /// <summary>
     /// Compiles the SQLite amalgamation + shim + main to CoreCLR objs and links
     /// them into a single pure-MSIL <c>app.dll</c>, returning the PE bytes. Shared

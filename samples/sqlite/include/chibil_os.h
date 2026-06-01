@@ -1,0 +1,65 @@
+/* samples/sqlite/include/chibil_os.h
+ * Cross-OS native file I/O decls for the chibil disk VFS. The linker routes each
+ * symbol to libc.so.6 (Linux) or kernel32.dll (Windows) via --pinvoke; the C picks
+ * the right one at runtime via __chibil_os_is_windows(). x64 only. */
+#ifndef CHIBIL_OS_H
+#define CHIBIL_OS_H
+
+extern int __chibil_os_is_windows(void);
+
+/* ---- POSIX (libc) ---- */
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR   2
+#define O_CREAT  0100   /* octal 0100 = 64 (Linux x86-64) */
+#define O_TRUNC  01000  /* octal 01000 = 512 */
+#define SEEK_SET 0
+#define SEEK_END 2
+#define F_OK     0
+extern int  open(const char *path, int flags, int mode);   /* declared non-variadic: always pass mode */
+extern long pread(int fd, void *buf, unsigned long n, long long off);
+extern long pwrite(int fd, const void *buf, unsigned long n, long long off);
+extern int  ftruncate(int fd, long long len);
+extern int  fsync(int fd);
+extern int  close(int fd);
+extern int  unlink(const char *path);
+extern int  access(const char *path, int mode);
+extern long long lseek(int fd, long long off, int whence);
+
+/* ---- Win32 (kernel32) ---- */
+#define GENERIC_READ          0x80000000u
+#define GENERIC_WRITE         0x40000000u
+#define FILE_SHARE_READ       0x00000001u
+#define FILE_SHARE_WRITE      0x00000002u
+#define CREATE_NEW            1
+#define OPEN_EXISTING         3
+#define OPEN_ALWAYS           4
+#define FILE_ATTRIBUTE_NORMAL 0x80u
+#define FILE_BEGIN            0
+#define INVALID_FILE_ATTRIBUTES 0xFFFFFFFFu
+
+/* OVERLAPPED, x64 layout (32 bytes). We set Offset/OffsetHigh from a 64-bit offset. */
+typedef struct OVERLAPPED {
+    unsigned long long Internal;
+    unsigned long long InternalHigh;
+    unsigned int Offset;
+    unsigned int OffsetHigh;
+    void *hEvent;
+} OVERLAPPED;
+
+extern void *CreateFileA(const char *name, unsigned int access, unsigned int share,
+                         void *sec, unsigned int disposition, unsigned int flags, void *templ);
+extern int  ReadFile(void *h, void *buf, unsigned int n, unsigned int *nread, OVERLAPPED *ov);
+extern int  WriteFile(void *h, const void *buf, unsigned int n, unsigned int *nwrote, OVERLAPPED *ov);
+extern int  SetFilePointerEx(void *h, long long dist, long long *newPos, unsigned int method);
+extern int  SetEndOfFile(void *h);
+extern int  FlushFileBuffers(void *h);
+extern int  CloseHandle(void *h);
+extern int  DeleteFileA(const char *name);
+extern int  GetFileSizeEx(void *h, long long *size);
+extern unsigned int GetFileAttributesA(const char *name);
+
+/* INVALID_HANDLE_VALUE == (void*)-1 */
+#define INVALID_HANDLE_VALUE ((void *)(long long)-1)
+
+#endif
