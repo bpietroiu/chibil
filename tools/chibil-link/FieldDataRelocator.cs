@@ -42,6 +42,7 @@ namespace ChibilLink;
 /// </summary>
 public static class FieldDataRelocator
 {
+    private const byte IMAGE_SYM_CLASS_EXTERNAL = 2;
     private const ushort IMAGE_REL_AMD64_ADDR64 = 0x0001;
     private const ushort IMAGE_REL_AMD64_ADDR32NB = 0x0003; // not expected, but recognised
 
@@ -65,6 +66,21 @@ public static class FieldDataRelocator
     public static List<Reloc> Collect(MetadataMerger merger, IReadOnlyList<ObjectFile> objs)
     {
         var relocs = new List<Reloc>();
+
+        // Global NAME maps for resolving EXTERNAL (cross-TU) relocation targets — a
+        // function pointer or data pointer in one object's static initializer that
+        // refers to a symbol DEFINED in another object (e.g. bash's builtins table
+        // `{ "echo", echo_builtin }`, with echo_builtin in builtins/echo.c). Such a
+        // COFF symbol is undefined (section 0), so the per-object (section,value)
+        // maps below can't see it; resolve it by name to the merged method (→ ldftn)
+        // or field (→ ldsflda).
+        var methodByName = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var o in objs)
+            foreach (var m in o.Methods)
+                methodByName[m.Name] = merger.MapToken(o, m.OriginalToken);
+        var fieldByName = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var cf in merger.CopiedFields)
+            if (cf.Name != null) fieldByName[cf.Name] = cf.PredictedRow;
 
         // Index copied fields by their SOURCE location so a reloc offset maps to
         // its owning field. Two indices per object: an exact-start lookup (for a
@@ -126,6 +142,36 @@ public static class FieldDataRelocator
                     var sym = of.Coff.Symbols[(int)r.SymbolTableIndex];
                     long inlineAddend = r.VirtualAddress + 8 <= secBytes.Length
                         ? BitConverter.ToInt64(secBytes, (int)r.VirtualAddress) : 0;
+
+                    // A GLOBAL (external-linkage) symbol may be DEFINED IN ANOTHER
+                    // OBJECT; chibil then emits it with a stale (section,value) that
+                    // collides with an unrelated local method/field (e.g. the first
+                    // method at .text+0), so resolve it by NAME — the authoritative
+                    // key — to the merged method (→ ldftn) or field (→ ldsflda).
+                    // File-local statics (chibil mangles them "<name>_?A0x<hash>") are
+                    // always defined in THIS object with a correct (section,value), as
+                    // are string literals / STATIC-class data; those fall through to
+                    // the (section,value) path below.
+                    bool fileLocal = sym.Name.Contains("?A0x");
+                    if (sym.StorageClass == IMAGE_SYM_CLASS_EXTERNAL && !fileLocal)
+                    {
+                        string nm = sym.Name;
+                        if (methodByName.TryGetValue(nm, out int extMethodTok))
+                        {
+                            relocs.Add(new Reloc(owner.PredictedRow, intra, true, extMethodTok, 0));
+                            continue;
+                        }
+                        if (fieldByName.TryGetValue(nm, out int extFieldRow))
+                        {
+                            relocs.Add(new Reloc(owner.PredictedRow, intra, false,
+                                0x04000000 | extFieldRow, inlineAddend));
+                            continue;
+                        }
+                        throw new LinkException(
+                            $"{of.Path}: external data relocation target '{nm}' " +
+                            $"in {sec.Name}+0x{r.VirtualAddress:X} is not defined in any object.");
+                    }
+
                     var key = ((int)sym.SectionNumber, (int)sym.Value);
 
                     if (methodByLoc.TryGetValue(key, out int origMethodTok))

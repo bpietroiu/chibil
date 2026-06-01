@@ -216,6 +216,27 @@ int main(void){
     }
 
     [Fact]
+    public void Cross_tu_function_pointer_in_static_data_resolves()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // A static initializer — a function-pointer global AND a struct-array dispatch
+        // table — referencing a function DEFINED IN ANOTHER TU. chibil emits the COFF
+        // symbol for the cross-TU function with a stale (section,value) that collides
+        // with an unrelated local method (e.g. the first method at .text+0), so the
+        // linker must resolve it by NAME to ldftn the right method. Regression for
+        // bash's builtins table dispatching to a wild pointer (native crash).
+        int exit = LinkRun(new[]
+        {
+            "int the_func(int x) { return x + 100; }\n",
+            "extern int the_func(int);\n" +
+            "int (*g_fp)(int) = the_func;\n" +
+            "struct { const char *name; int (*fn)(int); } tbl[] = { { \"f\", the_func } };\n" +
+            "int main(void){ return g_fp(5) + tbl[0].fn(7); }\n",  // 105 + 107 = 212
+        }, out string o);
+        Assert.True(exit == 212, $"expected 212, got {exit}. {o}");
+    }
+
+    [Fact]
     public void Cross_tu_call_to_chibil_defined_variadic_works()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
