@@ -31,7 +31,7 @@ namespace ChibilLink;
 public static class SymbolResolver
 {
     public static void Resolve(MetadataMerger merger, IReadOnlyList<ObjectFile> objs,
-        List<string> libs, Dictionary<string, string> pinvokeMap)
+        List<string> libs, IReadOnlyDictionary<string, string> pinvokeMap)
     {
         var table = new LinkSymbolTable();
         foreach (var of in objs)
@@ -104,7 +104,7 @@ public static class SymbolResolver
 
     private static int SynthesizePInvoke(
         MetadataMerger merger, ObjectFile of, string name, BlobReader signatureBlobReader,
-        List<string> libs, Dictionary<string, string> pinvokeMap)
+        List<string> libs, IReadOnlyDictionary<string, string> pinvokeMap)
     {
         string lib;
         if (pinvokeMap.TryGetValue(name, out string libTok))
@@ -140,6 +140,9 @@ public static class SymbolResolver
         return merger.ReservePInvokeRow(stub);
     }
 
+    // Map a library token to a platform module name. Unknown tokens fall through to
+    // `lib<x>.so` (and dotted names pass through as-is) with NO diagnostic — a typo'd
+    // token surfaces as a runtime DllNotFoundException, consistent with the -l path.
     private static string MapLib(string l) => l switch
     {
         "c" => "libc.so.6",

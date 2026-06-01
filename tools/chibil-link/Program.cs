@@ -45,7 +45,11 @@ public sealed class LinkOptions
                 foreach (var pair in a["--pinvoke=".Length..].Split(',', System.StringSplitOptions.RemoveEmptyEntries))
                 {
                     int eq = pair.IndexOf('=');
-                    if (eq <= 0) { System.Console.Error.WriteLine($"bad --pinvoke entry: {pair}"); return null; }
+                    if (eq <= 0 || eq == pair.Length - 1)
+                    {
+                        System.Console.Error.WriteLine($"bad --pinvoke entry: {pair}");
+                        return null;
+                    }
                     o.PinvokeMap[pair[..eq]] = pair[(eq + 1)..];
                 }
                 continue;
