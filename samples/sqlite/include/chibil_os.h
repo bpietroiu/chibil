@@ -31,7 +31,7 @@ extern long long lseek(int fd, long long off, int whence);
 #define F_RDLCK 0
 #define F_WRLCK 1
 #define F_UNLCK 2
-#define F_SETLK 6
+#define F_SETLK 6   /* Linux x86-64 (varies by arch) */
 /* struct flock, Linux x86-64 layout (32 bytes): l_type@0, l_whence@2, [pad@4],
    l_start@8, l_len@16, l_pid@24, [pad@28]. The natural 4-byte pad after l_whence
    aligns the 8-byte l_start — declared in field order, the compiler inserts it. */
@@ -58,7 +58,7 @@ extern int usleep(unsigned int usec);           /* libc */
 #define INVALID_FILE_ATTRIBUTES 0xFFFFFFFFu
 #define ERROR_HANDLE_EOF      38   /* a positioned ReadFile past EOF returns FALSE with this */
 
-/* OVERLAPPED, x64 layout (32 bytes). We set Offset/OffsetHigh from a 64-bit offset.
+/* OVERLAPPED, x64 layout (32 bytes). We set Offset/OffsetHigh from a 64-bit offset (also used by LockFileEx/UnlockFileEx for the lock-start byte).
    (The real Win32 struct has a `PVOID Pointer` union arm overlapping Offset/OffsetHigh
    at bytes 16-23; omitted here since we only use the Offset/OffsetHigh members.) */
 typedef struct OVERLAPPED {

@@ -7,6 +7,9 @@ namespace Chibil.Tests.CoreClr;
 
 public class LockPrimitiveTests
 {
+    // Open "lk.tmp", exclusive-lock [1000,10), unlock, re-lock (proves release),
+    // unlock; returns 55 iff both locks succeeded. Proves the struct flock ABI +
+    // fcntl/LockFileEx P/Invokes on both OSes (single process).
     const string Src = @"
 #include ""chibil_os.h""
 static long w_open(const char* p){
@@ -27,12 +30,14 @@ static void unlock(long h, long long off, long long len){
     struct flock fl; zero(&fl,sizeof fl); fl.l_type=(short)F_UNLCK; fl.l_whence=(short)SEEK_SET; fl.l_start=off; fl.l_len=len;
     fcntl((int)h, F_SETLK, &fl);
 }
+static void w_close(long h){ if(__chibil_os_is_windows()) CloseHandle((void*)h); else close((int)h); }
 int main(void){
     long h = w_open(""lk.tmp"");
     if (!lock_ex(h, 1000, 10)) return 1;
     unlock(h, 1000, 10);
     if (!lock_ex(h, 1000, 10)) return 2;   /* re-lock proves the first unlock worked */
     unlock(h, 1000, 10);
+    w_close(h);
     return 55;
 }";
 
