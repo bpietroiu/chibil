@@ -216,6 +216,27 @@ int main(void){
     }
 
     [Fact]
+    public void Cross_tu_call_to_chibil_defined_variadic_works()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // A chibil-defined variadic (Layer-1 va-buffer ABI: hidden trailing __va param)
+        // called from ANOTHER TU arrives as a Layer-2 cdecl MemberRef (no __va). The
+        // linker must bridge it with an adapter that packs the varargs and calls the
+        // definition. Exercises both a 3-vararg and a 0-vararg call. Regression for the
+        // bash InvalidProgram (builtin_error/builtin_usage cross-TU).
+        int exit = LinkRun(new[]
+        {
+            "typedef __builtin_va_list va_list;\n" +
+            "int g_sum;\n" +
+            "void vsum(int n, ...){ va_list ap; __builtin_va_start(ap, n); int s = 0;" +
+            " for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int); __builtin_va_end(ap); g_sum = s; }\n",
+            "extern int g_sum; extern void vsum(int, ...);\n" +
+            "int main(void){ vsum(0); int z = g_sum; vsum(3, 10, 20, 12); return g_sum + z; }\n",  // 42 + 0
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42, got {exit}. {o}");
+    }
+
+    [Fact]
     public void Main_three_arg_entry_links_with_null_envp()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;

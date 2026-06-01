@@ -619,6 +619,117 @@ public sealed class MetadataMerger
         return _makeArgvToken;
     }
 
+    /// <summary>
+    /// Synthesize an adapter bridging a Layer-2 (cdecl) call site to a Layer-1
+    /// (va-buffer) chibil-defined variadic. The adapter has the CALL-SITE signature
+    /// (<paramref name="mrSig"/>, rewritten into the shared heap), packs its variadic
+    /// arguments (those past the <paramref name="nFixed"/> fixed params) into a
+    /// localloc'd 8-byte-slot buffer, then calls the definition
+    /// (<paramref name="definedToken"/>) with (fixed args…, va-buffer pointer). A
+    /// zero-vararg call just passes a null buffer. Returns the adapter MethodDef token.
+    /// </summary>
+    public int ReserveVariadicAdapter(ObjectFile of, BlobHandle mrSig, int definedToken, int nFixed)
+    {
+        // Adapter's own signature = the (rewritten) call-site signature.
+        var sigB = new BlobBuilder();
+        EcmaSignatureRewriter.RewriteMethodSignature(of.Md.GetBlobReader(mrSig), _maps[of], sigB);
+        var sigBlob = Builder.GetOrAddBlob(sigB);
+
+        // Parse the call-site signature: param count and a per-param stind opcode.
+        var r = of.Md.GetBlobReader(mrSig);
+        var hdr = r.ReadSignatureHeader();
+        if (hdr.IsGeneric) r.ReadCompressedInteger();
+        int paramCount = r.ReadCompressedInteger();
+        SkipTypeReturnStind(ref r);                       // return type (advance only)
+        var stind = new byte[paramCount];
+        for (int i = 0; i < paramCount; i++) stind[i] = SkipTypeReturnStind(ref r);
+        int nVar = paramCount - nFixed;
+        if (nVar < 0) nVar = 0;
+
+        var il = new BlobBuilder();
+        if (nVar > 0)
+        {
+            il.WriteByte(0x20); il.WriteInt32(8 * nVar);  // ldc.i4 (8*nVar)
+            il.WriteByte(0xFE); il.WriteByte(0x0F);        // localloc
+            il.WriteByte(0x0A);                            // stloc.0   (va-buffer base)
+            for (int i = 0; i < nVar; i++)
+            {
+                il.WriteByte(0x06);                        // ldloc.0   (base)
+                if (i > 0)
+                {
+                    il.WriteByte(0x20); il.WriteInt32(i * 8); // ldc.i4 i*8
+                    il.WriteByte(0xD3);                    // conv.i
+                    il.WriteByte(0x58);                    // add  -> slot addr
+                }
+                il.WriteByte(0x0E); il.WriteByte((byte)(nFixed + i)); // ldarg.s <vararg>
+                il.WriteByte(stind[nFixed + i]);           // stind.<kind>  (*slot = value)
+            }
+        }
+        for (int j = 0; j < nFixed; j++) { il.WriteByte(0x0E); il.WriteByte((byte)j); } // ldarg.s <fixed>
+        if (nVar > 0) il.WriteByte(0x06);                  // ldloc.0  (buffer ptr)
+        else { il.WriteByte(0x16); il.WriteByte(0xE0); }   // ldc.i4.0; conv.u  (null __va)
+        il.WriteByte(0x28); il.WriteInt32(definedToken);   // call <def>
+        il.WriteByte(0x2A);                                // ret
+
+        StandaloneSignatureHandle localSig = default;
+        if (nVar > 0)
+        {
+            var ls = new BlobBuilder();
+            new BlobEncoder(ls).LocalVariableSignature(1).AddVariable().Type().IntPtr();
+            localSig = Builder.AddStandaloneSignature(Builder.GetOrAddBlob(ls));
+        }
+
+        return ReserveSynthRow(new SynthMethod
+        {
+            Name = "__chibil_va_adapter",
+            SignatureBlob = sigBlob,
+            Il = il.ToArray(),
+            MaxStack = System.Math.Max(nFixed + 2, 3),
+            LocalSig = localSig,
+            InitLocals = nVar > 0,
+            Attributes = System.Reflection.MethodAttributes.Public
+                       | System.Reflection.MethodAttributes.Static
+                       | System.Reflection.MethodAttributes.HideBySig,
+        });
+    }
+
+    /// <summary>Advance <paramref name="r"/> past one signature Type and return the
+    /// <c>stind</c> opcode for storing a value of that type into a va-buffer slot.</summary>
+    private static byte SkipTypeReturnStind(ref BlobReader r)
+    {
+        byte et = r.ReadByte();
+        while (et == 0x1F || et == 0x20) { r.ReadCompressedInteger(); et = r.ReadByte(); } // CMOD_REQD/OPT
+        switch (et)
+        {
+            case 0x0F: case 0x10: case 0x45: case 0x1D: // PTR, BYREF, PINNED, SZARRAY
+                SkipTypeReturnStind(ref r); return 0xDF;   // stind.i
+            case 0x11: case 0x12: case 0x13: case 0x1E:    // VALUETYPE, CLASS, VAR, MVAR
+                r.ReadCompressedInteger(); return 0xDF;
+            case 0x14:                                     // ARRAY <Type><shape>
+                SkipTypeReturnStind(ref r);
+                r.ReadCompressedInteger();
+                int sz = r.ReadCompressedInteger(); for (int i = 0; i < sz; i++) r.ReadCompressedInteger();
+                int lo = r.ReadCompressedInteger(); for (int i = 0; i < lo; i++) r.ReadCompressedSignedInteger();
+                return 0xDF;
+            case 0x15:                                     // GENERICINST <Type><argc><args>
+                SkipTypeReturnStind(ref r);
+                int ac = r.ReadCompressedInteger(); for (int i = 0; i < ac; i++) SkipTypeReturnStind(ref r);
+                return 0xDF;
+            case 0x1B:                                     // FNPTR <MethodSig>
+                var h2 = r.ReadSignatureHeader(); if (h2.IsGeneric) r.ReadCompressedInteger();
+                int pc = r.ReadCompressedInteger(); SkipTypeReturnStind(ref r);
+                for (int i = 0; i < pc; i++) SkipTypeReturnStind(ref r);
+                return 0xDF;
+            case 0x02: case 0x03: case 0x04: case 0x05:
+            case 0x06: case 0x07: case 0x08: case 0x09:
+                return 0x54;                               // stind.i4
+            case 0x0A: case 0x0B: return 0x55;             // stind.i8
+            case 0x0C: return 0x56;                        // stind.r4
+            case 0x0D: return 0x57;                        // stind.r8
+            default: return 0xDF;                          // STRING/I/U/OBJECT/VOID/… -> stind.i
+        }
+    }
+
     /// <summary>Reserve the MethodDef row for the synthesized entry method.
     /// Returns the predicted row (and handle). Call exactly once, after
     /// MergeAndPredict, before emitting bodies.</summary>

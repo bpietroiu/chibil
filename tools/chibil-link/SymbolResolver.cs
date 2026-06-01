@@ -54,6 +54,12 @@ public static class SymbolResolver
         // (name, sig) reuse one stub while distinct signatures fork.
         var pinvokeByNameSig = new Dictionary<(string Name, string Sig), int>();
 
+        // Synthesized Layer-1-variadic adapters, deduped by (name, call-site sig). A
+        // cross-TU call to a chibil-defined variadic (e.g. builtin_error) arrives as a
+        // Layer-2 cdecl MemberRef (no __va); the adapter packs the varargs into a
+        // va-buffer and calls the Layer-1 definition.
+        var adapterByNameSig = new Dictionary<(string Name, string Sig), int>();
+
         foreach (var of in objs)
         {
             var md = of.Md;
@@ -81,6 +87,22 @@ public static class SymbolResolver
 
                 if (table.DefinedMethodToken.TryGetValue(name, out int definedToken))
                 {
+                    // Cross-TU call to a chibil-defined Layer-1 variadic: the call site
+                    // emitted a Layer-2 cdecl MemberRef (no hidden __va buffer pointer),
+                    // but the definition takes (fixed…, __va). Bridge with a per-signature
+                    // adapter that packs the varargs and calls the definition.
+                    if (table.Layer1VariadicFixed.TryGetValue(name, out int nFixed))
+                    {
+                        byte[] aSig = md.GetBlobBytes(mr.Signature);
+                        var aKey = (name, Convert.ToHexString(aSig));
+                        if (!adapterByNameSig.TryGetValue(aKey, out int adapterToken))
+                        {
+                            adapterToken = merger.ReserveVariadicAdapter(of, mr.Signature, definedToken, nFixed);
+                            adapterByNameSig[aKey] = adapterToken;
+                        }
+                        map.RecordExternal(originalToken, adapterToken);
+                        continue;
+                    }
                     // Cross-object: redirect to the defining function's merged row.
                     map.RecordExternal(originalToken, definedToken);
                     continue;

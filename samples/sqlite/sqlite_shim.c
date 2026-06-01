@@ -112,39 +112,11 @@ int sqlite3_os_end(void){
     return SQLITE_OK;
 }
 
-/* Cross-TU variadic call bridge.
- *
- * sqlite3_config(int, ...) is a chibil-DEFINED *managed* variadic (it lives in
- * sqlite3.c). chibil lowers a managed variadic to a hidden trailing "va-buffer"
- * pointer ABI ("Layer 1"): the definition's real signature is
- *   int sqlite3_config(int op, void *va_buffer)
- * where va_buffer holds the variadic arguments in 8-byte slots, one per arg,
- * each value stored at the slot start (int in the low 4 bytes, pointer full 8).
- *
- * When sqlite3_config is called from THIS translation unit it is only an extern
- * declaration, so chibil would instead emit a native "Layer 2" concrete cdecl
- * call (4 separate args) — which mismatches the 2-param managed MethodDef the
- * linker resolves to and faults. A chibil variadic defined in a *different* TU
- * and called as extern is an unsupported codegen path. We therefore pack the
- * Layer-1 va-buffer by hand and call sqlite3_config through its real 2-param
- * managed signature, which the linker binds to the definition correctly.
- *
- * For SQLITE_CONFIG_HEAP (op 8) the varargs are: void* pHeap, int nByte, int min.
- *
- * We invoke sqlite3_config through a function pointer whose type is the concrete
- * Layer-1 signature `int (*)(int, void*)`. Taking &sqlite3_config yields its
- * managed MethodDef (ldftn); the indirect call's standalone signature then has
- * exactly the two params the definition expects. (We cannot simply redeclare
- * sqlite3_config non-variadically — that conflicts with sqlite3.h's
- * `int sqlite3_config(int, ...)`.)
- */
-typedef int (*config_layer1_fn)(int op, void *va_buffer);
-
+/* sqlite3_config(int, ...) is a chibil-DEFINED managed variadic living in
+ * sqlite3.c. Calling it cross-TU as an extern is now supported directly: the
+ * linker synthesizes an adapter that packs the varargs into the Layer-1
+ * va-buffer and calls the definition. So just call it normally. */
 void platform_init(void){
-    unsigned char va[24];                       /* 3 slots * 8 bytes */
-    *(void **)(va + 0)        = g_heap;          /* slot 0: heap pointer */
-    *(long long *)(va + 8)    = (long long)(int)sizeof(g_heap); /* slot 1: nByte */
-    *(long long *)(va + 16)   = 16;              /* slot 2: min allocation */
-    ((config_layer1_fn)sqlite3_config)(SQLITE_CONFIG_HEAP, va);
+    sqlite3_config(SQLITE_CONFIG_HEAP, g_heap, (int)sizeof(g_heap), 16);
     sqlite3_initialize();
 }
