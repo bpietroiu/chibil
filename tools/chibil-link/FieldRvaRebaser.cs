@@ -28,31 +28,23 @@ public static class FieldRvaRebaser
     /// difference between <paramref name="sdataRva"/> and that base. The base is
     /// recovered as the SMALLEST FieldRVA present (the field whose data offset is 0
     /// starts exactly at the base), so the shift is uniform and exact.</summary>
-    public static void Rebase(byte[] pe, int sdataRva)
+    /// <summary>Set every FieldRVA entry to its ABSOLUTE image RVA, computed as
+    /// <paramref name="sdataRva"/> + the field's offset within the field-data blob
+    /// (as recorded by the writer). This is exact and robust, unlike inferring a
+    /// single rebase delta from the placeholder RVAs (see PeWriter for why).</summary>
+    public static void SetAbsolute(byte[] pe, int sdataRva,
+        System.Collections.Generic.IReadOnlyDictionary<int, int> fieldDataOffsets)
     {
         using var peReader = new PEReader(System.Collections.Immutable.ImmutableArray.Create(pe));
         var md = peReader.GetMetadataReader();
         int fieldRvaRows = md.GetTableRowCount(TableIndex.FieldRva);
         if (fieldRvaRows == 0) return;
 
-        long minRva = long.MaxValue;
-        foreach (var fh in md.FieldDefinitions)
-        {
-            int rva = md.GetFieldDefinition(fh).GetRelativeVirtualAddress();
-            if (rva != 0 && rva < minRva) minRva = rva;
-        }
-        if (minRva == long.MaxValue) return;
-        int delta = sdataRva - (int)minRva;
-        if (delta == 0) return;
-
-        // Locate the metadata blob within the file, then the #~ (compressed tables)
-        // stream, and walk table row sizes up to FieldRva to find its file offset.
         var corHeader = peReader.PEHeaders.CorHeader;
         int mdRva = corHeader.MetadataDirectory.RelativeVirtualAddress;
         int mdFileOff = RvaToFileOffset(peReader, mdRva);
-
         var (tablesStreamFileOff, _) = FindTablesStream(pe, mdFileOff);
-        PatchFieldRva(pe, tablesStreamFileOff, md, delta);
+        PatchFieldRvaAbsolute(pe, tablesStreamFileOff, md, sdataRva, fieldDataOffsets);
     }
 
     private static int RvaToFileOffset(PEReader pe, int rva)
@@ -94,7 +86,8 @@ public static class FieldRvaRebaser
         throw new LinkException("internal: no #~ tables stream found.");
     }
 
-    private static void PatchFieldRva(byte[] pe, int tablesOff, MetadataReader md, int delta)
+    private static void PatchFieldRvaAbsolute(byte[] pe, int tablesOff, MetadataReader md,
+        int sdataRva, System.Collections.Generic.IReadOnlyDictionary<int, int> fieldDataOffsets)
     {
         // Tables stream header: Reserved(4) Major(1) Minor(1) HeapSizes(1) Reserved(1)
         //                       Valid(8) Sorted(8) RowCounts[set bits](4 each)
@@ -158,12 +151,18 @@ public static class FieldRvaRebaser
                     "metadata disagrees). Refusing to corrupt the image.");
         }
 
-        // Validated — apply the rebase.
+        // Validated — set each FieldRVA to its absolute image RVA:
+        //   sdataRva + (the field's offset within the field-data blob).
         for (int i = 0; i < rows; i++)
         {
             int cell = offset + i * fieldRvaRowSize;       // RVA is the first field
-            uint rva = BitConverter.ToUInt32(pe, cell);
-            BitConverter.GetBytes(rva + (uint)delta).CopyTo(pe, cell);
+            int fieldRow = fieldIndexSize == 2
+                ? BitConverter.ToUInt16(pe, cell + 4)
+                : BitConverter.ToInt32(pe, cell + 4);
+            if (!fieldDataOffsets.TryGetValue(fieldRow, out int dataOffset))
+                throw new LinkException(
+                    $"internal: FieldRva row {i} references field {fieldRow} with no recorded data offset.");
+            BitConverter.GetBytes((uint)(sdataRva + dataOffset)).CopyTo(pe, cell);
         }
     }
 

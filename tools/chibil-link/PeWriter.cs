@@ -150,6 +150,10 @@ public sealed class PeWriter
         // merger's predictions). The blob is handed to the PE builder, which
         // places it in a data section and rewrites the FieldRVA placeholders.
         var mappedFieldData = new BlobBuilder();
+        // Map each field's output row -> its byte offset within the field-data blob.
+        // The rebaser uses these to set FieldRVA = .sdata base + dataOffset DIRECTLY,
+        // which is robust to however ManagedPEBuilder assigned the placeholder RVAs.
+        var fieldDataOffsets = new Dictionary<int, int>();
         foreach (var cf in merger.CopiedFields)
         {
             int align = cf.Alignment <= 0 ? 1 : cf.Alignment;
@@ -163,6 +167,7 @@ public sealed class PeWriter
                 cf.SignatureBlob);
             AssertRow(cf.PredictedRow, MetadataTokens.GetRowNumber(fh), $"Field '{cf.Name}'");
             mdBuilder.AddFieldRelativeVirtualAddress(fh, dataOffset);
+            fieldDataOffsets[MetadataTokens.GetRowNumber(fh)] = dataOffset;
         }
 
         // ── Step 5a: <Module> TypeDef (row 1), owns all fields + methods ──────
@@ -300,13 +305,16 @@ public sealed class PeWriter
         peBuilder.Serialize(peBlob);
         pe = peBlob.ToArray();
 
-        // The FieldRVA rows were written with offsets RELATIVE to the start of the
-        // .sdata field-data blob (we did not use ManagedPEBuilder's mappedFieldData,
-        // which is hardwired to .text). Now that .sdata's base RVA is known, rebase
-        // every FieldRVA entry by adding it. Patching 32-bit RVA values does not
-        // change any table size, so the layout (and SDataRva) is unaffected.
+        // The field data lives in our own .sdata section at SDataRva. Set each
+        // FieldRVA to (SDataRva + the field's blob offset) DIRECTLY from the offsets
+        // we recorded above. We deliberately do NOT infer a single rebase delta from
+        // the placeholder RVAs ManagedPEBuilder produced: with mappedFieldData=null
+        // those placeholders are laid out by an internal heuristic whose base shifts
+        // by a file-alignment quantum once the field data crosses certain size
+        // thresholds, which silently mis-addressed every literal. Patching the 32-bit
+        // RVA cells changes no table size, so SDataRva is unaffected.
         if (peBuilder.SDataRva > 0 && merger.CopiedFields.Count > 0)
-            FieldRvaRebaser.Rebase(pe, peBuilder.SDataRva);
+            FieldRvaRebaser.SetAbsolute(pe, peBuilder.SDataRva, fieldDataOffsets);
         return pe;
     }
 

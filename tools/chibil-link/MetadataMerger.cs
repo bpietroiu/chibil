@@ -677,10 +677,25 @@ public sealed class MetadataMerger
                 var td = md.GetTypeDefinition((TypeDefinitionHandle)th);
                 var lay = td.GetLayout();
                 int pack = lay.IsDefault ? 0 : lay.PackingSize;
-                if (pack > 0) return pack;
+                if (pack > 0) return PowerOfTwoFloor(pack);
             }
         }
-        return Math.Min(size, 8);
+        // Natural alignment must be a POWER OF TWO. Math.Min(size, 8) alone can
+        // yield non-power-of-two values (e.g. a 6-byte string literal -> 6), which
+        // both desynchronizes the mapped-field-data padding and produces a FieldRVA
+        // the CLR cannot address correctly (the literal then reads back as zero).
+        // Floor to the largest power of two <= min(size, 8); this is always >= the
+        // true element alignment of a byte/char array (1) and of any packed struct.
+        return PowerOfTwoFloor(Math.Min(size, 8));
+    }
+
+    /// <summary>Largest power of two &lt;= v (clamped to [1, 8]).</summary>
+    private static int PowerOfTwoFloor(int v)
+    {
+        if (v <= 1) return 1;
+        if (v >= 8) return 8;
+        if (v >= 4) return 4;
+        return 2;
     }
 
     /// <summary>Rewrite a method's signature blob into the shared heap.</summary>

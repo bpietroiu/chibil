@@ -73,8 +73,17 @@ public sealed class WritableDataPEBuilder : ManagedPEBuilder
         if (name == ".sdata")
         {
             SDataRva = location.RelativeVirtualAddress;
+            // Materialize the field data as a flat byte array and write a COPY.
+            //
+            // We must NOT use BlobBuilder.LinkSuffix(_fieldData) here: ManagedPEBuilder
+            // serializes the image in more than one pass, and LinkSuffix splices
+            // _fieldData's internal chunks into the returned builder (mutating/draining
+            // the shared instance). Across passes that desynchronizes the bytes from
+            // their FieldRVA offsets — every string literal then reads back as zero.
+            // ToArray() is a non-destructive snapshot, so each pass writes identical,
+            // correctly-ordered content.
             var bb = new BlobBuilder();
-            bb.LinkSuffix(_fieldData);
+            bb.WriteBytes(_fieldData.ToArray());
             return bb;
         }
         return base.SerializeSection(name, location);
