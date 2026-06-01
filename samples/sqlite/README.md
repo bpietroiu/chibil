@@ -17,12 +17,18 @@ bash samples/sqlite/build-chibil.sh app.dll
 dotnet app.dll ; echo "exit=$?"     # -> exit=55
 ```
 
-⚠️ **Windows / CoreCLR:** not yet. SQLite mutates global state heavily, and
-Windows CoreCLR maps `FieldRVA` (mapped initial-data) globals **read-only**
-regardless of the PE section flags, so the first write to an initialized global
-faults. A different global-data model (runtime-initialized CLR static fields
-instead of FieldRVA-mapped data) is needed for Windows — tracked as future work.
-The Linux path is unaffected (globals are writable there).
+✅ **Windows / CoreCLR:** compiles, links, and runs — the same `app.dll` returns
+**55** on Windows too. Mutable C globals are emitted as runtime-initialized CLR
+static fields (the module `.cctor` copies their init bytes from a read-only source
+field, then applies pointer relocations), instead of `FieldRVA`-mapped data —
+which Windows CoreCLR maps read-only regardless of PE section flags. String
+literals stay read-only `FieldRVA`.
+
+```sh
+# requires the .NET 10 SDK on PATH
+bash samples/sqlite/build-chibil.sh app.dll   # same app.dll as Linux
+dotnet app.dll ; echo "exit=$?"     # -> exit=55
+```
 
 ## Pipeline
 
@@ -32,8 +38,9 @@ shim.c    ─┤                                  shim.obj
 main.c    ─┘                                  main.obj
    ─► chibil-link -o app.dll  → app.dll (~9.8 MB) + app.runtimeconfig.json
         └─ merges metadata, resolves cross-object calls, synthesizes a
-           module .cctor to apply FieldRVA pointer relocations (the VFS /
-           static method tables), emits a pure-MSIL PE
+           module .cctor that initializes mutable globals (copying their init
+           bytes into CLR static fields) and applies pointer relocations (the
+           VFS / static method tables), emits a pure-MSIL PE
    ─► dotnet app.dll   (CoreCLR; no native sqlite3)
 ```
 
@@ -57,7 +64,8 @@ No-OS, single-threaded, self-contained: `SQLITE_OS_OTHER`, `SQLITE_THREADSAFE=0`
 | `build-ref.cmd` | Native MSVC reference build (`ref.exe`, exits 55) — the parity oracle. |
 
 The end-to-end run is covered by `tests/Chibil.Tests/CoreClr/SqliteSmokeTests.cs`
-(WSL-gated; compiles + links + runs, asserts exit 55).
+(`Memory_db_crud_returns_55_on_linux` is WSL-gated; `Memory_db_crud_returns_55_on_windows`
+runs via the dotnet host — both compile + link + run and assert exit 55).
 
 ## What this exercised in chibil
 
@@ -71,8 +79,8 @@ pointer relocations.
 
 ## Limitations
 
-`:memory:` only (the VFS file methods are stubbed); single-threaded; the Windows
-global-data model above; SQLite's variadic `printf` works on the Layer-2 cdecl
-path but `printf`-style **float** varargs to native libc on Linux x64 carry the
-SysV-`AL` caveat (chibil's own variadics are unaffected). On-disk persistence (a
-real VFS over `System.IO`) and the C# binding surface are the next sub-projects.
+`:memory:` only (the VFS file methods are stubbed); single-threaded; SQLite's
+variadic `printf` works on the Layer-2 cdecl path but `printf`-style **float**
+varargs to native libc on Linux x64 carry the SysV-`AL` caveat (chibil's own
+variadics are unaffected). On-disk persistence (a real VFS over `System.IO`) and
+the C# binding surface are the next sub-projects.

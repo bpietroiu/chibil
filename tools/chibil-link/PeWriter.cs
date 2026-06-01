@@ -61,8 +61,13 @@ public sealed class PeWriter
         // that applies them at load time. Reserve its row BEFORE the entry row so
         // its body is encoded with the rest of the plan.
         var fieldRelocs = FieldDataRelocator.Collect(merger, _objs);
+        var fieldInits = new List<(int targetRow, int sourceRow, int size)>();
+        foreach (var cf in merger.CopiedFields)
+            if (cf.Kind == MetadataMerger.CopiedField.FieldKind.Mutable)
+                fieldInits.Add((cf.PredictedRow, cf.SourceFieldRow, cf.Size));
+
         MetadataMerger.SynthMethod cctorSynth = null;
-        if (fieldRelocs.Count > 0)
+        if (fieldRelocs.Count > 0 || fieldInits.Count > 0)
         {
             // void .cctor() — default calling convention, no params, returns void.
             var cctorSig = new BlobBuilder();
@@ -73,8 +78,8 @@ public sealed class PeWriter
             {
                 Name = ".cctor",
                 SignatureBlob = merger.Builder.GetOrAddBlob(cctorSig),
-                Il = FieldDataRelocator.BuildCctorIl(fieldRelocs),
-                MaxStack = 4,
+                Il = FieldDataRelocator.BuildCctorIl(fieldRelocs, fieldInits),
+                MaxStack = 4,   // cpblk needs 3; reloc phase peaks at 3 — 4 is safe
                 Attributes = MethodAttributes.Private | MethodAttributes.Static
                            | MethodAttributes.HideBySig | MethodAttributes.SpecialName
                            | MethodAttributes.RTSpecialName,
@@ -154,20 +159,47 @@ public sealed class PeWriter
         // The rebaser uses these to set FieldRVA = .sdata base + dataOffset DIRECTLY,
         // which is robust to however ManagedPEBuilder assigned the placeholder RVAs.
         var fieldDataOffsets = new Dictionary<int, int>();
+
+        // Pass 1: target fields — rows 1..N, one per CopiedField in PredictedRow order.
+        // .rdata literals stay HasFieldRVA (read-only data); .data/BSS become plain
+        // CLR static fields (writable on every platform), losing HasFieldRVA.
         foreach (var cf in merger.CopiedFields)
         {
+            System.Reflection.Metadata.FieldDefinitionHandle fh;
+            if (cf.Kind == MetadataMerger.CopiedField.FieldKind.ReadOnly)
+            {
+                int align = cf.Alignment <= 0 ? 1 : cf.Alignment;
+                while ((mappedFieldData.Count % align) != 0) mappedFieldData.WriteByte(0);
+                int dataOffset = mappedFieldData.Count;
+                mappedFieldData.WriteBytes(cf.Data);
+                fh = mdBuilder.AddFieldDefinition(cf.Attributes, mdBuilder.GetOrAddString(cf.Name), cf.SignatureBlob);
+                mdBuilder.AddFieldRelativeVirtualAddress(fh, dataOffset);
+                fieldDataOffsets[MetadataTokens.GetRowNumber(fh)] = dataOffset;
+            }
+            else
+            {
+                // Mutable (.data) or Bss: plain CLR static field, NO HasFieldRVA / no FieldRVA row.
+                var attrs = cf.Attributes & ~FieldAttributes.HasFieldRVA;
+                fh = mdBuilder.AddFieldDefinition(attrs, mdBuilder.GetOrAddString(cf.Name), cf.SignatureBlob);
+            }
+            AssertRow(cf.PredictedRow, MetadataTokens.GetRowNumber(fh), $"Field '{cf.Name}'");
+        }
+
+        // Pass 2: read-only SOURCE fields for Mutable targets — rows N+1.. in SourceFieldRow order.
+        foreach (var cf in merger.CopiedFields)
+        {
+            if (cf.Kind != MetadataMerger.CopiedField.FieldKind.Mutable) continue;
             int align = cf.Alignment <= 0 ? 1 : cf.Alignment;
             while ((mappedFieldData.Count % align) != 0) mappedFieldData.WriteByte(0);
             int dataOffset = mappedFieldData.Count;
             mappedFieldData.WriteBytes(cf.Data);
-
-            var fh = mdBuilder.AddFieldDefinition(
-                cf.Attributes,
-                mdBuilder.GetOrAddString(cf.Name),
+            var srcFh = mdBuilder.AddFieldDefinition(
+                FieldAttributes.Assembly | FieldAttributes.Static | FieldAttributes.HasFieldRVA,
+                mdBuilder.GetOrAddString(cf.Name + "$init"),
                 cf.SignatureBlob);
-            AssertRow(cf.PredictedRow, MetadataTokens.GetRowNumber(fh), $"Field '{cf.Name}'");
-            mdBuilder.AddFieldRelativeVirtualAddress(fh, dataOffset);
-            fieldDataOffsets[MetadataTokens.GetRowNumber(fh)] = dataOffset;
+            AssertRow(cf.SourceFieldRow, MetadataTokens.GetRowNumber(srcFh), $"Field '{cf.Name}$init'");
+            mdBuilder.AddFieldRelativeVirtualAddress(srcFh, dataOffset);
+            fieldDataOffsets[MetadataTokens.GetRowNumber(srcFh)] = dataOffset;
         }
 
         // ── Step 5a: <Module> TypeDef (row 1), owns all fields + methods ──────
@@ -183,7 +215,7 @@ public sealed class PeWriter
         // ── Step 5a1: value-type TypeDefs referenced by field signatures ──────
         // These own no fields/methods, so their lists point past the end of the
         // Field/MethodDef tables (1-based, exclusive upper bound = count + 1).
-        int totalFields = merger.CopiedFields.Count;
+        int totalFields = merger.TotalFieldRows;
         int totalMethods = merger.Plan.Count;
         foreach (var ct in merger.CopiedTypeDefs)
         {
@@ -293,6 +325,13 @@ public sealed class PeWriter
         var peHeader = PEHeaderBuilder.CreateExecutableHeader();
 
         byte[] pe;
+        // NOTE: as of Task 2 (Windows global-data model) the writable .sdata section
+        // is no longer load-bearing: all mutable C globals moved to plain CLR static
+        // fields, so the FieldRVA data this section carries is now exclusively
+        // READ-ONLY (string literals + the `$init` cpblk-source fields). The writable
+        // mapping is harmless and kept only to preserve the verified Linux code path
+        // (and to sidestep ManagedPEBuilder's mappedFieldData literal-mis-addressing
+        // documented below). A future cleanup could switch to a plain ManagedPEBuilder.
         var peBuilder = new WritableDataPEBuilder(
             peHeader,
             rootBuilder,
@@ -313,7 +352,7 @@ public sealed class PeWriter
         // by a file-alignment quantum once the field data crosses certain size
         // thresholds, which silently mis-addressed every literal. Patching the 32-bit
         // RVA cells changes no table size, so SDataRva is unaffected.
-        if (peBuilder.SDataRva > 0 && merger.CopiedFields.Count > 0)
+        if (peBuilder.SDataRva > 0 && fieldDataOffsets.Count > 0)
             FieldRvaRebaser.SetAbsolute(pe, peBuilder.SDataRva, fieldDataOffsets);
         return pe;
     }

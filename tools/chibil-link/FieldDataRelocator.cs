@@ -203,10 +203,23 @@ public static class FieldDataRelocator
         return (bestTok, bestStart);
     }
 
-    /// <summary>Build the .cctor IL that applies all collected relocations.</summary>
-    public static byte[] BuildCctorIl(List<Reloc> relocs)
+    /// <summary>Build the .cctor IL: an init phase that cpblk-copies each .data
+    /// global's bytes from its read-only source field into the writable CLR-static
+    /// target, then the pointer-relocation phase that patches pointer slots in the
+    /// (now writable) targets.</summary>
+    public static byte[] BuildCctorIl(List<Reloc> relocs,
+        IReadOnlyList<(int targetRow, int sourceRow, int size)> inits)
     {
         var il = new BlobBuilder();
+        // Init phase: copy base bytes BEFORE any pointer relocation.
+        foreach (var (targetRow, sourceRow, size) in inits)
+        {
+            il.WriteByte(0x7F); il.WriteInt32(0x04000000 | targetRow);   // ldsflda target  (dest)
+            il.WriteByte(0x7F); il.WriteInt32(0x04000000 | sourceRow);   // ldsflda source  (src)
+            EmitLdcI4(il, size);                                          // ldc.i4 size
+            il.WriteByte(0xFE); il.WriteByte(0x17);                      // cpblk
+        }
+        // Reloc phase: unchanged body (writes pointers into the now-writable targets).
         foreach (var r in relocs)
         {
             // ldsflda ownerField

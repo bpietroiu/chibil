@@ -128,6 +128,13 @@ public sealed class MetadataMerger
         public int SourceSection;          // COFF section number (1-based) the data lives in
         public int SourceOffset;           // byte offset of the data within that section
         public int Size;                   // data length in bytes
+
+        public enum FieldKind { ReadOnly, Mutable, Bss }   // .rdata literal / .data / zero-init
+        public FieldKind Kind;
+        // Row of the synthesized read-only <name>$init source field, appended after
+        // all target rows. VALID ONLY when Kind == Mutable; 0 (invalid as a field
+        // token) for ReadOnly/Bss — never emit a token from it without checking Kind.
+        public int SourceFieldRow;
     }
 
     public readonly List<CopiedTypeDef> CopiedTypeDefs = new();
@@ -189,6 +196,11 @@ public sealed class MetadataMerger
         //    a local-variable signature is already predicted (mapped).
         foreach (var of in _objs)
             CopyDataFieldsAndTypeDefs(of);
+
+        // Append read-only source fields (rows N+1..M) for each Mutable (.data)
+        // global, so the .cctor can cpblk their bytes into the writable target.
+        // Field-row order is final after this; later passes touch only TypeDef/method rows.
+        ReserveMutableSourceFields();
 
         // ── Value-type TypeDefs referenced ONLY by local-variable signatures
         //    (e.g. a `char b[16]` fixed-array local with no field) — these have
@@ -414,6 +426,12 @@ public sealed class MetadataMerger
             var sigB = new BlobBuilder();
             EcmaSignatureRewriter.RewriteFieldSignature(sigReader, map, sigB);
 
+            string secName = sec.Name ?? "";
+            CopiedField.FieldKind kind =
+                isBss ? CopiedField.FieldKind.Bss
+                : secName.StartsWith(".rdata", StringComparison.Ordinal) ? CopiedField.FieldKind.ReadOnly
+                : CopiedField.FieldKind.Mutable;
+
             _outFieldRow++;
             map.SetField(fh, _outFieldRow);
             CopiedFields.Add(new CopiedField
@@ -424,6 +442,7 @@ public sealed class MetadataMerger
                 Data = data,
                 Alignment = align,
                 PredictedRow = _outFieldRow,
+                Kind = kind,
                 SourceObj = of,
                 SourceSection = loc.SectionNumber,
                 SourceOffset = loc.Offset,
@@ -431,6 +450,20 @@ public sealed class MetadataMerger
             });
         }
     }
+
+    /// <summary>Reserve one read-only source-field row per Mutable field, appended
+    /// AFTER all target rows, so the .cctor can reference it and the writer's row
+    /// assertions hold. Targets keep rows 1..N; sources get N+1..M.</summary>
+    private void ReserveMutableSourceFields()
+    {
+        foreach (var cf in CopiedFields)
+            if (cf.Kind == CopiedField.FieldKind.Mutable)
+                cf.SourceFieldRow = ++_outFieldRow;
+    }
+
+    /// <summary>Total output Field rows (targets + appended Mutable sources).
+    /// Used as the upper bound for value-type TypeDefs' field list.</summary>
+    public int TotalFieldRows => _outFieldRow;
 
     /// <summary>
     /// Ensure every value-type TypeDef referenced by any local-variable
