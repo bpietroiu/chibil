@@ -50,4 +50,20 @@ public class BashCompileGapTests
         int exit = RunViaHost(src, out string o);   // 1+2+...+8 = 36
         Assert.True(exit == 36, $"expected 36, got {exit}. {o}");
     }
+
+    [Fact]
+    public void Indirect_variadic_call_through_function_pointer_runs()
+    {
+        // bash's print_cmd.c does `(*pfunc)(fmt, …)` where pfunc points at a
+        // chibil-defined variadic (cprintf). The indirect call is lowered via the
+        // Layer-1 va-buffer ABI: pack the varargs + a hidden __va pointer and calli
+        // a signature that includes the trailing void* param. Must run correctly.
+        const string src =
+            "typedef __builtin_va_list va_list;\n" +
+            "static int sum_va(int n, ...){ va_list ap; __builtin_va_start(ap, n); int s = 0;" +
+            " for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int); __builtin_va_end(ap); return s; }\n" +
+            "int main(void){ int (*f)(int, ...) = sum_va; return (*f)(3, 10, 20, 6); }\n";  // 36
+        int exit = RunViaHost(src, out string o);
+        Assert.True(exit == 36, $"expected 36, got {exit}. {o}");
+    }
 }
