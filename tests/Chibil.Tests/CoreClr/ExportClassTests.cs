@@ -105,19 +105,23 @@ public class ExportClassTests
     [Fact]
     public void Referenced_struct_is_public_for_export()
     {
-        // psum takes `struct P*`; P's value-type TypeDef must be public so external
-        // C# can reference the pointer parameter type.
+        // psum takes `struct P*` → P must be promoted public. Q is used only inside
+        // main (never in an exported signature) → must stay non-public.
         Assembly asm = LinkAndLoad(
             "struct P { int x; int y; }; " +
+            "struct Q { int z; }; " +
             "int psum(struct P *p){ return p->x + p->y; } " +
-            "int main(void){ struct P q; q.x = 20; q.y = 35; return psum(&q); }",
+            "int main(void){ struct P p; p.x = 20; p.y = 35; struct Q q; q.z = 0; return psum(&p) + q.z; }",
             "N.S");
         Type t = asm.GetType("N.S");
         MethodInfo psum = t.GetMethod("psum", BindingFlags.Public | BindingFlags.Static);
         Assert.NotNull(psum);
         Type paramType = psum.GetParameters()[0].ParameterType; // P*  (a pointer type)
         Assert.True(paramType.IsPointer, "expected a pointer parameter");
-        Type pointee = paramType.GetElementType();             // P
-        Assert.True(pointee.IsPublic, "the referenced struct must be promoted to public");
+        Assert.True(paramType.GetElementType().IsPublic, "referenced struct P must be promoted to public");
+
+        // Q is referenced by no exported signature → stays non-public (no over-promotion).
+        Type q = Array.Find(asm.GetTypes(), x => x.Name == "Q");
+        if (q != null) Assert.False(q.IsPublic, "unreferenced struct Q must stay non-public");
     }
 }

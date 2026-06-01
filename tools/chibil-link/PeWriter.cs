@@ -259,7 +259,7 @@ public sealed class PeWriter
         // Field/MethodDef tables (1-based, exclusive upper bound = count + 1).
         int totalFields = merger.TotalFieldRows;
         int totalMethods = merger.Plan.Count;
-        var exportPublicRows = merger.ExportTypeDefRow != 0
+        var promotedTypeDefRows = merger.ExportTypeDefRow != 0
             ? merger.BuildExportReferencedTypeRows()
             : new System.Collections.Generic.HashSet<int>();
         foreach (var ct in merger.CopiedTypeDefs)
@@ -268,9 +268,9 @@ public sealed class PeWriter
                 System.Reflection.TypeAttributes.SequentialLayout
                     | System.Reflection.TypeAttributes.Sealed
                     | System.Reflection.TypeAttributes.AnsiClass
-                    | (exportPublicRows.Contains(ct.PredictedRow)
+                    | (promotedTypeDefRows.Contains(ct.PredictedRow)
                         ? System.Reflection.TypeAttributes.Public
-                        : 0),
+                        : (System.Reflection.TypeAttributes)0),
                 ct.Namespace.Length == 0 ? default : mdBuilder.GetOrAddString(ct.Namespace),
                 mdBuilder.GetOrAddString(ct.Name),
                 ct.BaseType,
