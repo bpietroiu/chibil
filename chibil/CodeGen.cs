@@ -117,6 +117,9 @@ public class CodeGen
     // Allocate a distinct pair lazily, once per function.
     private int _vaArgPApLocal = -1;
     private int _vaArgApLocal = -1;
+    // Scratch __va_list_tag* holders for va_start / va_copy (see VaStart).
+    private int _vaStartStructLocal = -1;
+    private int _vaCopyStructLocal = -1;
     private int _maxStack, _stackDepth;
     private Dictionary<string, LabelHandle> _labels;
     private int _labelCount;
@@ -1490,6 +1493,8 @@ public class CodeGen
         _paramSlots = new Dictionary<Obj, int>();
         _scratchLocals = new List<(CType, int)>();
         _vaArgPApLocal = -1;
+        _vaStartStructLocal = -1;
+        _vaCopyStructLocal = -1;
         _vaArgApLocal = -1;
         _maxStack = 0;
         _stackDepth = 0;
@@ -2286,11 +2291,45 @@ public class CodeGen
 
             case NodeKind.VaStart:
             {
-                // ap = __va  (store the hidden trailing va-buffer pointer into ap)
-                GenAddr(node.Lhs);                       // &ap
+                // ap points to a SysV __va_list_tag {uint gp_offset; uint fp_offset;
+                // void* overflow_arg_area; void* reg_save_area} (24 bytes). We saturate
+                // gp/fp_offset (48/176) so every va_arg — and libc, when ap is forwarded
+                // to a v*printf/v*scanf — reads sequentially from overflow_arg_area, which
+                // is the Layer-1 va-buffer (the hidden __va pointer). This makes chibil's
+                // va_list ABI-compatible with libc's; the buffer packing is unchanged.
+                if (_vaStartStructLocal < 0)
+                    _vaStartStructLocal = AddFreshScratchLocal(_types.TyVaList);
+                int sLoc = _vaStartStructLocal;
                 int vaIdx = _paramSlots[_currentFn.VaPtr];
-                _enc.LoadArgument(vaIdx); Push();        // __va value (pointer)
-                Store(_types.TyVaList);                  // *(&ap) = __va  (Pop x2)
+
+                // sLoc = localloc(24)  (zeroed: method body has InitLocals)
+                EmitConstI4(24);
+                _enc.OpCode(ILOpCode.Conv_u);
+                _enc.OpCode(ILOpCode.Localloc);          // size -> ptr (net 0)
+                _enc.StoreLocal(sLoc); Pop();
+
+                // sLoc->gp_offset (off 0) = 48  (all integer registers "consumed")
+                _enc.LoadLocal(sLoc); Push();
+                EmitConstI4(48);
+                _enc.OpCode(ILOpCode.Stind_i4); Pop(2);
+
+                // sLoc->fp_offset (off 4) = 176  (all SSE registers "consumed")
+                _enc.LoadLocal(sLoc); Push();
+                EmitConstI4(4); _enc.OpCode(ILOpCode.Conv_i); _enc.OpCode(ILOpCode.Add); Pop();
+                EmitConstI4(176);
+                _enc.OpCode(ILOpCode.Stind_i4); Pop(2);
+
+                // sLoc->overflow_arg_area (off 8) = __va  (the va-buffer)
+                _enc.LoadLocal(sLoc); Push();
+                EmitConstI4(8); _enc.OpCode(ILOpCode.Conv_i); _enc.OpCode(ILOpCode.Add); Pop();
+                _enc.LoadArgument(vaIdx); Push();
+                _enc.OpCode(ILOpCode.Stind_i); Pop(2);
+                // reg_save_area (off 16) stays 0 (localloc-zeroed); never read (regs saturated)
+
+                // ap = sLoc
+                GenAddr(node.Lhs);                       // &ap
+                _enc.LoadLocal(sLoc); Push();            // sLoc
+                Store(_types.TyVaList);                  // *(&ap) = sLoc  (Pop x2)
                 return;
             }
 
@@ -2306,27 +2345,30 @@ public class CodeGen
                     _vaArgPApLocal = AddFreshScratchLocal(_types.PointerTo(_types.TyVaList));
                     _vaArgApLocal = AddFreshScratchLocal(_types.TyVaList);
                 }
-                int pApLocal = _vaArgPApLocal;
-                int apLocal = _vaArgApLocal;
+                int apLocal = _vaArgApLocal;             // the __va_list_tag*
+                int ovLocal = _vaArgPApLocal;            // its overflow_arg_area cursor
 
+                // apLocal = ap  (the __va_list_tag pointer)
                 GenAddr(node.Lhs);                       // &ap
-                _enc.StoreLocal(pApLocal); Pop();        // pAp = &ap
+                Load(_types.TyVaList);                   // ap (ldind.i)
+                _enc.StoreLocal(apLocal); Pop();
 
-                _enc.LoadLocal(pApLocal); Push();        // pAp
-                Load(_types.TyVaList);                   // *pAp = ap (native int: ldind.i)
-                _enc.StoreLocal(apLocal); Pop();         // apLocal = ap
+                // ovLocal = *(ap + 8)   (current overflow_arg_area)
+                _enc.LoadLocal(apLocal); Push();
+                EmitConstI4(8); _enc.OpCode(ILOpCode.Conv_i); _enc.OpCode(ILOpCode.Add); Pop();
+                Load(_types.TyVaList);                   // overflow ptr (ldind.i)
+                _enc.StoreLocal(ovLocal); Pop();
 
-                // result = *(Ty*)ap  (left on the stack as the node's value)
-                _enc.LoadLocal(apLocal); Push();         // ap (native int)
-                Load(node.Ty);                           // *(Ty*)ap
+                // result = *(Ty*)overflow  (left on the stack as the node's value)
+                _enc.LoadLocal(ovLocal); Push();
+                Load(node.Ty);
 
-                // *pAp = ap + 8
-                _enc.LoadLocal(pApLocal); Push();        // pAp
-                _enc.LoadLocal(apLocal); Push();         // pAp, ap
-                EmitConstI4(8);                          // pAp, ap, 8
-                _enc.OpCode(ILOpCode.Conv_i);            // (size as native int)
-                _enc.OpCode(ILOpCode.Add); Pop();        // pAp, ap+8
-                Store(_types.TyVaList);                  // *pAp = ap+8  (Pop x2)
+                // *(ap + 8) = overflow + 8   (advance one 8-byte slot)
+                _enc.LoadLocal(apLocal); Push();
+                EmitConstI4(8); _enc.OpCode(ILOpCode.Conv_i); _enc.OpCode(ILOpCode.Add); Pop();
+                _enc.LoadLocal(ovLocal); Push();
+                EmitConstI4(8); _enc.OpCode(ILOpCode.Conv_i); _enc.OpCode(ILOpCode.Add); Pop();
+                Store(_types.TyVaList);                  // (Pop x2)
                 return;
             }
 
@@ -2336,10 +2378,29 @@ public class CodeGen
 
             case NodeKind.VaCopy:
             {
-                // dst = src  (pointer copy)
+                // dst must be an INDEPENDENT __va_list_tag so advancing dst does not
+                // disturb src: allocate a fresh 24-byte tag, copy src's into it, point
+                // dst at it.
+                if (_vaCopyStructLocal < 0)
+                    _vaCopyStructLocal = AddFreshScratchLocal(_types.TyVaList);
+                int nLoc = _vaCopyStructLocal;
+
+                // nLoc = localloc(24)
+                EmitConstI4(24);
+                _enc.OpCode(ILOpCode.Conv_u);
+                _enc.OpCode(ILOpCode.Localloc);          // size -> ptr (net 0)
+                _enc.StoreLocal(nLoc); Pop();
+
+                // cpblk(nLoc, src, 24)
+                _enc.LoadLocal(nLoc); Push();            // dest
+                GenExpr(node.Rhs);                       // src (the __va_list_tag*)
+                EmitConstI4(24);                         // size
+                _enc.OpCode(ILOpCode.Cpblk); Pop(3);
+
+                // dst = nLoc
                 GenAddr(node.Lhs);                       // &dst
-                GenExpr(node.Rhs);                       // src (va_list pointer value)
-                Store(_types.TyVaList);
+                _enc.LoadLocal(nLoc); Push();            // nLoc
+                Store(_types.TyVaList);                  // (Pop x2)
                 return;
             }
         }

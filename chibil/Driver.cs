@@ -16,6 +16,7 @@ public class Driver
     private FileType _optX;
     private readonly List<string> OptInclude = new();
     private bool _optE, _optM, _optMD, _optMMD, _optMP, _optS, _optC, _optCc1, _optHashHashHash;
+    private bool _optNoStdInc;
     private bool _optStatic, _optShared;
     private string _optMF, _optMT, _optO;
     private readonly List<string> LdExtraArgs = new();
@@ -137,6 +138,7 @@ public class Driver
             if (arg == "-fno-common") { Options.OptFcommon = false; continue; }
             if (arg == "-c") { _optC = true; continue; }
             if (arg == "-E") { _optE = true; continue; }
+            if (arg == "-nostdinc") { _optNoStdInc = true; continue; }
             if (arg.StartsWith("-I")) { Options.IncludePaths.Add(arg[2..]); continue; }
             if (arg == "-D") { Define(args[++i]); continue; }
             if (arg.StartsWith("-D")) { Define(arg[2..]); continue; }
@@ -231,6 +233,14 @@ public class Driver
     {
         // AppContext.BaseDirectory always gives the app's directory,
         // regardless of how it's invoked (AOT, dotnet exec, apphost, etc.)
+        // -nostdinc: suppress the built-in system search dirs so the program is
+        // compiled against ONLY the -I paths (e.g. a musl sysroot), never the host
+        // glibc headers. Standard compiler behaviour.
+        if (_optNoStdInc)
+        {
+            foreach (string p in Options.IncludePaths) StdIncludePaths.Add(p);
+            return;
+        }
         string dir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         Options.IncludePaths.Add($"{dir}/include");
         Options.IncludePaths.Add("/usr/local/include");
