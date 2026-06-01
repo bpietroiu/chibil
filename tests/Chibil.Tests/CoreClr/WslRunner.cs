@@ -30,9 +30,20 @@ static class WslRunner
                 $"-u root -- bash -lc \"cd '{wslPath}' && dotnet app.dll\"")
             { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
             string outp = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-            p.WaitForExit(30000);
+            if (!p.WaitForExit(30000)) { p.Kill(true); throw new System.Exception("wsl dotnet host timed out"); }
             return (p.ExitCode, outp);
         } finally { try { Directory.Delete(winDir, true); } catch { } }
+    }
+
+    public static (int exit, string output) RunDirEntry(string winDir, string dllName)
+    {
+        string wslPath = "/mnt/" + char.ToLower(winDir[0]) + winDir[2..].Replace('\\', '/');
+        using var p = Process.Start(new ProcessStartInfo("wsl",
+            $"-u root -- bash -lc \"cd '{wslPath}' && dotnet {dllName}\"")
+        { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
+        string outp = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+        if (!p.WaitForExit(30000)) { p.Kill(true); throw new System.Exception("wsl dotnet host timed out"); }
+        return (p.ExitCode, outp);
     }
 
     public const string NetCoreRuntimeConfig =

@@ -14,11 +14,11 @@ namespace ChibilLink;
 /// </summary>
 public static class LinkPipeline
 {
-    public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs)
+    public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null)
     {
         if (objs == null || objs.Count == 0)
             throw new LinkException("no input objects.");
-        return new PeWriter(objs, libs ?? new List<string>()).Write();
+        return new PeWriter(objs, libs ?? new List<string>(), exportClass).Write();
     }
 }
 
@@ -38,16 +38,29 @@ public sealed class PeWriter
 {
     private readonly IReadOnlyList<ObjectFile> _objs;
     private readonly List<string> _libs;
+    private readonly string _exportClass;
+    private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
-    public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs)
+    public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null)
     {
         _objs = objs;
         _libs = libs;
+        _exportClass = ValidateExportClass(exportClass);
+    }
+
+    private static string ValidateExportClass(string name)
+    {
+        if (name == null) return null;
+        if (name.Length == 0) throw new LinkException("--export-class name must not be empty.");
+        foreach (var part in name.Split('.'))
+            if (part.Length == 0)
+                throw new LinkException($"--export-class '{name}' has an empty namespace/type segment.");
+        return name;
     }
 
     public byte[] Write()
     {
-        var merger = new MetadataMerger(_objs);
+        var merger = new MetadataMerger(_objs, _exportClass);
         merger.MergeAndPredict();
 
         // Resolve cross-object references and synthesize native P/Invoke stubs.
@@ -88,11 +101,21 @@ public sealed class PeWriter
         }
 
         // Reserve the entry method's row (last in the plan) so its token is known.
-        var (entryRow, entryHandle) = merger.ReserveEntryRow();
+        var (_, entryHandle) = merger.ReserveEntryRow();
 
         // Synthesize the entry IL (main's final token already baked). The entry
         // signature uses ELEMENT_TYPE_STRING/SZARRAY primitives — no TypeRef.
         var entry = EntrySynthesizer.Synthesize(merger);
+
+        // Reserve forwarder rows AFTER the entry so they form the contiguous tail
+        // owned by the export class. Built here (post-prediction) because each
+        // forwarder body calls an exported method whose final token is now known.
+        var forwarders = merger.ExportTypeDefRow != 0
+            ? ForwarderSynthesizer.Build(merger)
+            : new List<MetadataMerger.SynthMethod>();
+        _firstForwarderRow = merger.Plan.Count + 1;   // first row to be reserved next
+        foreach (var fwd in forwarders)
+            merger.ReserveSynthRow(fwd);
 
         var mdBuilder = merger.Builder;
 
@@ -208,17 +231,46 @@ public sealed class PeWriter
             MetadataTokens.MethodDefinitionHandle(1));
         AssertRow(MetadataMerger.ModuleTypeDefRow, MetadataTokens.GetRowNumber(moduleTypeDef), "TypeDef <Module>");
 
+        // ── Export class TypeDef (row 2), public static class owning the forwarder
+        //    tail. With zero forwarders, MethodList points past the end (empty).
+        if (merger.ExportTypeDefRow != 0)
+        {
+            int firstForwarderRow = FirstForwarderRow(merger); // = totalMethods+1 when there are no forwarders
+            string full = _exportClass;
+            int dot = full.LastIndexOf('.');
+            string ns = dot < 0 ? "" : full[..dot];
+            string nm = dot < 0 ? full : full[(dot + 1)..];
+            var exportTd = mdBuilder.AddTypeDefinition(
+                System.Reflection.TypeAttributes.Public
+                    | System.Reflection.TypeAttributes.Abstract
+                    | System.Reflection.TypeAttributes.Sealed
+                    | System.Reflection.TypeAttributes.Class
+                    | System.Reflection.TypeAttributes.BeforeFieldInit,
+                ns.Length == 0 ? default : mdBuilder.GetOrAddString(ns),
+                mdBuilder.GetOrAddString(nm),
+                merger.GetOrAddCoreObjectRef(),
+                MetadataTokens.FieldDefinitionHandle(merger.TotalFieldRows + 1),  // owns no fields
+                MetadataTokens.MethodDefinitionHandle(firstForwarderRow));
+            AssertRow(merger.ExportTypeDefRow, MetadataTokens.GetRowNumber(exportTd), "TypeDef export class");
+        }
+
         // ── Step 5a1: value-type TypeDefs referenced by field signatures ──────
         // These own no fields/methods, so their lists point past the end of the
         // Field/MethodDef tables (1-based, exclusive upper bound = count + 1).
         int totalFields = merger.TotalFieldRows;
         int totalMethods = merger.Plan.Count;
+        var promotedTypeDefRows = merger.ExportTypeDefRow != 0
+            ? merger.BuildExportReferencedTypeRows()
+            : new System.Collections.Generic.HashSet<int>();
         foreach (var ct in merger.CopiedTypeDefs)
         {
             var tdH = mdBuilder.AddTypeDefinition(
                 System.Reflection.TypeAttributes.SequentialLayout
                     | System.Reflection.TypeAttributes.Sealed
-                    | System.Reflection.TypeAttributes.AnsiClass,
+                    | System.Reflection.TypeAttributes.AnsiClass
+                    | (promotedTypeDefRows.Contains(ct.PredictedRow)
+                        ? System.Reflection.TypeAttributes.Public
+                        : (System.Reflection.TypeAttributes)0),
                 ct.Namespace.Length == 0 ? default : mdBuilder.GetOrAddString(ct.Namespace),
                 mdBuilder.GetOrAddString(ct.Name),
                 ct.BaseType,
@@ -360,6 +412,13 @@ public sealed class PeWriter
         writer.WriteBytes(il);
         return body.Offset;
     }
+
+    // First MethodDef row owned by the export class. Set when forwarders are
+    // reserved (just after the entry row), BEFORE any later reservation, so it
+    // equals the first forwarder's predicted row. Falls back to "past the end"
+    // (empty range) when there are no forwarders.
+    private int FirstForwarderRow(MetadataMerger merger)
+        => _firstForwarderRow != 0 ? _firstForwarderRow : merger.Plan.Count + 1;
 
     private static void AssertRow(int expected, int actual, string what)
     {

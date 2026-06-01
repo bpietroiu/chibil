@@ -28,6 +28,7 @@ public sealed class LinkOptions
     public List<string> Inputs = new();
     public List<string> Libraries = new();   // from -l (e.g. "c" -> libc.so.6)
     public string Output = "a.dll";
+    public string ExportClass = null;   // --export-class=<Namespace.Name>; null = no export type
 
     public static LinkOptions Parse(string[] args)
     {
@@ -37,6 +38,7 @@ public sealed class LinkOptions
             string a = args[i];
             if (a == "-o") { o.Output = args[++i]; continue; }
             if (a.StartsWith("-l")) { o.Libraries.Add(a[2..]); continue; }
+            if (a.StartsWith("--export-class=")) { o.ExportClass = a["--export-class=".Length..]; continue; }
             if (a.StartsWith("-")) { Console.Error.WriteLine($"unknown flag: {a}"); return null; }
             o.Inputs.Add(a);
         }
@@ -57,7 +59,7 @@ public static class Linker
             objs.Add(ObjectFile.Load(bytes, path));
         }
 
-        byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries);
+        byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries, opts.ExportClass);
         File.WriteAllBytes(opts.Output, pe);
 
         WriteRuntimeConfig(opts.Output);

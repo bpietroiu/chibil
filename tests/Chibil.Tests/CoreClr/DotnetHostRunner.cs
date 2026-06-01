@@ -18,6 +18,19 @@ internal static class DotnetHostRunner
         "{\n  \"runtimeOptions\": {\n    \"tfm\": \"net10.0\",\n    \"rollForward\": \"Major\",\n" +
         "    \"framework\": { \"name\": \"Microsoft.NETCore.App\", \"version\": \"10.0.0\" }\n  }\n}\n";
 
+    public const string RuntimeConfigJson = RuntimeConfig; // expose for multi-assembly runs
+
+    public static int RunDllInDir(string dllPath, out string stdout)
+    {
+        using var p = Process.Start(new ProcessStartInfo("dotnet", $"\"{dllPath}\"")
+        { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
+        stdout = p.StandardOutput.ReadToEnd();
+        string err = p.StandardError.ReadToEnd();
+        if (!p.WaitForExit(30000)) { p.Kill(true); throw new Exception("dotnet host timed out"); }
+        if (err.Length > 0) stdout += "\n[stderr] " + err;
+        return p.ExitCode;
+    }
+
     public static bool DotnetAvailable()
     {
         try

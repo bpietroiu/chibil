@@ -17,7 +17,7 @@ namespace Chibil.Tests.CoreClr;
 /// </summary>
 public class SqliteSmokeTests
 {
-    static string RepoRoot()
+    internal static string RepoRoot()
     {
         var dir = new DirectoryInfo(System.AppContext.BaseDirectory);
         while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "samples", "sqlite")))
@@ -31,7 +31,7 @@ public class SqliteSmokeTests
     /// by the Linux (WSL) and Windows (dotnet host) smoke tests so both exercise
     /// the SAME linked assembly.
     /// </summary>
-    static byte[] BuildSqliteAppDll()
+    internal static byte[] BuildSqliteAppDll(string exportClass = null)
     {
         string sq = Path.Combine(RepoRoot(), "samples", "sqlite");
         string[] defs =
@@ -54,7 +54,7 @@ public class SqliteSmokeTests
             objs.Add(ObjectFile.Load(obj, Path.GetFileName(src)));
         }
 
-        return LinkPipeline.LinkToBytes(objs, new List<string>());
+        return LinkPipeline.LinkToBytes(objs, new List<string>(), exportClass);
     }
 
     [Fact]

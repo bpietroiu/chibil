@@ -30,6 +30,21 @@ bash samples/sqlite/build-chibil.sh app.dll   # same app.dll as Linux
 dotnet app.dll ; echo "exit=$?"     # -> exit=55
 ```
 
+## Consuming from C# (SP2)
+
+Linking with `--export-class=Sqlite3.Native` emits a `public static class
+Sqlite3.Native` whose static methods forward (raw passthrough) to the
+extern-linkage `sqlite3_*` functions. Signatures stay raw — `byte*`/`sbyte*`,
+`sqlite3*`, `sqlite3_stmt*`, … — and the opaque handle structs are emitted as
+public value types so external C# can name the pointer targets (forward-declared-
+only handles like `sqlite3_stmt` get a synthesized empty public TypeDef).
+
+A hand-written `unsafe` C# program, compiled against the generated `app.dll`,
+runs the same `:memory:` CRUD and exits 55 on Windows and Linux/WSL — proven by
+`tests/Chibil.Tests/CoreClr/SqliteExportTests.cs` (Roslyn-compiles an `unsafe`
+consumer against the image, runs it via the dotnet host / WSL). IntPtr/string/
+`out`-param ergonomics and an ADO.NET-style API are SP4; on-disk persistence is SP3.
+
 ## Pipeline
 
 ```
@@ -82,5 +97,7 @@ pointer relocations.
 `:memory:` only (the VFS file methods are stubbed); single-threaded; SQLite's
 variadic `printf` works on the Layer-2 cdecl path but `printf`-style **float**
 varargs to native libc on Linux x64 carry the SysV-`AL` caveat (chibil's own
-variadics are unaffected). On-disk persistence (a real VFS over `System.IO`) and
-the C# binding surface are the next sub-projects.
+variadics are unaffected). The raw `Sqlite3.Native` export surface is in place
+(SP2, above); the ergonomic C# API (IntPtr/string marshalling, `out` params,
+`IDisposable` handles, ADO.NET-style) is SP4, and on-disk persistence (a real VFS
+over `System.IO`) is SP3.
