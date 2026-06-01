@@ -60,4 +60,20 @@ public class ExportClassTests
         Assert.True(t.IsAbstract && t.IsSealed, "export class must be a static class (abstract+sealed)");
         Assert.Empty(t.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
     }
+
+    [Fact]
+    public void Forwarder_calls_exported_function()
+    {
+        // `add` is extern-linkage (non-static) → exported; `main` is excluded.
+        Assembly asm = LinkAndLoad(
+            "int add(int a, int b){ return a + b; } int main(void){ return add(2, 3); }",
+            "N.S");
+        Type t = asm.GetType("N.S");
+        Assert.NotNull(t);
+        MethodInfo add = t.GetMethod("add", BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(add);
+        Assert.Null(t.GetMethod("main", BindingFlags.Public | BindingFlags.Static)); // main excluded
+        object result = add.Invoke(null, new object[] { 2, 3 });
+        Assert.Equal(5, (int)result);
+    }
 }

@@ -92,6 +92,12 @@ public sealed class MetadataMerger
 
     public readonly List<MethodSlot> Plan = new();
 
+    /// <summary>Real methods marked extern-linkage (UnmanagedExport) and eligible
+    /// for export (excludes the synthesized entry and the C 'main').</summary>
+    public readonly List<(ObjectFile of, ObjMethod m)> ExportedMethods = new();
+
+    private const MethodAttributes UnmanagedExportFlag = (MethodAttributes)0x0008;
+
     // Output <Module> TypeDef is row 1; methods all hang off it.
     public const int ModuleTypeDefRow = 1;
 
@@ -258,8 +264,26 @@ public sealed class MetadataMerger
                 _outMethodRow++;
                 map.SetMethodDef(m.Handle, _outMethodRow);
                 Plan.Add(new MethodSlot { Obj = of, Method = m, PredictedRow = _outMethodRow });
+
+                if (_exportClass != null && m.Name != "main")
+                {
+                    var mdef = of.Md.GetMethodDefinition(m.Handle);
+                    if ((mdef.Attributes & UnmanagedExportFlag) != 0)
+                        ExportedMethods.Add((of, m));
+                }
             }
         }
+    }
+
+    /// <summary>Number of parameters in a method's signature (raw count, incl. any
+    /// hidden trailing va-buffer param). Used to emit the forwarder's ldarg sequence.</summary>
+    public int MethodParamCount(ObjectFile of, ObjMethod m)
+    {
+        var def = of.Md.GetMethodDefinition(m.Handle);
+        var reader = of.Md.GetBlobReader(def.Signature);
+        var header = reader.ReadSignatureHeader();
+        if (header.IsGeneric) reader.ReadCompressedInteger();
+        return reader.ReadCompressedInteger();
     }
 
     /// <summary>Expose the shared builder under the spec's short name <c>Md</c>.</summary>

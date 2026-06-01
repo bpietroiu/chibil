@@ -39,6 +39,7 @@ public sealed class PeWriter
     private readonly IReadOnlyList<ObjectFile> _objs;
     private readonly List<string> _libs;
     private readonly string _exportClass;
+    private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
     public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null)
     {
@@ -105,6 +106,16 @@ public sealed class PeWriter
         // Synthesize the entry IL (main's final token already baked). The entry
         // signature uses ELEMENT_TYPE_STRING/SZARRAY primitives — no TypeRef.
         var entry = EntrySynthesizer.Synthesize(merger);
+
+        // Reserve forwarder rows AFTER the entry so they form the contiguous tail
+        // owned by the export class. Built here (post-prediction) because each
+        // forwarder body calls an exported method whose final token is now known.
+        var forwarders = merger.ExportTypeDefRow != 0
+            ? ForwarderSynthesizer.Build(merger)
+            : new List<MetadataMerger.SynthMethod>();
+        _firstForwarderRow = merger.Plan.Count + 1;   // first row to be reserved next
+        foreach (var fwd in forwarders)
+            merger.ReserveSynthRow(fwd);
 
         var mdBuilder = merger.Builder;
 
@@ -396,12 +407,12 @@ public sealed class PeWriter
         return body.Offset;
     }
 
-    // First MethodDef row owned by the export class. The forwarder methods (added
-    // in a later task) MUST be the contiguous TAIL of the MethodDef table, and this
-    // value MUST equal the predicted row of the FIRST forwarder — i.e. it must be
-    // computed BEFORE any forwarder slots are reserved into merger.Plan. With no
-    // forwarders yet, that is Plan.Count + 1 (an empty range at the end).
-    private static int FirstForwarderRow(MetadataMerger merger) => merger.Plan.Count + 1;
+    // First MethodDef row owned by the export class. Set when forwarders are
+    // reserved (just after the entry row), BEFORE any later reservation, so it
+    // equals the first forwarder's predicted row. Falls back to "past the end"
+    // (empty range) when there are no forwarders.
+    private int FirstForwarderRow(MetadataMerger merger)
+        => _firstForwarderRow != 0 ? _firstForwarderRow : merger.Plan.Count + 1;
 
     private static void AssertRow(int expected, int actual, string what)
     {
