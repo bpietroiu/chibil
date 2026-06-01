@@ -573,6 +573,104 @@ public sealed class MetadataMerger
         }
     }
 
+    /// <summary>Output rows of the value-type TypeDefs referenced (directly or via
+    /// pointers/arrays) by any exported method's signature. PeWriter promotes these
+    /// to public so external C# can name the pointer parameter types.</summary>
+    public HashSet<int> BuildExportReferencedTypeRows()
+    {
+        var rows = new HashSet<int>();
+        foreach (var (of, m) in ExportedMethods)
+        {
+            var def = of.Md.GetMethodDefinition(m.Handle);
+            var reader = of.Md.GetBlobReader(def.Signature);
+            var header = reader.ReadSignatureHeader();
+            if (header.IsGeneric) reader.ReadCompressedInteger();
+            int paramCount = reader.ReadCompressedInteger();
+            CollectSigTypeDefRows(of, ref reader, rows);                 // return type
+            for (int p = 0; p < paramCount; p++)
+            {
+                if (reader.RemainingBytes > 0)
+                {
+                    byte peek = reader.ReadByte();
+                    if (peek != (byte)SignatureTypeCode.Sentinel) reader.Offset -= 1;
+                }
+                CollectSigTypeDefRows(of, ref reader, rows);
+            }
+        }
+        return rows;
+    }
+
+    private void CollectSigTypeDefRows(ObjectFile of, ref BlobReader reader, HashSet<int> rows)
+    {
+    again:
+        var tc = reader.ReadSignatureTypeCode();
+        switch (tc)
+        {
+            case SignatureTypeCode.RequiredModifier:
+            case SignatureTypeCode.OptionalModifier:
+            {
+                EntityHandle modH = reader.ReadTypeHandle();
+                AddRowIfTypeDef(of, modH, rows);
+                goto again;
+            }
+            case SignatureTypeCode.Pinned:
+            case SignatureTypeCode.ByReference:
+                goto again;
+            case SignatureTypeCode.Pointer:
+            case SignatureTypeCode.SZArray:
+                CollectSigTypeDefRows(of, ref reader, rows);
+                return;
+            case SignatureTypeCode.Array:
+            {
+                CollectSigTypeDefRows(of, ref reader, rows);  // element type
+                reader.ReadCompressedInteger();               // rank
+                int bounds = reader.ReadCompressedInteger();
+                for (int b = 0; b < bounds; b++) reader.ReadCompressedInteger();
+                int los = reader.ReadCompressedInteger();
+                for (int l = 0; l < los; l++) reader.ReadCompressedSignedInteger();
+                return;
+            }
+            case SignatureTypeCode.GenericTypeInstance:
+            {
+                reader.ReadByte();
+                EntityHandle genH = reader.ReadTypeHandle();
+                AddRowIfTypeDef(of, genH, rows);
+                int args = reader.ReadCompressedInteger();
+                for (int a = 0; a < args; a++) CollectSigTypeDefRows(of, ref reader, rows);
+                return;
+            }
+            case SignatureTypeCode.TypeHandle:
+            {
+                reader.Offset -= 1; reader.ReadByte();
+                EntityHandle th = reader.ReadTypeHandle();
+                AddRowIfTypeDef(of, th, rows);
+                return;
+            }
+            case SignatureTypeCode.GenericTypeParameter:
+            case SignatureTypeCode.GenericMethodParameter:
+                reader.ReadCompressedInteger();
+                return;
+            case SignatureTypeCode.FunctionPointer:
+            {
+                var h = reader.ReadSignatureHeader();
+                if (h.IsGeneric) reader.ReadCompressedInteger();
+                int count = reader.ReadCompressedInteger();
+                CollectSigTypeDefRows(of, ref reader, rows);  // return
+                for (int p = 0; p < count; p++) CollectSigTypeDefRows(of, ref reader, rows);
+                return;
+            }
+            default:
+                return; // primitive
+        }
+    }
+
+    private void AddRowIfTypeDef(ObjectFile of, EntityHandle h, HashSet<int> rows)
+    {
+        if (h.Kind != HandleKind.TypeDefinition) return;
+        int row = MetadataTokens.GetRowNumber(_maps[of].MapTypeDef((TypeDefinitionHandle)h));
+        if (row != 0) rows.Add(row);
+    }
+
     /// <summary>Walk one Type element of a signature blob, recursing through
     /// composite forms, and copy any embedded value-type/class TypeDef. Advances
     /// the reader past the Type exactly as the rewriter would.</summary>

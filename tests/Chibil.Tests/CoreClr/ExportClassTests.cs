@@ -101,4 +101,23 @@ public class ExportClassTests
         Assert.NotNull(m);
         Assert.Equal(15, (int)m.Invoke(null, new object[] { 1, 2, 3, 4, 5 }));
     }
+
+    [Fact]
+    public void Referenced_struct_is_public_for_export()
+    {
+        // psum takes `struct P*`; P's value-type TypeDef must be public so external
+        // C# can reference the pointer parameter type.
+        Assembly asm = LinkAndLoad(
+            "struct P { int x; int y; }; " +
+            "int psum(struct P *p){ return p->x + p->y; } " +
+            "int main(void){ struct P q; q.x = 20; q.y = 35; return psum(&q); }",
+            "N.S");
+        Type t = asm.GetType("N.S");
+        MethodInfo psum = t.GetMethod("psum", BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(psum);
+        Type paramType = psum.GetParameters()[0].ParameterType; // P*  (a pointer type)
+        Assert.True(paramType.IsPointer, "expected a pointer parameter");
+        Type pointee = paramType.GetElementType();             // P
+        Assert.True(pointee.IsPublic, "the referenced struct must be promoted to public");
+    }
 }
