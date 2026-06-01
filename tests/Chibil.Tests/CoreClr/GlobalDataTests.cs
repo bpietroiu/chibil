@@ -23,4 +23,15 @@ public class GlobalDataTests
         int exit = RunViaHost("static int g = 10; int main(void){ g = 55; return g; }", out string outp);
         Assert.True(exit == 55, $"expected 55, got {exit}. {outp}");
     }
+
+    [Fact]
+    public void Mutable_scalar_global_writable_on_linux()
+    {
+        if (!WslRunner.Available()) return;
+        byte[] obj = TestCompiler.CompileToObj("static int g=10; int main(void){ g=55; return g; }", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new System.Collections.Generic.List<string>());
+        var (exit, outp) = WslRunner.Run(pe, WslRunner.NetCoreRuntimeConfig);
+        Assert.True(exit == 55, $"linux exit {exit}: {outp}");
+    }
 }
