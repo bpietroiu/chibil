@@ -345,7 +345,7 @@ public sealed class PeWriter
         // by a file-alignment quantum once the field data crosses certain size
         // thresholds, which silently mis-addressed every literal. Patching the 32-bit
         // RVA cells changes no table size, so SDataRva is unaffected.
-        if (peBuilder.SDataRva > 0 && merger.CopiedFields.Count > 0)
+        if (peBuilder.SDataRva > 0 && fieldDataOffsets.Count > 0)
             FieldRvaRebaser.SetAbsolute(pe, peBuilder.SDataRva, fieldDataOffsets);
         return pe;
     }

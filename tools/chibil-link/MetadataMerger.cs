@@ -131,7 +131,10 @@ public sealed class MetadataMerger
 
         public enum FieldKind { ReadOnly, Mutable, Bss }   // .rdata literal / .data / zero-init
         public FieldKind Kind;
-        public int SourceFieldRow;   // for Mutable: the synthesized <name>$init source field's row (0 if none)
+        // Row of the synthesized read-only <name>$init source field, appended after
+        // all target rows. VALID ONLY when Kind == Mutable; 0 (invalid as a field
+        // token) for ReadOnly/Bss — never emit a token from it without checking Kind.
+        public int SourceFieldRow;
     }
 
     public readonly List<CopiedTypeDef> CopiedTypeDefs = new();
