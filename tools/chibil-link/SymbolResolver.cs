@@ -143,7 +143,7 @@ public static class SymbolResolver
     // Map a library token to a platform module name. Unknown tokens fall through to
     // `lib<x>.so` (and dotted names pass through as-is) with NO diagnostic — a typo'd
     // token surfaces as a runtime DllNotFoundException, consistent with the -l path.
-    private static string MapLib(string l) => l switch
+    internal static string MapLib(string l) => l switch
     {
         "c" => "libc.so.6",
         "m" => "libm.so.6",

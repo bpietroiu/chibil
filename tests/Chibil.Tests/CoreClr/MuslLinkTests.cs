@@ -54,6 +54,28 @@ int main(void){
         Assert.Contains("[hi]", output);   // printf actually wrote to the real stdout stream
     }
 
+    [Fact]
+    public void Native_data_import_stdout_initialized_from_libc()
+    {
+        if (!WslRunner.Available()) return;
+        // `stdout` is a libc DATA global (FILE*). MSIL can't import native data, so
+        // the linker synthesizes storage and initializes it at module load from
+        // libc via NativeLibrary.GetExport. Writing through it must reach the real
+        // stdout stream — proves the data-import mechanism end-to-end.
+        const string src =
+            "typedef struct _IO_FILE FILE;\n" +
+            "extern FILE* stdout;\n" +
+            "int fputs(const char*, FILE*);\n" +
+            "int fflush(FILE*);\n" +
+            "int main(void){ fputs(\"data-import-ok\\n\", stdout); fflush(stdout); return 7; }\n";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "sout.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string> { "c" });
+        var (exit, output) = WslRunner.Run(pe, WslRunner.NetCoreRuntimeConfig);
+        Assert.True(exit == 7, $"expected exit 7, got {exit}. Output:\n{output}");
+        Assert.Contains("data-import-ok", output);   // the libc-initialized stdout pointer worked
+    }
+
     static int RunViaHost(string src, out string output)
     {
         byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);

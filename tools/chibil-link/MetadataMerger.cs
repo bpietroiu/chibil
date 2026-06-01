@@ -192,11 +192,27 @@ public sealed class MetadataMerger
     // the set it promotes to public.
     private readonly HashSet<int> _exportOpaqueTypeRows = new();
 
-    public MetadataMerger(IReadOnlyList<ObjectFile> objs, string exportClass = null)
+    private readonly IReadOnlyList<string> _libs;
+
+    public MetadataMerger(IReadOnlyList<ObjectFile> objs, string exportClass = null,
+        IReadOnlyList<string> libs = null)
     {
         _objs = objs;
         _exportClass = exportClass;
+        _libs = libs;
     }
+
+    /// <summary>A synthesized native DATA import: storage allocated for an unresolved
+    /// global, initialized at module load from <see cref="Lib"/> via NativeLibrary.
+    /// </summary>
+    public sealed class DataImport
+    {
+        public string Name;
+        public int FieldRow;     // output Field row of the synthesized storage
+        public int Size;         // bytes to copy from the native symbol
+        public string Lib;       // native library module name (e.g. libc.so.6)
+    }
+    public readonly List<DataImport> DataImports = new();
 
     /// <summary>Output TypeDef row reserved for the export class (row 2), or 0 if disabled.</summary>
     public int ExportTypeDefRow => _exportTypeDefRow;
@@ -280,6 +296,13 @@ public sealed class MetadataMerger
         // every object's local definitions are predicted, before the mutable source
         // fields are appended (so references bind to the writable target rows).
         ResolveCrossObjectFields();
+
+        // Whatever data references remain unresolved are native DATA imports
+        // (libc/termcap globals: environ, stdin/stdout/stderr, errno, …). When
+        // linking against native libraries (-l), synthesize storage for each and
+        // record it for load-time initialization from the library. Pure MSIL cannot
+        // import native data directly, so the value is copied at module load.
+        SynthesizeDataImports();
 
         // Append read-only source fields (rows N+1..M) for each Mutable (.data)
         // global, so the .cctor can cpblk their bytes into the writable target.
@@ -736,6 +759,186 @@ public sealed class MetadataMerger
             // Point every declaration site (across all objects) at the one slot.
             foreach (var (of, fh) in ci.Sites)
                 _maps[of].SetField(fh, _outFieldRow);
+        }
+    }
+
+    /// <summary>
+    /// Build the IL that initializes every synthesized <see cref="DataImports"/>
+    /// slot from its native library at module load: for each, look up the symbol's
+    /// address via <c>NativeLibrary.TryGetExport</c> and, if found, <c>cpblk</c> the
+    /// value into the slot. Returns IL with NO trailing <c>ret</c> (the caller splices
+    /// it into the &lt;Module&gt; .cctor); empty if there are no data imports. Uses one
+    /// local (the out IntPtr address); see <see cref="BuildDataImportInitLocalSig"/>.
+    /// A symbol missing from the library (e.g. glibc-only program_invocation_name on
+    /// musl) is simply left zero.
+    /// </summary>
+    public byte[] BuildDataImportInitIl()
+    {
+        if (DataImports.Count == 0) return System.Array.Empty<byte>();
+
+        var nl = GetOrAddNativeLibraryTypeRef();
+        // native int NativeLibrary::Load(string)
+        var loadSig = new BlobBuilder();
+        new BlobEncoder(loadSig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(1, ret => ret.Type().IntPtr(), p => p.AddParameter().Type().String());
+        int loadTok = MetadataTokens.GetToken(Builder.AddMemberReference(
+            nl, Builder.GetOrAddString("Load"), Builder.GetOrAddBlob(loadSig)));
+        // bool NativeLibrary::TryGetExport(native int, string, native int&)
+        var tgeSig = new BlobBuilder();
+        new BlobEncoder(tgeSig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(3, ret => ret.Type().Boolean(), p =>
+            {
+                p.AddParameter().Type().IntPtr();
+                p.AddParameter().Type().String();
+                p.AddParameter().Type(isByRef: true).IntPtr();
+            });
+        int tgeTok = MetadataTokens.GetToken(Builder.AddMemberReference(
+            nl, Builder.GetOrAddString("TryGetExport"), Builder.GetOrAddBlob(tgeSig)));
+
+        var il = new BlobBuilder();
+        foreach (var di in DataImports)
+        {
+            // The conditional body to skip when the symbol is absent: copy `Size`
+            // bytes from the resolved address (local 0) into the slot's field.
+            var body = new BlobBuilder();
+            body.WriteByte(0x7F); body.WriteInt32(0x04000000 | di.FieldRow);   // ldsflda <field>
+            body.WriteByte(0x06);                                              // ldloc.0  (src addr)
+            if (di.Size <= 127) { body.WriteByte(0x1F); body.WriteByte((byte)di.Size); } // ldc.i4.s
+            else { body.WriteByte(0x20); body.WriteInt32(di.Size); }          // ldc.i4
+            body.WriteByte(0xFE); body.WriteByte(0x12); body.WriteByte(0x01); // unaligned. 1
+            body.WriteByte(0xFE); body.WriteByte(0x17);                       // cpblk
+            byte[] bodyBytes = body.ToArray();
+
+            il.WriteByte(0x72); il.WriteInt32(MetadataTokens.GetToken(Builder.GetOrAddUserString(di.Lib)));  // ldstr lib
+            il.WriteByte(0x28); il.WriteInt32(loadTok);                       // call NativeLibrary.Load
+            il.WriteByte(0x72); il.WriteInt32(MetadataTokens.GetToken(Builder.GetOrAddUserString(di.Name))); // ldstr name
+            il.WriteByte(0x12); il.WriteByte(0x00);                           // ldloca.s 0  (&addr)
+            il.WriteByte(0x28); il.WriteInt32(tgeTok);                        // call TryGetExport
+            il.WriteByte(0x2C); il.WriteByte((byte)bodyBytes.Length);         // brfalse.s past body
+            il.WriteBytes(bodyBytes);
+        }
+        return il.ToArray();
+    }
+
+    private AssemblyReferenceHandle _systemRuntimeRef;
+    private EntityHandle _nativeLibraryTypeRef;
+
+    /// <summary>TypeRef to <c>System.Runtime.InteropServices.NativeLibrary</c>. The
+    /// mscorlib/System.Runtime facades do NOT forward NativeLibrary (unlike
+    /// OperatingSystem/Marshal), so it is referenced directly from
+    /// System.Private.CoreLib where the type is actually defined. CoreCLR binds its
+    /// loaded core library regardless of the ref version.</summary>
+    private EntityHandle GetOrAddNativeLibraryTypeRef()
+    {
+        if (!_nativeLibraryTypeRef.IsNil) return _nativeLibraryTypeRef;
+        if (_systemRuntimeRef.IsNil)
+        {
+            if (!_assemblyRefByName.TryGetValue("System.Private.CoreLib", out _systemRuntimeRef))
+            {
+                byte[] pkt = { 0x7C, 0xEC, 0x85, 0xD7, 0xBE, 0xA7, 0x79, 0x8E }; // 7cec85d7bea7798e
+                _systemRuntimeRef = Builder.AddAssemblyReference(
+                    Builder.GetOrAddString("System.Private.CoreLib"),
+                    new System.Version(10, 0, 0, 0),
+                    default,
+                    Builder.GetOrAddBlob(pkt),
+                    default,    // AssemblyFlags: token form, not a full public key
+                    default);
+                _assemblyRefByName["System.Private.CoreLib"] = _systemRuntimeRef;
+            }
+        }
+        _nativeLibraryTypeRef = Builder.AddTypeReference(_systemRuntimeRef,
+            Builder.GetOrAddString("System.Runtime.InteropServices"),
+            Builder.GetOrAddString("NativeLibrary"));
+        return _nativeLibraryTypeRef;
+    }
+
+    /// <summary>Local-variable signature for the data-import initializer: a single
+    /// <c>native int</c> (the out address). Nil if there are no data imports.</summary>
+    public StandaloneSignatureHandle BuildDataImportInitLocalSig()
+    {
+        if (DataImports.Count == 0) return default;
+        var sig = new BlobBuilder();
+        var locals = new BlobEncoder(sig).LocalVariableSignature(1);
+        locals.AddVariable().Type().IntPtr();
+        return Builder.AddStandaloneSignature(Builder.GetOrAddBlob(sig));
+    }
+
+    /// <summary>
+    /// Synthesize storage for native DATA imports — the data analog of
+    /// <see cref="SymbolResolver"/>'s P/Invoke synthesis. Any field reference still
+    /// unmapped after cross-object resolution and common allocation is an external
+    /// global with no definition in the link (environ, stdin/stdout/stderr, errno,
+    /// optarg, termcap BC/PC/UP, …). MSIL has no native-data-import facility, so we
+    /// allocate a zero-init slot, map every reference to it, and record a
+    /// <see cref="DataImport"/> so the writer's module initializer can copy the
+    /// value from the native library at load time. Gated on <c>-l</c>: a
+    /// self-contained link still errors on genuinely-unresolved data.
+    /// </summary>
+    private void SynthesizeDataImports()
+    {
+        if (_libs == null || _libs.Count == 0) return;
+        string lib = SymbolResolver.MapLib(_libs[0]);
+
+        // Group still-unmapped field references by name (first site drives the
+        // signature/size; every site is then pointed at the one slot).
+        var firstSite = new Dictionary<string, (ObjectFile of, FieldDefinitionHandle fh)>(StringComparer.Ordinal);
+        var sites = new Dictionary<string, List<(ObjectFile of, FieldDefinitionHandle fh)>>(StringComparer.Ordinal);
+        foreach (var of in _objs)
+        {
+            var md = of.Md;
+            var map = _maps[of];
+            int rows = md.GetTableRowCount(TableIndex.Field);
+            for (int r = 1; r <= rows; r++)
+            {
+                var fh = MetadataTokens.FieldDefinitionHandle(r);
+                if (map.MapField(fh).RowId() != 0) continue;   // already resolved
+                string name = md.GetString(md.GetFieldDefinition(fh).Name);
+                // Skip compiler artifacts (padding members, string literals).
+                if (string.IsNullOrEmpty(name) || name.IndexOf(' ') >= 0 ||
+                    name.StartsWith("?") || name.StartsWith("$")) continue;
+                if (!sites.TryGetValue(name, out var lst))
+                {
+                    lst = new List<(ObjectFile, FieldDefinitionHandle)>();
+                    sites[name] = lst;
+                    firstSite[name] = (of, fh);
+                }
+                lst.Add((of, fh));
+            }
+        }
+
+        foreach (var (name, first) in firstSite)
+        {
+            var (of0, fh0) = first;
+            var md0 = of0.Md;
+            var fd0 = md0.GetFieldDefinition(fh0);
+            EnsureFieldTypeDefs(of0, fd0);
+            int size = GetFieldDataSize(md0, fd0);
+
+            var sigReader = md0.GetBlobReader(fd0.Signature);
+            var sigB = new BlobBuilder();
+            EcmaSignatureRewriter.RewriteFieldSignature(sigReader, _maps[of0], sigB);
+
+            _outFieldRow++;
+            CopiedFields.Add(new CopiedField
+            {
+                Attributes = fd0.Attributes,
+                Name = name,
+                SignatureBlob = Builder.GetOrAddBlob(sigB),
+                Data = new byte[size],
+                Alignment = GetFieldDataAlignment(md0, fd0, size),
+                PredictedRow = _outFieldRow,
+                Kind = CopiedField.FieldKind.Bss,
+                SourceObj = of0,
+                SourceSection = 0,
+                SourceOffset = 0,
+                Size = size,
+            });
+            foreach (var (of, fh) in sites[name])
+                _maps[of].SetField(fh, _outFieldRow);
+
+            DataImports.Add(new DataImport { Name = name, FieldRow = _outFieldRow, Size = size, Lib = lib });
         }
     }
 
