@@ -3,6 +3,31 @@ using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using ChibilLink;
 
+// "jitprobe <file.dll> [methodName]" — force-JIT methods (RuntimeHelpers.PrepareMethod)
+// to find which ones the JIT rejects. Run on LINUX (libc.so.6 must resolve for the
+// P/Invoke binding the JIT does at prepare time; on Windows every method DllNotFounds).
+if (args.Length >= 2 && args[0] == "jitprobe")
+{
+    var jasm = System.Reflection.Assembly.Load(File.ReadAllBytes(args[1]));
+    var jmod = jasm.GetModules()[0];
+    var jflags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+               | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance;
+    string only = args.Length > 2 ? args[2] : null;
+    int jok = 0, jbad = 0, joth = 0;
+    var badNames = new List<string>();
+    foreach (var m in jmod.GetMethods(jflags))
+    {
+        if (only != null && m.Name != only) continue;
+        if (m.IsAbstract || (m.Attributes & System.Reflection.MethodAttributes.PinvokeImpl) != 0) continue;
+        try { System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle); jok++; }
+        catch (System.InvalidProgramException) { jbad++; if (badNames.Count < 25) badNames.Add(m.Name); }
+        catch (Exception e) { joth++; if (only != null) Console.WriteLine($"{m.Name}: {e.GetType().Name}: {e.Message}"); }
+    }
+    Console.WriteLine($"jitprobe: ok={jok} InvalidProgram={jbad} other={joth}");
+    if (badNames.Count > 0) Console.WriteLine("InvalidProgram: " + string.Join(", ", badNames));
+    return 0;
+}
+
 // "tables <file.dll>" — authoritative metadata dump for debugging the load bug.
 if (args.Length >= 2 && args[0] == "tables")
 {
