@@ -32,6 +32,7 @@ public sealed unsafe class ObjectFile
     public List<ObjMethod> Methods = new();
 
     private byte[] _metaBytes;      // backing store for Md (kept alive by this field)
+    private System.Runtime.InteropServices.GCHandle _metaPin; // pins _metaBytes for Md's lifetime
 
     public static ObjectFile Load(byte[] bytes, string path)
     {
@@ -43,8 +44,16 @@ public sealed unsafe class ObjectFile
             ?? throw new LinkException($"{path}: no .cormeta section");
         of._metaBytes = of.Coff.GetSectionData(meta).ToArray();
 
-        fixed (byte* p = of._metaBytes)
-            of.Md = new MetadataReader(p, of._metaBytes.Length);
+        // The MetadataReader holds a RAW pointer into _metaBytes. A `fixed` block
+        // only pins for its own scope, so once it exits the GC may relocate the
+        // managed array out from under the reader — harmless for tiny objects, but
+        // with SQLite's multi-MB .cormeta and the allocation pressure of the merge
+        // the array DOES move, and the reader then reads freed/moved memory
+        // ("Read out of bounds"). Pin for the ObjectFile's entire lifetime.
+        of._metaPin = System.Runtime.InteropServices.GCHandle.Alloc(
+            of._metaBytes, System.Runtime.InteropServices.GCHandleType.Pinned);
+        byte* p = (byte*)of._metaPin.AddrOfPinnedObject();
+        of.Md = new MetadataReader(p, of._metaBytes.Length);
 
         var bodyLoc = of.Coff.BuildMethodBodyLocationMap();
         foreach (var mh in of.Md.MethodDefinitions)
