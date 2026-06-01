@@ -25,11 +25,14 @@ public class SqliteSmokeTests
         return dir?.FullName ?? throw new DirectoryNotFoundException("repo root (samples/sqlite) not found");
     }
 
-    [Fact]
-    public void Memory_db_crud_returns_55_on_linux()
+    /// <summary>
+    /// Compiles the SQLite amalgamation + shim + main to CoreCLR objs and links
+    /// them into a single pure-MSIL <c>app.dll</c>, returning the PE bytes. Shared
+    /// by the Linux (WSL) and Windows (dotnet host) smoke tests so both exercise
+    /// the SAME linked assembly.
+    /// </summary>
+    static byte[] BuildSqliteAppDll()
     {
-        if (!WslRunner.Available()) return; // WSL+dotnet required for the Linux runtime check
-
         string sq = Path.Combine(RepoRoot(), "samples", "sqlite");
         string[] defs =
         {
@@ -51,8 +54,25 @@ public class SqliteSmokeTests
             objs.Add(ObjectFile.Load(obj, Path.GetFileName(src)));
         }
 
-        byte[] pe = LinkPipeline.LinkToBytes(objs, new List<string>());
+        return LinkPipeline.LinkToBytes(objs, new List<string>());
+    }
+
+    [Fact]
+    public void Memory_db_crud_returns_55_on_linux()
+    {
+        if (!WslRunner.Available()) return; // WSL+dotnet required for the Linux runtime check
+
+        byte[] pe = BuildSqliteAppDll();
         var (exit, output) = WslRunner.Run(pe, WslRunner.NetCoreRuntimeConfig);
         Assert.True(exit == 55, $"expected exit 55 (sum 20+22+13), got {exit}.\n{output}");
+    }
+
+    [Fact]
+    public void Memory_db_crud_returns_55_on_windows()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        byte[] pe = BuildSqliteAppDll();
+        int exit = DotnetHostRunner.RunPeViaDotnetHost(pe, out string output);
+        Assert.True(exit == 55, $"windows exit {exit}: {output}");
     }
 }

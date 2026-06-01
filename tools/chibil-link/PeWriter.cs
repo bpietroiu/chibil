@@ -325,6 +325,13 @@ public sealed class PeWriter
         var peHeader = PEHeaderBuilder.CreateExecutableHeader();
 
         byte[] pe;
+        // NOTE: as of Task 2 (Windows global-data model) the writable .sdata section
+        // is no longer load-bearing: all mutable C globals moved to plain CLR static
+        // fields, so the FieldRVA data this section carries is now exclusively
+        // READ-ONLY (string literals + the `$init` cpblk-source fields). The writable
+        // mapping is harmless and kept only to preserve the verified Linux code path
+        // (and to sidestep ManagedPEBuilder's mappedFieldData literal-mis-addressing
+        // documented below). A future cleanup could switch to a plain ManagedPEBuilder.
         var peBuilder = new WritableDataPEBuilder(
             peHeader,
             rootBuilder,
