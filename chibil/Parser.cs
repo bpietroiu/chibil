@@ -537,6 +537,11 @@ public class Parser
 
     private Member GetStructMember(CType ty, Token tok)
     {
+        // A qualified copy (e.g. `const struct M`) made while the struct tag was
+        // still incomplete snapshots a null member list; struct completion mutates
+        // the original tag (the copy's Origin), not the copy. Follow Origin to the
+        // canonical tag so members resolve once the struct is completed.
+        while (ty.Members == null && ty.Origin != null) ty = ty.Origin;
         string name = Util.GetTokenText(tok);
         for (Member mem = ty.Members; mem != null; mem = mem.Next)
         {
