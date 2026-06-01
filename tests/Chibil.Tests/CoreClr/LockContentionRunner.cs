@@ -57,7 +57,7 @@ internal static class LockContentionRunner
         Process bg = null;
         try
         {
-            Wsl($"mkdir -p {ltmp} && cp '{winWsl}'/* {ltmp}/");
+            Wsl($"mkdir -p {ltmp} && cp '{winWsl}/'* {ltmp}/");
             bg = StartWslBg($"cd {ltmp} && dotnet holder.dll");
             if (!WaitFile(() => WslTest($"test -f {ltmp}/held.marker"), 30000)) throw new Exception("holder never acquired the lock (linux)");
             int contended = WslExit($"cd {ltmp} && dotnet contender.dll");

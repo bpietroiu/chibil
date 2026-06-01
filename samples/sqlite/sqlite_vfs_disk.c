@@ -48,7 +48,8 @@ static int dfFileSize(sqlite3_file *f, sqlite3_int64 *pSize){ DiskFile *df=(Disk
     if (g_win){ long long s=0; if(!GetFileSizeEx((void*)df->h,&s)) return SQLITE_IOERR_FSTAT; *pSize=s; return SQLITE_OK; }
     long long s = lseek((int)df->h, 0, SEEK_END); if (s<0) return SQLITE_IOERR_FSTAT; *pSize=s; return SQLITE_OK; }
 static int dfClose(sqlite3_file *f){ DiskFile *df=(DiskFile*)f;
-    if (g_win) CloseHandle((void*)df->h); else close((int)df->h); return SQLITE_OK; }
+    if (g_win) CloseHandle((void*)df->h); else close((int)df->h);
+    df->eLock = SQLITE_LOCK_NONE; return SQLITE_OK; }
 /* SQLite canonical lock bytes (must match os_unix.c / os_win.c for interop). */
 #define PENDING_BYTE  0x40000000LL
 #define RESERVED_BYTE (PENDING_BYTE + 1)
@@ -131,7 +132,10 @@ static int dfUnlock(sqlite3_file *f, int eTarget){
     if (eTarget == SQLITE_LOCK_SHARED){
         if (df->eLock == SQLITE_LOCK_EXCLUSIVE){
             /* downgrade the shared range from write back to read */
-            if (g_win){ unlock_byte(df, SHARED_FIRST, SHARED_SIZE); lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0); } /* brief no-lock window between unlock and relock — same as os_win.c; a relock kernel-failure is unhandled */
+            if (g_win){ unlock_byte(df, SHARED_FIRST, SHARED_SIZE); lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0); }
+            /* Win: briefly no SHARED-range lock, but the PENDING write-lock is still
+               held so no new reader can enter; same pattern as os_win.c. A relock
+               kernel-failure (not contention) is unhandled. */
             else lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0);     /* fcntl converts in place */
         }
         unlock_byte(df, PENDING_BYTE, 1);
@@ -206,7 +210,7 @@ static int vFullPath(sqlite3_vfs *v, const char *z, int n, char *out){ (void)v;
 /* VFS-level housekeeping (own copies; sqlite_shim.c's are static there). */
 static unsigned int g_rng = 0xC0FFEEu;
 static int vRand(sqlite3_vfs *v,int n,char *o){ (void)v; for(int i=0;i<n;i++){ g_rng=g_rng*1103515245u+12345u; o[i]=(char)(g_rng>>16);} return n; }
-static int vSleep(sqlite3_vfs *v,int us){ (void)v;(void)us; return 0; }
+static int vSleep(sqlite3_vfs *v,int us){ (void)v;(void)us; return 0; }  /* SP3b: no-op; harnesses use busy_timeout=0 (a retrying busy-handler would spin) */
 static int vCurTime(sqlite3_vfs *v,double *p){ (void)v; *p=2440587.5; return SQLITE_OK; }
 static int vLastErr(sqlite3_vfs *v,int n,char *b){ (void)v;(void)n;(void)b; return 0; }
 
