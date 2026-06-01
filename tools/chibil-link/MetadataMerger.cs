@@ -65,6 +65,19 @@ public sealed class MetadataMerger
         public ObjMethod Method;        // null => synthesized entry / P/Invoke
         public int PredictedRow;        // 1-based MethodDef row
         public PInvokeStub PInvoke;     // non-null => synthesized native import (no body)
+        public SynthMethod Synth;       // non-null => synthesized method with prebuilt IL (e.g. .cctor)
+    }
+
+    /// <summary>A fully synthesized method (name, signature, IL already built by
+    /// the writer) reserved during prediction. Used for the module initializer
+    /// that applies FieldRVA pointer relocations at load time.</summary>
+    public sealed class SynthMethod
+    {
+        public string Name;
+        public BlobHandle SignatureBlob;
+        public byte[] Il;
+        public int MaxStack;
+        public MethodAttributes Attributes;
     }
 
     /// <summary>A synthesized P/Invoke MethodDef reserved during prediction and
@@ -107,6 +120,14 @@ public sealed class MetadataMerger
         public byte[] Data;                // initial bytes for the mapped-field-data blob
         public int Alignment;
         public int PredictedRow;           // 1-based output Field row
+
+        // Source location of this field's initial data, for resolving the
+        // pointer relocations that target/originate inside it (g_vfs's function
+        // pointers, sqlite3.c's static method tables, string-pointer globals…).
+        public ObjectFile SourceObj;
+        public int SourceSection;          // COFF section number (1-based) the data lives in
+        public int SourceOffset;           // byte offset of the data within that section
+        public int Size;                   // data length in bytes
     }
 
     public readonly List<CopiedTypeDef> CopiedTypeDefs = new();
@@ -177,6 +198,14 @@ public sealed class MetadataMerger
         foreach (var of in _objs)
             EnsureStandaloneSigTypeDefs(of);
 
+        // ── Value-type TypeDefs referenced by METHOD signatures (params/return).
+        //    SQLite passes structs through many APIs; a method param/return type
+        //    can reference a value-type TypeDef pulled in by neither a field nor a
+        //    local sig. Predict them here so the rewritten method signature maps
+        //    them to a real row instead of row 0 (which corrupts <Module>).
+        foreach (var of in _objs)
+            EnsureMethodSigTypeDefs(of);
+
         // ── StandAloneSigs (local-variable sigs) ──────────────────────────────
         foreach (var of in _objs)
             CopyStandaloneSigs(of);
@@ -219,6 +248,15 @@ public sealed class MetadataMerger
         _outMethodRow++;
         var slot = new MethodSlot { PredictedRow = _outMethodRow, PInvoke = stub };
         Plan.Add(slot);
+        return MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(_outMethodRow));
+    }
+
+    /// <summary>Reserve the MethodDef row for a fully synthesized method (e.g. the
+    /// FieldRVA-relocation module initializer). Returns the reserved token.</summary>
+    public int ReserveSynthRow(SynthMethod synth)
+    {
+        _outMethodRow++;
+        Plan.Add(new MethodSlot { PredictedRow = _outMethodRow, Synth = synth });
         return MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(_outMethodRow));
     }
 
@@ -356,9 +394,21 @@ public sealed class MetadataMerger
             int align = GetFieldDataAlignment(md, fd, size);
 
             var sec = of.Coff.GetSection(loc.SectionNumber);
-            byte[] secData = of.Coff.GetPatchedSectionData(sec);
             byte[] data = new byte[size];
-            Array.Copy(secData, loc.Offset, data, 0, Math.Min(size, secData.Length - loc.Offset));
+            // A field living in an UNINITIALIZED-data (BSS) section — e.g. the
+            // shim's 8 MB `g_heap[]` or SQLite's zero-initialized globals — has
+            // no bytes in the file (PointerToRawData == 0). Its FieldRVA data is
+            // simply `size` zero bytes; reading the file would over-read. Only
+            // sections with real raw data are patched/copied.
+            const uint IMAGE_SCN_CNT_UNINITIALIZED_DATA = 0x00000080;
+            bool isBss = sec.PointerToRawData == 0 ||
+                         (sec.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) != 0;
+            if (!isBss)
+            {
+                byte[] secData = of.Coff.GetPatchedSectionData(sec);
+                Array.Copy(secData, loc.Offset, data, 0,
+                    Math.Max(0, Math.Min(size, secData.Length - loc.Offset)));
+            }
 
             var sigReader = md.GetBlobReader(fd.Signature);
             var sigB = new BlobBuilder();
@@ -374,6 +424,10 @@ public sealed class MetadataMerger
                 Data = data,
                 Alignment = align,
                 PredictedRow = _outFieldRow,
+                SourceObj = of,
+                SourceSection = loc.SectionNumber,
+                SourceOffset = loc.Offset,
+                Size = size,
             });
         }
     }
@@ -398,6 +452,40 @@ public sealed class MetadataMerger
             int varCount = reader.ReadCompressedInteger();
             for (int i = 0; i < varCount; i++)
                 ScanSigTypeForTypeDefs(of, ref reader);
+        }
+    }
+
+    /// <summary>
+    /// Ensure every value-type TypeDef referenced by a METHOD signature
+    /// (parameter or return type) is copied/predicted. SQLite passes structs by
+    /// value/pointer through many APIs (e.g. <c>sqlite3_value</c>,
+    /// <c>sqlite3_vfs</c>), so a method's param/return type may reference a
+    /// value-type TypeDef that NO field or local-variable signature pulls in.
+    /// Without this pass the rewriter maps that token to row 0, the method
+    /// signature decodes as malformed, and the CLR rejects the whole
+    /// <c>&lt;Module&gt;</c> type (entry point becomes unresolvable).
+    /// </summary>
+    private void EnsureMethodSigTypeDefs(ObjectFile of)
+    {
+        var md = of.Md;
+        for (int r = 1; r <= md.GetTableRowCount(TableIndex.MethodDef); r++)
+        {
+            var def = md.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(r));
+            var reader = md.GetBlobReader(def.Signature);
+            SignatureHeader header = reader.ReadSignatureHeader();
+            if (header.IsGeneric) reader.ReadCompressedInteger(); // generic param count
+            int paramCount = reader.ReadCompressedInteger();
+            ScanSigTypeForTypeDefs(of, ref reader);              // return type
+            for (int p = 0; p < paramCount; p++)
+            {
+                // A SENTINEL (vararg "...") may appear before a param; skip it.
+                if (reader.RemainingBytes > 0)
+                {
+                    byte peek = reader.ReadByte();
+                    if (peek != (byte)SignatureTypeCode.Sentinel) reader.Offset -= 1;
+                }
+                ScanSigTypeForTypeDefs(of, ref reader);
+            }
         }
     }
 
@@ -481,22 +569,11 @@ public sealed class MetadataMerger
         var md = of.Md;
         var sigReader = md.GetBlobReader(fd.Signature);
         sigReader.ReadSignatureHeader(); // FIELD
-    again:
-        SignatureTypeCode tc = sigReader.ReadSignatureTypeCode();
-        if (tc == SignatureTypeCode.OptionalModifier || tc == SignatureTypeCode.RequiredModifier)
-        {
-            sigReader.ReadTypeHandle();
-            goto again;
-        }
-        if (tc != SignatureTypeCode.TypeHandle) return; // primitive field, no TypeDef.
-
-        // TypeHandle TypeCode (Class/ValueType) is a single byte per ECMA-335 II.23.2.4
-        sigReader.Offset -= 1;
-        sigReader.ReadByte(); // raw 0x11/0x12 tag
-        EntityHandle th = sigReader.ReadTypeHandle();
-        if (th.Kind != HandleKind.TypeDefinition) return; // TypeRef/Spec already handled.
-
-        EnsureTypeDefCopied(of, (TypeDefinitionHandle)th);
+        // Recurse through the WHOLE field type, not just a top-level value type:
+        // a global like `BtShared *sqlite3SharedCacheList` is PTR→VALUETYPE→TypeDef,
+        // and the pointee's TypeDef must still be copied/predicted or the rewritten
+        // signature maps it to row 0 (decodes as malformed → CLR rejects <Module>).
+        ScanSigTypeForTypeDefs(of, ref sigReader);
     }
 
     private void EnsureTypeDefCopied(ObjectFile of, TypeDefinitionHandle inH)
