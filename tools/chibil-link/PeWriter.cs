@@ -152,13 +152,11 @@ public sealed class PeWriter
         // Copy each HasFieldRVA field's bytes into the mapped-field-data blob and
         // emit a Field row + FieldRVA pointing at its offset. All such fields are
         // owned by <Module>, so they occupy Field rows 1..N (matching the
-        // merger's predictions). The blob is handed to the PE builder, which
-        // places it in a data section and rewrites the FieldRVA placeholders.
+        // merger's predictions). The blob is handed to ManagedPEBuilder as
+        // mappedFieldData; it places the bytes in a data section and rewrites the
+        // FieldRVA cells to the real image RVAs itself. All such data is READ-ONLY
+        // (string literals + `$init` cpblk sources), so no writable section is needed.
         var mappedFieldData = new BlobBuilder();
-        // Map each field's output row -> its byte offset within the field-data blob.
-        // The rebaser uses these to set FieldRVA = .sdata base + dataOffset DIRECTLY,
-        // which is robust to however ManagedPEBuilder assigned the placeholder RVAs.
-        var fieldDataOffsets = new Dictionary<int, int>();
 
         // Pass 1: target fields — rows 1..N, one per CopiedField in PredictedRow order.
         // .rdata literals stay HasFieldRVA (read-only data); .data/BSS become plain
@@ -174,7 +172,6 @@ public sealed class PeWriter
                 mappedFieldData.WriteBytes(cf.Data);
                 fh = mdBuilder.AddFieldDefinition(cf.Attributes, mdBuilder.GetOrAddString(cf.Name), cf.SignatureBlob);
                 mdBuilder.AddFieldRelativeVirtualAddress(fh, dataOffset);
-                fieldDataOffsets[MetadataTokens.GetRowNumber(fh)] = dataOffset;
             }
             else
             {
@@ -199,7 +196,6 @@ public sealed class PeWriter
                 cf.SignatureBlob);
             AssertRow(cf.SourceFieldRow, MetadataTokens.GetRowNumber(srcFh), $"Field '{cf.Name}$init'");
             mdBuilder.AddFieldRelativeVirtualAddress(srcFh, dataOffset);
-            fieldDataOffsets[MetadataTokens.GetRowNumber(srcFh)] = dataOffset;
         }
 
         // ── Step 5a: <Module> TypeDef (row 1), owns all fields + methods ──────
@@ -324,37 +320,22 @@ public sealed class PeWriter
 
         var peHeader = PEHeaderBuilder.CreateExecutableHeader();
 
-        byte[] pe;
-        // NOTE: as of Task 2 (Windows global-data model) the writable .sdata section
-        // is no longer load-bearing: all mutable C globals moved to plain CLR static
-        // fields, so the FieldRVA data this section carries is now exclusively
-        // READ-ONLY (string literals + the `$init` cpblk-source fields). The writable
-        // mapping is harmless and kept only to preserve the verified Linux code path
-        // (and to sidestep ManagedPEBuilder's mappedFieldData literal-mis-addressing
-        // documented below). A future cleanup could switch to a plain ManagedPEBuilder.
-        var peBuilder = new WritableDataPEBuilder(
+        // All FieldRVA data is read-only now (string literals + `$init` cpblk
+        // sources; mutable C globals are plain CLR static fields), so it can ride
+        // in ManagedPEBuilder's standard mappedFieldData section, which the builder
+        // places and addresses itself — no custom writable .sdata section and no
+        // FieldRVA rebase post-pass needed.
+        var peBuilder = new ManagedPEBuilder(
             peHeader,
             rootBuilder,
             ilBuilder,
-            fieldData: mappedFieldData,
+            mappedFieldData: mappedFieldData,
             entryPoint: entryHandle,
             flags: CorFlags.ILOnly);
 
         var peBlob = new BlobBuilder();
         peBuilder.Serialize(peBlob);
-        pe = peBlob.ToArray();
-
-        // The field data lives in our own .sdata section at SDataRva. Set each
-        // FieldRVA to (SDataRva + the field's blob offset) DIRECTLY from the offsets
-        // we recorded above. We deliberately do NOT infer a single rebase delta from
-        // the placeholder RVAs ManagedPEBuilder produced: with mappedFieldData=null
-        // those placeholders are laid out by an internal heuristic whose base shifts
-        // by a file-alignment quantum once the field data crosses certain size
-        // thresholds, which silently mis-addressed every literal. Patching the 32-bit
-        // RVA cells changes no table size, so SDataRva is unaffected.
-        if (peBuilder.SDataRva > 0 && fieldDataOffsets.Count > 0)
-            FieldRvaRebaser.SetAbsolute(pe, peBuilder.SDataRva, fieldDataOffsets);
-        return pe;
+        return peBlob.ToArray();
     }
 
     private static int AddBody(
