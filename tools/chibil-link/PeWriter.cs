@@ -149,11 +149,13 @@ public sealed class PeWriter
 
             if (slot.Synth != null)
             {
-                // Synthesized method with prebuilt IL (the FieldRVA .cctor).
+                // Synthesized method with prebuilt IL (FieldRVA .cctor, OS
+                // intrinsic, argv helpers). LocalSig is nil unless the body
+                // needs locals (the argv-marshalling loop).
                 il = slot.Synth.Il;
                 maxStack = slot.Synth.MaxStack;
-                localSig = default;
-                initLocals = false;
+                localSig = slot.Synth.LocalSig;
+                initLocals = slot.Synth.InitLocals;
             }
             else if (slot.Method == null)
             {

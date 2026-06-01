@@ -83,6 +83,10 @@ public sealed class MetadataMerger
         public byte[] Il;
         public int MaxStack;
         public MethodAttributes Attributes;
+        // Optional local-variable signature for synth bodies that need locals
+        // (e.g. the argv-marshalling helper's loop). Nil = no locals.
+        public StandaloneSignatureHandle LocalSig;
+        public bool InitLocals;
     }
 
     /// <summary>A synthesized P/Invoke MethodDef reserved during prediction and
@@ -162,6 +166,15 @@ public sealed class MetadataMerger
 
     public readonly List<CopiedTypeDef> CopiedTypeDefs = new();
     public readonly List<CopiedField> CopiedFields = new();
+
+    // COMMON symbols (external tentative-definition globals) collected during the
+    // data-field pass, merged by name and allocated as one zero-init .bss slot each.
+    private sealed class CommonSym
+    {
+        public int Size;
+        public readonly List<(ObjectFile of, FieldDefinitionHandle fh)> Sites = new();
+    }
+    private readonly Dictionary<string, CommonSym> _commons = new(StringComparer.Ordinal);
 
     // Dedup value-type TypeDefs by (namespace, name, size) across objects.
     // Namespace is included (mirroring TypeRef dedup) so identically-named types
@@ -256,6 +269,17 @@ public sealed class MetadataMerger
 
         foreach (var of in _objs)
             CopyDataFieldsAndTypeDefs(of);
+
+        // Allocate one zero-init .bss slot per COMMON symbol name (external tentative
+        // globals), unless a strong section-bound definition already exists. Must run
+        // after every object's section-bound definitions are predicted.
+        AllocateCommonSymbols();
+
+        // Bind cross-object DATA references to their defining global's row by name
+        // (the data analog of SymbolResolver's function resolution). Must run after
+        // every object's local definitions are predicted, before the mutable source
+        // fields are appended (so references bind to the writable target rows).
+        ResolveCrossObjectFields();
 
         // Append read-only source fields (rows N+1..M) for each Mutable (.data)
         // global, so the .cctor can cpblk their bytes into the writable target.
@@ -406,6 +430,161 @@ public sealed class MetadataMerger
         return _osIsWindowsToken;
     }
 
+    private int _argcToken;
+    private int _makeArgvToken;
+    private EntityHandle _getCmdLineArgsRef;
+
+    /// <summary>MemberRef to <c>string[] [mscorlib]System.Environment::GetCommandLineArgs()</c>.
+    /// Element [0] is the executable path and [1..] the args — exactly C's argv shape.</summary>
+    private EntityHandle GetCommandLineArgsRef()
+    {
+        if (!_getCmdLineArgsRef.IsNil) return _getCmdLineArgsRef;
+        var sig = new BlobBuilder();
+        new BlobEncoder(sig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(0, ret => ret.Type().SZArray().String(), _ => { });
+        var envType = GetOrAddCoreTypeRef("System", "Environment");
+        _getCmdLineArgsRef = Builder.AddMemberReference(
+            envType, Builder.GetOrAddString("GetCommandLineArgs"), Builder.GetOrAddBlob(sig));
+        return _getCmdLineArgsRef;
+    }
+
+    /// <summary>Reserve <c>int __chibil_argc()</c> = <c>GetCommandLineArgs().Length</c>
+    /// (the C <c>argc</c>). Deduped; returns its MethodDef token.</summary>
+    public int ReserveArgcHelper()
+    {
+        if (_argcToken != 0) return _argcToken;
+        var sig = new BlobBuilder();
+        new BlobEncoder(sig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(0, ret => ret.Type().Int32(), _ => { });
+        var il = new BlobBuilder();
+        il.WriteByte(0x28); il.WriteInt32(MetadataTokens.GetToken(GetCommandLineArgsRef())); // call GetCommandLineArgs
+        il.WriteByte(0x8E);   // ldlen
+        il.WriteByte(0x69);   // conv.i4
+        il.WriteByte(0x2A);   // ret
+        _argcToken = ReserveSynthRow(new SynthMethod
+        {
+            Name = "__chibil_argc",
+            SignatureBlob = Builder.GetOrAddBlob(sig),
+            Il = il.ToArray(),
+            MaxStack = 1,
+            Attributes = System.Reflection.MethodAttributes.Public
+                       | System.Reflection.MethodAttributes.Static
+                       | System.Reflection.MethodAttributes.HideBySig,
+        });
+        return _argcToken;
+    }
+
+    /// <summary>Reserve <c>void* __chibil_make_argv()</c>: marshal
+    /// <c>GetCommandLineArgs()</c> into a freshly malloc'd, NUL-terminated
+    /// <c>char**</c> of UTF-8 C strings (a NULL terminator at index argc, per the
+    /// C standard). Memory is intentionally never freed — it lives for the process.
+    /// Deduped; returns its MethodDef token.</summary>
+    public int ReserveMakeArgvHelper()
+    {
+        if (_makeArgvToken != 0) return _makeArgvToken;
+
+        var marshalType = GetOrAddCoreTypeRef("System.Runtime.InteropServices", "Marshal");
+        // native int Marshal::AllocHGlobal(int32)
+        var allocSig = new BlobBuilder();
+        new BlobEncoder(allocSig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(1, ret => ret.Type().IntPtr(), p => p.AddParameter().Type().Int32());
+        var allocRef = Builder.AddMemberReference(
+            marshalType, Builder.GetOrAddString("AllocHGlobal"), Builder.GetOrAddBlob(allocSig));
+        // native int Marshal::StringToCoTaskMemUTF8(string)
+        var s2mSig = new BlobBuilder();
+        new BlobEncoder(s2mSig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(1, ret => ret.Type().IntPtr(), p => p.AddParameter().Type().String());
+        var s2mRef = Builder.AddMemberReference(
+            marshalType, Builder.GetOrAddString("StringToCoTaskMemUTF8"), Builder.GetOrAddBlob(s2mSig));
+
+        int tokCmdline = MetadataTokens.GetToken(GetCommandLineArgsRef());
+        int tokAlloc = MetadataTokens.GetToken(allocRef);
+        int tokS2m = MetadataTokens.GetToken(s2mRef);
+
+        // locals: [0] string[] a, [1] native int block, [2] int32 i, [3] int32 n
+        var localSig = new BlobBuilder();
+        var locals = new BlobEncoder(localSig).LocalVariableSignature(4);
+        locals.AddVariable().Type().SZArray().String();
+        locals.AddVariable().Type().IntPtr();
+        locals.AddVariable().Type().Int32();
+        locals.AddVariable().Type().Int32();
+        var localSigHandle = Builder.AddStandaloneSignature(Builder.GetOrAddBlob(localSig));
+
+        // See EntrySynthesizer for the byte-offset table behind the two branch
+        // displacements (br.s +0x13, blt.s -0x17).
+        var il = new BlobBuilder();
+        il.WriteByte(0x28); il.WriteInt32(tokCmdline);  // call GetCommandLineArgs
+        il.WriteByte(0x0A);                             // stloc.0   a
+        il.WriteByte(0x06);                             // ldloc.0
+        il.WriteByte(0x8E);                             // ldlen
+        il.WriteByte(0x69);                             // conv.i4
+        il.WriteByte(0x0D);                             // stloc.3   n = a.Length
+        il.WriteByte(0x09);                             // ldloc.3
+        il.WriteByte(0x17);                             // ldc.i4.1
+        il.WriteByte(0x58);                             // add
+        il.WriteByte(0x1E);                             // ldc.i4.8
+        il.WriteByte(0x5A);                             // mul       (n+1)*8
+        il.WriteByte(0x28); il.WriteInt32(tokAlloc);    // call AllocHGlobal
+        il.WriteByte(0x0B);                             // stloc.1   block
+        il.WriteByte(0x16);                             // ldc.i4.0
+        il.WriteByte(0x0C);                             // stloc.2   i = 0
+        il.WriteByte(0x2B); il.WriteByte(0x13);         // br.s CHK
+        // LOOPBODY:
+        il.WriteByte(0x07);                             // ldloc.1   block
+        il.WriteByte(0x08);                             // ldloc.2   i
+        il.WriteByte(0x1E);                             // ldc.i4.8
+        il.WriteByte(0x5A);                             // mul       i*8
+        il.WriteByte(0xD3);                             // conv.i
+        il.WriteByte(0x58);                             // add       addr = block + i*8
+        il.WriteByte(0x06);                             // ldloc.0   a
+        il.WriteByte(0x08);                             // ldloc.2   i
+        il.WriteByte(0x9A);                             // ldelem.ref  a[i]
+        il.WriteByte(0x28); il.WriteInt32(tokS2m);      // call StringToCoTaskMemUTF8
+        il.WriteByte(0xDF);                             // stind.i   *addr = ptr
+        il.WriteByte(0x08);                             // ldloc.2
+        il.WriteByte(0x17);                             // ldc.i4.1
+        il.WriteByte(0x58);                             // add
+        il.WriteByte(0x0C);                             // stloc.2   i++
+        // CHK:
+        il.WriteByte(0x08);                             // ldloc.2   i
+        il.WriteByte(0x09);                             // ldloc.3   n
+        il.WriteByte(0x32); il.WriteByte(0xE9);         // blt.s LOOPBODY
+        // argv[n] = NULL
+        il.WriteByte(0x07);                             // ldloc.1   block
+        il.WriteByte(0x09);                             // ldloc.3   n
+        il.WriteByte(0x1E);                             // ldc.i4.8
+        il.WriteByte(0x5A);                             // mul       n*8
+        il.WriteByte(0xD3);                             // conv.i
+        il.WriteByte(0x58);                             // add       block + n*8
+        il.WriteByte(0x16);                             // ldc.i4.0
+        il.WriteByte(0xD3);                             // conv.i
+        il.WriteByte(0xDF);                             // stind.i   *(block+n*8) = NULL
+        il.WriteByte(0x07);                             // ldloc.1   return block
+        il.WriteByte(0x2A);                             // ret
+
+        var argvSig = new BlobBuilder();
+        new BlobEncoder(argvSig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(0, ret => ret.Type().IntPtr(), _ => { });
+        _makeArgvToken = ReserveSynthRow(new SynthMethod
+        {
+            Name = "__chibil_make_argv",
+            SignatureBlob = Builder.GetOrAddBlob(argvSig),
+            Il = il.ToArray(),
+            MaxStack = 4,
+            LocalSig = localSigHandle,
+            InitLocals = true,
+            Attributes = System.Reflection.MethodAttributes.Public
+                       | System.Reflection.MethodAttributes.Static
+                       | System.Reflection.MethodAttributes.HideBySig,
+        });
+        return _makeArgvToken;
+    }
+
     /// <summary>Reserve the MethodDef row for the synthesized entry method.
     /// Returns the predicted row (and handle). Call exactly once, after
     /// MergeAndPredict, before emitting bodies.</summary>
@@ -511,6 +690,88 @@ public sealed class MetadataMerger
     /// Only fields whose data lives in a real section are copied (a BSS/common
     /// global with no initializer is not a data symbol and is out of scope).
     /// </summary>
+    /// <summary>
+    /// Allocate storage for COMMON symbols — external tentative-definition globals
+    /// (<c>int g;</c> at file scope) that COFF emits as Sect=0/Value=size rather than
+    /// a section-bound slot. Real linkers merge all commons of a name into one
+    /// zero-initialized .bss object sized to the largest declaration. Each gets one
+    /// <see cref="CopiedField"/> (Bss), and every site's FieldDef is mapped to it. A
+    /// name that already has a strong section-bound definition is left to that
+    /// definition (its sites resolve by name in <see cref="ResolveCrossObjectFields"/>).
+    /// </summary>
+    private void AllocateCommonSymbols()
+    {
+        var strongDef = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var cf in CopiedFields) strongDef.Add(cf.Name);
+
+        foreach (var (name, ci) in _commons)
+        {
+            if (strongDef.Contains(name)) continue;   // strong def wins; refs resolve by name
+
+            var (of0, fh0) = ci.Sites[0];
+            var md0 = of0.Md;
+            var fd0 = md0.GetFieldDefinition(fh0);
+            EnsureFieldTypeDefs(of0, fd0);
+
+            var sigReader = md0.GetBlobReader(fd0.Signature);
+            var sigB = new BlobBuilder();
+            EcmaSignatureRewriter.RewriteFieldSignature(sigReader, _maps[of0], sigB);
+
+            _outFieldRow++;
+            CopiedFields.Add(new CopiedField
+            {
+                Attributes = fd0.Attributes,
+                Name = name,
+                SignatureBlob = Builder.GetOrAddBlob(sigB),
+                Data = new byte[ci.Size],            // zero-initialized
+                Alignment = GetFieldDataAlignment(md0, fd0, ci.Size),
+                PredictedRow = _outFieldRow,
+                Kind = CopiedField.FieldKind.Bss,
+                SourceObj = of0,
+                SourceSection = 0,                   // no backing section (zero-init)
+                SourceOffset = 0,
+                Size = ci.Size,
+            });
+
+            // Point every declaration site (across all objects) at the one slot.
+            foreach (var (of, fh) in ci.Sites)
+                _maps[of].SetField(fh, _outFieldRow);
+        }
+    }
+
+    /// <summary>
+    /// Cross-object DATA symbol resolution — the data analog of
+    /// <see cref="SymbolResolver"/>'s function resolution. A global defined in TU A
+    /// and referenced from TU B is emitted in B as a FieldDef with no storage (no
+    /// HasFieldRVA / no section), which <see cref="CopyDataFieldsAndTypeDefs"/>
+    /// never maps. Bind each such unmapped FieldDef to the output row of the matching
+    /// DEFINED global by NAME. Names defined in no object (libc data: environ, stdin,
+    /// optarg, …) stay unmapped and surface later as the data-import frontier.
+    /// </summary>
+    private void ResolveCrossObjectFields()
+    {
+        // name -> output field row for every DEFINED (copied) global. Last def wins,
+        // mirroring the function table's COMDAT-ish policy.
+        var definedField = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var cf in CopiedFields)
+            definedField[cf.Name] = cf.PredictedRow;
+
+        foreach (var of in _objs)
+        {
+            var md = of.Md;
+            var map = _maps[of];
+            int rows = md.GetTableRowCount(TableIndex.Field);
+            for (int r = 1; r <= rows; r++)
+            {
+                var fh = MetadataTokens.FieldDefinitionHandle(r);
+                if (map.MapField(fh).RowId() != 0) continue;   // already a local definition
+                string name = md.GetString(md.GetFieldDefinition(fh).Name);
+                if (definedField.TryGetValue(name, out int outRow))
+                    map.SetField(fh, outRow);                  // ref -> defining global's row
+            }
+        }
+    }
+
     private void CopyDataFieldsAndTypeDefs(ObjectFile of)
     {
         var md = of.Md;
@@ -524,8 +785,24 @@ public sealed class MetadataMerger
             if ((fd.Attributes & FieldAttributes.HasFieldRVA) == 0) continue;
 
             int token = MetadataTokens.GetToken(fh);
-            if (!dataLoc.TryGetValue(token, out var loc) || loc.SectionNumber <= 0)
-                continue; // uninitialized (BSS/common) — no data to copy.
+            if (!dataLoc.TryGetValue(token, out var loc))
+                continue; // pure extern declaration — no storage; resolved by name later.
+            if (loc.SectionNumber <= 0)
+            {
+                // COMMON symbol (external tentative definition, e.g. `int g;`):
+                // Sect=0 with the size carried in Offset/Value. Real linkers merge
+                // these by name into one zero-init .bss slot (size = max). Collect
+                // now; AllocateCommonSymbols allocates after all section-bound
+                // definitions are known (a strong def, if any, wins).
+                if (loc.Offset > 0)
+                {
+                    string cn = md.GetString(fd.Name);
+                    if (!_commons.TryGetValue(cn, out var ci)) { ci = new CommonSym(); _commons[cn] = ci; }
+                    ci.Size = Math.Max(ci.Size, loc.Offset);
+                    ci.Sites.Add((of, fh));
+                }
+                continue;
+            }
 
             // Ensure the value-type TypeDef(s) referenced by the field signature
             // are copied first, so the rewritten signature resolves.
