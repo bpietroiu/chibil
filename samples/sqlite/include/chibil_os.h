@@ -12,6 +12,7 @@ extern int __chibil_os_is_windows(void);
 #define O_WRONLY 1
 #define O_RDWR   2
 #define O_CREAT  0100   /* octal 0100 = 64 (Linux x86-64) */
+#define O_EXCL   0200
 #define O_TRUNC  01000  /* octal 01000 = 512 */
 #define SEEK_SET 0
 #define SEEK_END 2
@@ -37,6 +38,7 @@ extern long long lseek(int fd, long long off, int whence);
 #define FILE_ATTRIBUTE_NORMAL 0x80u
 #define FILE_BEGIN            0
 #define INVALID_FILE_ATTRIBUTES 0xFFFFFFFFu
+#define ERROR_HANDLE_EOF      38   /* a positioned ReadFile past EOF returns FALSE with this */
 
 /* OVERLAPPED, x64 layout (32 bytes). We set Offset/OffsetHigh from a 64-bit offset.
    (The real Win32 struct has a `PVOID Pointer` union arm overlapping Offset/OffsetHigh
@@ -60,6 +62,7 @@ extern int  CloseHandle(void *h);
 extern int  DeleteFileA(const char *name);
 extern int  GetFileSizeEx(void *h, long long *size);
 extern unsigned int GetFileAttributesA(const char *name);
+extern unsigned int GetLastError(void);
 
 /* INVALID_HANDLE_VALUE == (void*)-1 */
 #define INVALID_HANDLE_VALUE ((void *)(long long)-1)

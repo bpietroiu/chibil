@@ -12,7 +12,7 @@ public class PositionedIoTests
         "open=c","pread=c","pwrite=c","ftruncate=c","fsync=c","close=c","unlink=c","access=c","lseek=c",
         "CreateFileA=kernel32","ReadFile=kernel32","WriteFile=kernel32","SetFilePointerEx=kernel32",
         "SetEndOfFile=kernel32","FlushFileBuffers=kernel32","CloseHandle=kernel32","DeleteFileA=kernel32",
-        "GetFileSizeEx=kernel32","GetFileAttributesA=kernel32",
+        "GetFileSizeEx=kernel32","GetFileAttributesA=kernel32","GetLastError=kernel32",
     };
     internal static Dictionary<string,string> PinvokeMap()
     {

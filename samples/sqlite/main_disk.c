@@ -9,7 +9,7 @@ static int run(void){
     if (sqlite3_open("sp3.db", &db) != SQLITE_OK) return 101;
     if (sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS t(a INTEGER);"
                          "DELETE FROM t;"
-                         "INSERT INTO t VALUES(20),(22),(13);", 0,0,0) != SQLITE_OK) return 102;
+                         "INSERT INTO t VALUES(20),(22),(13);", 0,0,0) != SQLITE_OK) { sqlite3_close(db); return 102; }
     sqlite3_close(db);                       /* flush + close the file */
     return 0;
 }

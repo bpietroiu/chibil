@@ -5,7 +5,7 @@
 #include "sqlite3.h"
 #include "chibil_os.h"
 
-static int g_win;
+static int g_win;   /* set ONCE in register_disk_vfs() before any open; read-only thereafter (THREADSAFE=0) */
 
 typedef struct DiskFile { sqlite3_file base; long long h; } DiskFile;
 
@@ -14,7 +14,13 @@ static void zero(void *p, int n){ char *z=(char*)p; for(int i=0;i<n;i++) z[i]=0;
 static int dfRead(sqlite3_file *f, void *buf, int n, sqlite3_int64 off){
     DiskFile *df=(DiskFile*)f; long long got;
     if (g_win){ OVERLAPPED ov; zero(&ov,sizeof ov); ov.Offset=(unsigned int)off; ov.OffsetHigh=(unsigned int)(off>>32);
-        unsigned int rd=0; ReadFile((void*)df->h,buf,(unsigned int)n,&rd,&ov); got=(long long)rd; }
+        unsigned int rd=0;
+        int ok = ReadFile((void*)df->h,buf,(unsigned int)n,&rd,&ov);
+        /* A positioned ReadFile that hits EOF returns FALSE with ERROR_HANDLE_EOF and rd<n;
+           that is a legitimate short read (SQLite zero-fills). Only a non-EOF FALSE is a
+           hard I/O error. (Mirrors SQLite's own winRead.) */
+        if (!ok && GetLastError() != ERROR_HANDLE_EOF) return SQLITE_IOERR_READ;
+        got=(long long)rd; }
     else got = pread((int)df->h, buf, (unsigned long long)n, off);
     if (got == n) return SQLITE_OK;
     if (got < 0) return SQLITE_IOERR_READ;
@@ -56,14 +62,19 @@ static sqlite3_io_methods g_io = {
 
 static int vOpen(sqlite3_vfs *v, const char *z, sqlite3_file *f, int flags, int *pOut){
     (void)v; DiskFile *df=(DiskFile*)f; df->base.pMethods=0;
+    if (!z) return SQLITE_CANTOPEN;   /* temp files unsupported (SQLITE_TEMP_STORE=3 keeps temp in RAM) */
     long long h;
     if (g_win){
-        unsigned int disp = (flags & SQLITE_OPEN_CREATE) ? OPEN_ALWAYS : OPEN_EXISTING;
+        unsigned int disp = (flags & SQLITE_OPEN_EXCLUSIVE) ? CREATE_NEW
+                          : (flags & SQLITE_OPEN_CREATE)    ? OPEN_ALWAYS
+                          :                                   OPEN_EXISTING;
         h = (long long)(void*)CreateFileA(z, GENERIC_READ|GENERIC_WRITE,
                 FILE_SHARE_READ|FILE_SHARE_WRITE, 0, disp, FILE_ATTRIBUTE_NORMAL, 0);
         if ((void*)h == INVALID_HANDLE_VALUE) return SQLITE_CANTOPEN;
     } else {
-        int of = O_RDWR | ((flags & SQLITE_OPEN_CREATE) ? O_CREAT : 0);
+        int of = O_RDWR
+               | ((flags & SQLITE_OPEN_CREATE)    ? O_CREAT : 0)
+               | ((flags & SQLITE_OPEN_EXCLUSIVE) ? O_EXCL  : 0);
         h = open(z, of, 420);
         if (h < 0) return SQLITE_CANTOPEN;
     }
@@ -75,10 +86,13 @@ static int vDelete(sqlite3_vfs *v, const char *z, int s){ (void)v;(void)s;
     if (g_win) return DeleteFileA(z) ? SQLITE_OK : SQLITE_IOERR_DELETE;
     return unlink(z)==0 ? SQLITE_OK : SQLITE_IOERR_DELETE; }
 static int vAccess(sqlite3_vfs *v, const char *z, int flags, int *pOut){ (void)v;(void)flags;
+    /* Only existence is needed here (the pager's hot-journal check); READWRITE/READ
+       permission modes are not exercised under this config — SP3b can extend. */
     if (g_win) *pOut = (GetFileAttributesA(z) != INVALID_FILE_ATTRIBUTES);
     else *pOut = (access(z, F_OK) == 0);
     return SQLITE_OK; }
 static int vFullPath(sqlite3_vfs *v, const char *z, int n, char *out){ (void)v;
+    if (n <= 0) return SQLITE_OK;
     int i=0; while(z[i] && i<n-1){ out[i]=z[i]; i++; } out[i]=0; return SQLITE_OK; }
 
 /* VFS-level housekeeping (own copies; sqlite_shim.c's are static there). */
@@ -88,6 +102,9 @@ static int vSleep(sqlite3_vfs *v,int us){ (void)v;(void)us; return 0; }
 static int vCurTime(sqlite3_vfs *v,double *p){ (void)v; *p=2440587.5; return SQLITE_OK; }
 static int vLastErr(sqlite3_vfs *v,int n,char *b){ (void)v;(void)n;(void)b; return 0; }
 
+/* sqlite3_vfs (iVersion 3): iVersion, szOsFile, mxPathname, pNext, zName, pAppData,
+ * xOpen, xDelete, xAccess, xFullPathname, [4 v1 xDl* = 0],
+ * xRandomness, xSleep, xCurrentTime, xGetLastError, [xCurrentTimeInt64=0], [3 v3 syscall=0]. */
 static sqlite3_vfs g_disk_vfs = {
     3, sizeof(DiskFile), 1024, 0, "chibil-disk", 0,
     vOpen, vDelete, vAccess, vFullPath,
