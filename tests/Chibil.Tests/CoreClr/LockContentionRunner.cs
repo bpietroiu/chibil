@@ -32,15 +32,17 @@ internal static class LockContentionRunner
             StageWin(dir, "contender.dll", contender);
             bg = Process.Start(new ProcessStartInfo("dotnet", "\"holder.dll\"")
             { WorkingDirectory = dir, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
+            bg.BeginOutputReadLine();
+            bg.BeginErrorReadLine();
             string held = Path.Combine(dir, "held.marker");
             if (!WaitFile(() => File.Exists(held), 30000)) throw new Exception("holder never acquired the lock");
             int contended = RunWin(dir, "contender.dll");
             File.WriteAllText(Path.Combine(dir, "release.marker"), "");
-            bg.WaitForExit(30000);
+            if (!bg.WaitForExit(30000)) throw new Exception("holder did not exit after release.marker");
             int recovered = RunWin(dir, "contender.dll");
             return (contended, recovered);
         }
-        finally { try { if (bg != null && !bg.HasExited) bg.Kill(true); } catch { } try { Directory.Delete(dir, true); } catch { } }
+        finally { try { if (bg != null && !bg.HasExited) bg.Kill(true); } catch { } bg?.Dispose(); try { Directory.Delete(dir, true); } catch { } }
     }
 
     public static (int contended, int recovered) RunLinux(byte[] holder, byte[] contender)
@@ -60,13 +62,14 @@ internal static class LockContentionRunner
             if (!WaitFile(() => WslTest($"test -f {ltmp}/held.marker"), 30000)) throw new Exception("holder never acquired the lock (linux)");
             int contended = WslExit($"cd {ltmp} && dotnet contender.dll");
             Wsl($"touch {ltmp}/release.marker");
-            bg.WaitForExit(30000);
+            if (!bg.WaitForExit(30000)) throw new Exception("holder did not exit after release.marker");
             int recovered = WslExit($"cd {ltmp} && dotnet contender.dll");
             return (contended, recovered);
         }
         finally
         {
             try { if (bg != null && !bg.HasExited) bg.Kill(true); } catch { }
+            bg?.Dispose();
             try { Wsl($"rm -rf {ltmp}"); } catch { }
             try { Directory.Delete(win, true); } catch { }
         }
@@ -85,10 +88,11 @@ internal static class LockContentionRunner
         { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         var p = Process.Start(psi);
         if (!background) { p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd(); }
+        else { p.BeginOutputReadLine(); p.BeginErrorReadLine(); }
         return p;
     }
-    static void Wsl(string cmd) { var p = WslStart(cmd, false); p.WaitForExit(30000); }
-    static bool WslTest(string cmd) { var p = WslStart(cmd, false); p.WaitForExit(15000); return p.ExitCode == 0; }
-    static int WslExit(string cmd) { var p = WslStart(cmd, false); if (!p.WaitForExit(30000)) { p.Kill(true); } return p.ExitCode; }
+    static void Wsl(string cmd)     { using var p = WslStart(cmd, false); p.WaitForExit(30000); }
+    static bool WslTest(string cmd) { using var p = WslStart(cmd, false); p.WaitForExit(15000); return p.ExitCode == 0; }
+    static int  WslExit(string cmd) { using var p = WslStart(cmd, false); if (!p.WaitForExit(30000)) p.Kill(true); return p.ExitCode; }
     static Process StartWslBg(string cmd) => WslStart(cmd, true);
 }

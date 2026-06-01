@@ -9,7 +9,7 @@ static void touch(const char *p){
     if (__chibil_os_is_windows()){
         void *h = CreateFileA(p, GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, 0, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
         if ((void*)h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    } else { int fd = open(p, O_RDWR|O_CREAT, 420); if (fd >= 0) close(fd); }
+    } else { int fd = open(p, O_WRONLY|O_CREAT, 420); if (fd >= 0) close(fd); }
 }
 static int exists(const char *p){
     if (__chibil_os_is_windows()) return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
