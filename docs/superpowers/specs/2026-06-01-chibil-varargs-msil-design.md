@@ -77,6 +77,8 @@ Explicit and unambiguous — no link-time guessing. The libc header declares `in
 - **Struct-by-value as a variadic argument** (`va_arg(ap, struct S)`) — SQLite doesn't use it; emit "not supported."
 - **32-bit target** — the 8-byte-slot model assumes 64-bit pointers; future work.
 - **Exposing a chibil `...` function via the native vararg ABI** (direction 3) — use a `va_list`-taking or non-variadic wrapper.
+- **Indirect variadic calls** (call through a function pointer to a variadic callee) — the va-buffer hidden param cannot be represented in a `calli` standalone signature; emits a compile error.
+- **Cross-TU chibil variadic functions** (a chibil `...` function defined in one object and called from another) — external variadics are assumed native cdecl; a chibil variadic defined in a different TU and declared as `extern` will be wrongly routed to the Layer-2 native path (single-TU programs like the SQLite amalgamation are unaffected).
 
 **The SysV-AL caveat (Layer 2, must be validated in implementation):** the Linux x64 SysV ABI requires register **`AL` = number of SSE/vector args** when calling a variadic function; a concrete non-variadic cdecl `calli`/`pinvokeimpl` does not set it. Consequences:
 - integer/pointer/string varargs to native functions (the bulk of `printf` usage) → work portably;

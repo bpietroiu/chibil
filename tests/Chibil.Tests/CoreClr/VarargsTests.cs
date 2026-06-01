@@ -1,4 +1,5 @@
 using System.Linq;
+using Chibil;
 using ChibilLink;
 using Xunit;
 
@@ -271,6 +272,17 @@ int main(void){ char b[16]; _snprintf(b, 16, ""%d"", 42); return strcmp(b, ""42"
         byte[] pe = ChibilLink.LinkPipeline.LinkToBytes(new[]{of}, new System.Collections.Generic.List<string>{ "msvcrt.dll" });
         int exit = DotnetHostRunner.RunPeViaDotnetHost(pe, out string outp);
         Assert.True(exit == 55, $"exit {exit}: {outp}");
+    }
+
+    [Fact]
+    public void Indirect_variadic_call_is_rejected()
+    {
+        // A variadic function called through a function pointer must produce a clean
+        // compile error. Use __clrcall so taking the function's address succeeds
+        // (ldftn path); the indirect call site is the one that must be rejected.
+        string src = "int __clrcall f(int n, ...){ return n; } int main(void){ int(__clrcall *fp)(int,...) = f; return fp(1, 2, 3); }";
+        var ex = Assert.Throws<ChibiException>(() => TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr));
+        Assert.Contains("variadic", ex.Message);
     }
 
     // Per spec §7, native FLOAT varargs do NOT work through a monomorphized

@@ -2355,15 +2355,28 @@ public class CodeGen
         // Push arguments
         int argCount = 0;
 
+        // ── Indirect variadic calls: not supported ────────────────────────
+        // An indirect call through a function pointer to a variadic function
+        // cannot be lowered correctly: the Layer-1 va-buffer packing would push
+        // a hidden __va pointer, but the calli standalone signature encodes only
+        // the fixed declared params → stack mismatch → InvalidProgramException.
+        // Emit a clean compile error rather than a silent runtime crash.
+        if (isIndirect && funcTy.IsVariadic && funcTy.Params != null)
+            Util.ErrorTok(node.Tok, "indirect calls to variadic functions are not supported");
+
         // ── Layer 2: native __cdecl variadic call (e.g. printf) ──────────
         // A variadic callee that is an EXTERNAL declaration (not defined in this
-        // TU) is a native libc-style variadic. Its concrete arg types are known
-        // at the call site, so emit a normal external call whose MemberRef
-        // signature is fixed params + the concrete (default-promoted) variadic
-        // arg types — NO hidden va-buffer pointer, NO localloc packing.
+        // TU) is assumed to be a native libc-style variadic. Its concrete arg
+        // types are known at the call site, so emit a normal external call whose
+        // MemberRef signature is fixed params + the concrete (default-promoted)
+        // variadic arg types — NO hidden va-buffer pointer, NO localloc packing.
         // (chibil-link turns the unresolved external into a P/Invoke — task B2.)
         // Locally-DEFINED variadics keep the va-buffer path (Layer 1) so the
         // call matches the MethodDef's hidden __va param.
+        // NOTE: external-declared variadics are assumed to be native cdecl; a
+        // chibil variadic defined in a DIFFERENT translation unit and called as
+        // extern is not supported (single-TU programs like the SQLite amalgamation
+        // are unaffected).
         if (funcTy.IsVariadic && funcTy.Params != null && !isIndirect
             && !node.Lhs.Var.IsDefinition)
         {
