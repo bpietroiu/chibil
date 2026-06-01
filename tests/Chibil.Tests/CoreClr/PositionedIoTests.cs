@@ -29,13 +29,14 @@ static long w_open(const char* p){
         return (long long)(void*)CreateFileA(p, GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, 0, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
     return open(p, O_RDWR|O_CREAT|O_TRUNC, 420);
 }
+/* zero OVERLAPPED by hand (no memset in scope in this freestanding test) */
 static int w_pwrite(long h, const void* b, unsigned int n, long long off){
     if (__chibil_os_is_windows()){ OVERLAPPED ov; char* z=(char*)&ov; for(int i=0;i<(int)sizeof ov;i++) z[i]=0; ov.Offset=(unsigned int)off; ov.OffsetHigh=(unsigned int)(off>>32); unsigned int wr=0; return WriteFile((void*)h,b,n,&wr,&ov)&&wr==n?0:-1; }
-    return pwrite((int)h,b,n,off)==(long)n?0:-1;
+    return pwrite((int)h,b,n,off)==(long long)n?0:-1;
 }
 static int w_pread(long h, void* b, unsigned int n, long long off){
     if (__chibil_os_is_windows()){ OVERLAPPED ov; char* z=(char*)&ov; for(int i=0;i<(int)sizeof ov;i++) z[i]=0; ov.Offset=(unsigned int)off; ov.OffsetHigh=(unsigned int)(off>>32); unsigned int rd=0; return ReadFile((void*)h,b,n,&rd,&ov)&&rd==n?0:-1; }
-    return pread((int)h,b,n,off)==(long)n?0:-1;
+    return pread((int)h,b,n,off)==(long long)n?0:-1;
 }
 static void w_close(long h){ if(__chibil_os_is_windows()) CloseHandle((void*)h); else close((int)h); }
 int main(void){

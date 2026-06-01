@@ -17,8 +17,8 @@ extern int __chibil_os_is_windows(void);
 #define SEEK_END 2
 #define F_OK     0
 extern int  open(const char *path, int flags, int mode);   /* declared non-variadic: always pass mode */
-extern long pread(int fd, void *buf, unsigned long n, long long off);
-extern long pwrite(int fd, const void *buf, unsigned long n, long long off);
+extern long long pread(int fd, void *buf, unsigned long long n, long long off);
+extern long long pwrite(int fd, const void *buf, unsigned long long n, long long off);
 extern int  ftruncate(int fd, long long len);
 extern int  fsync(int fd);
 extern int  close(int fd);
@@ -38,7 +38,9 @@ extern long long lseek(int fd, long long off, int whence);
 #define FILE_BEGIN            0
 #define INVALID_FILE_ATTRIBUTES 0xFFFFFFFFu
 
-/* OVERLAPPED, x64 layout (32 bytes). We set Offset/OffsetHigh from a 64-bit offset. */
+/* OVERLAPPED, x64 layout (32 bytes). We set Offset/OffsetHigh from a 64-bit offset.
+   (The real Win32 struct has a `PVOID Pointer` union arm overlapping Offset/OffsetHigh
+   at bytes 16-23; omitted here since we only use the Offset/OffsetHigh members.) */
 typedef struct OVERLAPPED {
     unsigned long long Internal;
     unsigned long long InternalHigh;
