@@ -76,4 +76,29 @@ public class ExportClassTests
         object result = add.Invoke(null, new object[] { 2, 3 });
         Assert.Equal(5, (int)result);
     }
+
+    [Fact]
+    public void Forwarder_zero_arg_function()
+    {
+        // 0 params → no ldarg, MaxStack=1 branch.
+        Assembly asm = LinkAndLoad(
+            "int get_answer(void){ return 42; } int main(void){ return get_answer(); }",
+            "N.S");
+        MethodInfo m = asm.GetType("N.S").GetMethod("get_answer", BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(m);
+        Assert.Equal(42, (int)m.Invoke(null, null));
+    }
+
+    [Fact]
+    public void Forwarder_five_arg_function_exercises_ldarg_s()
+    {
+        // 5 params → arg index 4 uses ldarg.s (0x0E).
+        Assembly asm = LinkAndLoad(
+            "int sum5(int a,int b,int c,int d,int e){ return a+b+c+d+e; } " +
+            "int main(void){ return sum5(1,2,3,4,5); }",
+            "N.S");
+        MethodInfo m = asm.GetType("N.S").GetMethod("sum5", BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(m);
+        Assert.Equal(15, (int)m.Invoke(null, new object[] { 1, 2, 3, 4, 5 }));
+    }
 }

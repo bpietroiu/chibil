@@ -101,7 +101,7 @@ public sealed class PeWriter
         }
 
         // Reserve the entry method's row (last in the plan) so its token is known.
-        var (entryRow, entryHandle) = merger.ReserveEntryRow();
+        var (_, entryHandle) = merger.ReserveEntryRow();
 
         // Synthesize the entry IL (main's final token already baked). The entry
         // signature uses ELEMENT_TYPE_STRING/SZARRAY primitives — no TypeRef.

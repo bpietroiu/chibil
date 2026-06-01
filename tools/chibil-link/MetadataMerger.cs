@@ -283,6 +283,8 @@ public sealed class MetadataMerger
         var reader = of.Md.GetBlobReader(def.Signature);
         var header = reader.ReadSignatureHeader();
         if (header.IsGeneric) reader.ReadCompressedInteger();
+        // ParamCount (ECMA-335 II.23.2.1) does NOT include the vararg SENTINEL, so
+        // the raw count is exactly the number of ldarg slots to forward — no skip needed.
         return reader.ReadCompressedInteger();
     }
 

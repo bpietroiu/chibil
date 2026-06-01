@@ -27,6 +27,8 @@ public static class ForwarderSynthesizer
                 Name = m.Name,
                 SignatureBlob = merger.RewriteMethodSignature(of, m), // identical sig (raw pointers)
                 Il = BuildForwarderIl(n, calleeToken),
+                // peak depth = the n args pushed before `call`; the lone return value
+                // (if any) never exceeds that. 0-arg calls still need a slot of 1.
                 MaxStack = n < 1 ? 1 : n,
                 Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig,
             });
