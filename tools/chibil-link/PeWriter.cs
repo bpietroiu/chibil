@@ -300,11 +300,24 @@ public sealed class PeWriter
                     stub.SignatureBlob,
                     bodyOffset: -1,                              // no body
                     parameterList: MetadataTokens.ParameterHandle(1));
+                // SetLastError=true makes the CLR atomically capture the native
+                // last-error immediately after each P/Invoke, so a subsequent
+                // GetLastError() reflects the call that just ran and is not clobbered
+                // by GC/bookkeeping between the two transitions. We mark every stub
+                // EXCEPT an explicit GetLastError import: marking GetLastError itself
+                // SetLastError=true makes its IL stub overwrite the very value the
+                // caller is trying to read (the CLR's post-call capture resets the
+                // OS error), which breaks the C "ReadFile then GetLastError()" EOF
+                // idiom in the disk VFS. So the *producers* of last-error capture it;
+                // the *reader* must stay a plain PreserveSig call.
+                var importAttrs = MethodImportAttributes.CallingConventionCDecl
+                    | MethodImportAttributes.ExactSpelling
+                    | MethodImportAttributes.CharSetAnsi;
+                if (stub.Name != "GetLastError")
+                    importAttrs |= MethodImportAttributes.SetLastError;
                 mdBuilder.AddMethodImport(
                     pinvokeH,
-                    MethodImportAttributes.CallingConventionCDecl
-                        | MethodImportAttributes.ExactSpelling
-                        | MethodImportAttributes.CharSetAnsi,
+                    importAttrs,
                     mdBuilder.GetOrAddString(stub.Name),
                     (ModuleReferenceHandle)stub.ModuleRef);
                 AssertRow(slot.PredictedRow, MetadataTokens.GetRowNumber(pinvokeH),

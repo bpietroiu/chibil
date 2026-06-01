@@ -42,7 +42,9 @@ public sealed class LinkOptions
             if (a.StartsWith("--export-class=")) { o.ExportClass = a["--export-class=".Length..]; continue; }
             if (a.StartsWith("--pinvoke="))
             {
-                foreach (var pair in a["--pinvoke=".Length..].Split(',', System.StringSplitOptions.RemoveEmptyEntries))
+                string spec = a["--pinvoke=".Length..];
+                if (spec.Length == 0) { System.Console.Error.WriteLine("--pinvoke requires name=lib entries"); return null; }
+                foreach (var pair in spec.Split(',', System.StringSplitOptions.RemoveEmptyEntries))
                 {
                     int eq = pair.IndexOf('=');
                     if (eq <= 0 || eq == pair.Length - 1)

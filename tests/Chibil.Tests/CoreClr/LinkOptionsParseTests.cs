@@ -18,6 +18,7 @@ public class LinkOptionsParseTests
     [InlineData("--pinvoke=foo")]    // no '='
     [InlineData("--pinvoke==bar")]   // empty name
     [InlineData("--pinvoke=foo=")]   // empty lib value
+    [InlineData("--pinvoke=")]       // empty value entirely
     public void Pinvoke_rejects_malformed(string flag)
     {
         Assert.Null(LinkOptions.Parse(new[] { flag, "a.obj" }));

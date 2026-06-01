@@ -23,7 +23,7 @@ static int dfRead(sqlite3_file *f, void *buf, int n, sqlite3_int64 off){
         got=(long long)rd; }
     else got = pread((int)df->h, buf, (unsigned long long)n, off);
     if (got == n) return SQLITE_OK;
-    if (got < 0) return SQLITE_IOERR_READ;
+    if (got < 0) return SQLITE_IOERR_READ;   /* live on Linux (pread -1); Windows errors handled above via GetLastError */
     char *z=(char*)buf; for (long long i=got;i<n;i++) z[i]=0;   /* zero-fill tail */
     return SQLITE_IOERR_SHORT_READ;
 }
@@ -63,6 +63,7 @@ static sqlite3_io_methods g_io = {
 static int vOpen(sqlite3_vfs *v, const char *z, sqlite3_file *f, int flags, int *pOut){
     (void)v; DiskFile *df=(DiskFile*)f; df->base.pMethods=0;
     if (!z) return SQLITE_CANTOPEN;   /* temp files unsupported (SQLITE_TEMP_STORE=3 keeps temp in RAM) */
+    /* SP3a: always opened RDWR; SQLITE_OPEN_READONLY is not specialized (WAL / read-only DBs are out of scope). */
     long long h;
     if (g_win){
         unsigned int disp = (flags & SQLITE_OPEN_EXCLUSIVE) ? CREATE_NEW
