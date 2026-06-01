@@ -1949,6 +1949,9 @@ public class Parser
         ty.Params = TypeSystem.CopyType(_types.TyInt);
         _builtinAlloca = NewGvar("alloca", ty);
         _builtinAlloca.IsDefinition = false;
+        // Mark as a function so call sites classify it as a direct call and hit
+        // GenFunCall's alloca special-case (localloc), not the indirect-call path.
+        _builtinAlloca.IsFunction = true;
     }
 
     // ═══════════════════════════════════════════════════════════════

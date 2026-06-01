@@ -1471,7 +1471,12 @@ public class CodeGen
         for (Obj fn = prog; fn != null; fn = fn.Next)
         {
             if (!fn.IsFunction || !fn.IsDefinition || !fn.IsLive) continue;
-            EmitFunction(fn);
+            try { EmitFunction(fn); }
+            catch (Exception ex) when (ex is not ChibiException)
+            {
+                throw new InvalidOperationException(
+                    $"codegen failed in function '{fn.Name}': {ex.Message}", ex);
+            }
         }
     }
 
@@ -2034,6 +2039,7 @@ public class CodeGen
                 return;
 
             case NodeKind.Var:
+                if (node.Ty == null) throw new InvalidOperationException($"Var node '{node.Var?.Name}' has null Ty (AddType not run)");
                 if (node.Ty.Kind == TypeKind.Func || node.Var.IsFunction)
                 {
                     EmitFunctionAddress(node.Var, node.Tok);
