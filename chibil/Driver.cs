@@ -29,6 +29,14 @@ public class Driver
 
     public void Run(string[] args)
     {
+        // Select the data model BEFORE the TypeSystem is built. -mlp64 picks the
+        // x86-64 SysV / Linux model (long = size_t = 8 bytes), required to compile
+        // against musl/glibc headers; the default stays LLP64 (Windows/MSVC, long=4).
+        foreach (string a in args)
+        {
+            if (a == "-mlp64") Options.DataModel = DataModel.LP64;
+            else if (a == "-mllp64") Options.DataModel = DataModel.LLP64;
+        }
         var types = new TypeSystem(Options.DataModel);
         var tokenizer = new Tokenizer(Options, types);
         _preprocessor = new Preprocessor(tokenizer, Options, types);
@@ -139,6 +147,7 @@ public class Driver
             if (arg == "-c") { _optC = true; continue; }
             if (arg == "-E") { _optE = true; continue; }
             if (arg == "-nostdinc") { _optNoStdInc = true; continue; }
+            if (arg == "-mlp64" || arg == "-mllp64") continue; // handled in Run() pre-scan
             if (arg.StartsWith("-I")) { Options.IncludePaths.Add(arg[2..]); continue; }
             if (arg == "-D") { Define(args[++i]); continue; }
             if (arg.StartsWith("-D")) { Define(arg[2..]); continue; }
