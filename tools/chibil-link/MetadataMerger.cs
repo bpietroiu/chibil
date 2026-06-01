@@ -345,7 +345,12 @@ public sealed class MetadataMerger
 
             // Ensure the value-type TypeDef(s) referenced by the field signature
             // are copied first, so the rewritten signature resolves.
-            EnsureFieldTypeDefs(of, fd);
+            try { EnsureFieldTypeDefs(of, fd); }
+            catch (Exception ex)
+            {
+                throw new LinkException(
+                    $"field '{md.GetString(fd.Name)}' (row {r}, sigBlob 0x{MetadataTokens.GetHeapOffset(fd.Signature):X}) FieldRVA processing failed: {ex.Message}");
+            }
 
             int size = GetFieldDataSize(md, fd);
             int align = GetFieldDataAlignment(md, fd, size);
@@ -555,6 +560,8 @@ public sealed class MetadataMerger
             case SignatureTypeCode.Double: return 8;
             case SignatureTypeCode.IntPtr:
             case SignatureTypeCode.UIntPtr: return 8; // CoreCLR targets are 64-bit here
+            case SignatureTypeCode.Pointer:          // T* (e.g. char *sqlite3_data_directory)
+            case SignatureTypeCode.FunctionPointer: return 8;
             case SignatureTypeCode.TypeHandle:
                 {
                     // TypeHandle TypeCode (Class/ValueType) is a single byte per ECMA-335 II.23.2.4
