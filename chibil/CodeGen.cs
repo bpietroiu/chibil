@@ -1775,9 +1775,17 @@ public class CodeGen
         switch (ty.Kind)
         {
             case TypeKind.Array:
-            case TypeKind.Func:
             case TypeKind.Vla:
-                // Address IS the value
+                // Array decays to a pointer to its first element. GenAddr left a
+                // MANAGED pointer (&array value-type) on the stack; convert it to a
+                // native int so it is a plain unmanaged pointer. The JIT rejects a
+                // managed pointer to an aggregate value-type where a native int is
+                // required (e.g. `sigsetjmp(jmp_buf)` — InvalidProgramException),
+                // even though it tolerates &primitive -> native int.
+                _enc.OpCode(ILOpCode.Conv_i);
+                return;
+            case TypeKind.Func:
+                // Address IS the value (function pointers are native int already).
                 return;
             case TypeKind.Struct:
             case TypeKind.Union:

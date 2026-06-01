@@ -344,11 +344,12 @@ public sealed class MetadataMerger
         //    forwarder method is rejected (CS0570 "not supported by the
         //    language"). Synthesize an empty PUBLIC value-type TypeDef per such
         //    opaque name so the existing module-scoped TypeRef resolves and the
-        //    consumer can spell the pointer parameter type. Must run AFTER all
+        //    consumer can spell the pointer parameter type. Also required for
+        //    INTERNAL correctness: a dangling opaque TypeRef in any imported call's
+        //    signature makes the JIT throw InvalidProgramException. Must run AFTER all
         //    real value-type TypeDefs are reserved (so we don't duplicate a name
         //    that has a real body) and is the LAST TypeDef-reserving pass.
-        if (_exportClass != null)
-            ReserveExportOpaqueTypeDefs();
+        ReserveOpaqueTypeDefs();
 
         // ── StandAloneSigs (local-variable sigs) ──────────────────────────────
         foreach (var of in _objs)
@@ -1363,49 +1364,55 @@ public sealed class MetadataMerger
         ScanSigTypeForTypeDefs(of, ref sigReader);
     }
 
-    /// <summary>For every exported function whose signature names an opaque
-    /// struct that has no TypeDef in the merged output (a forward-declared-only
-    /// type referenced via a module-scoped TypeRef, e.g. <c>sqlite3_stmt</c>),
-    /// synthesize an empty PUBLIC value-type TypeDef of that (namespace, name).
-    /// The existing module-scoped TypeRef in the signature then binds to it, so a
-    /// Roslyn-compiled C# consumer can name the pointer parameter type. Real
-    /// struct bodies are already reserved by earlier passes and are skipped here.
+    /// <summary>For every function signature (defined methods AND external-call
+    /// MemberRefs) that names an opaque struct with no TypeDef in the merged output
+    /// — a forward-declared-only type referenced via a module-scoped TypeRef, e.g.
+    /// <c>_IO_FILE</c> (FILE), <c>sqlite3_stmt</c> — synthesize an empty value-type
+    /// TypeDef of that (namespace, name) and redirect the TypeRef to it. Without
+    /// this the module-scoped TypeRef dangles (no matching TypeDef), and the JIT
+    /// throws InvalidProgramException when it imports a call whose signature uses the
+    /// type. (Export builds additionally promote these to public — see MaybeReserveOpaque.)
     /// </summary>
-    private void ReserveExportOpaqueTypeDefs()
+    private void ReserveOpaqueTypeDefs()
     {
         // Names already backed by a real (possibly bodied) TypeDef — never shadow.
         var definedNames = new HashSet<(string ns, string name)>();
         foreach (var ct in CopiedTypeDefs)
             definedNames.Add((ct.Namespace, ct.Name));
 
-        // Reserve one empty public TypeDef per opaque (ns,name) seen in an
-        // exported signature.
         var reserved = new Dictionary<(string ns, string name), int>();
         foreach (var of in _objs)
         {
             var md = of.Md;
-            foreach (var m in of.Methods)
+            // Defined method signatures.
+            for (int r = 1; r <= md.GetTableRowCount(TableIndex.MethodDef); r++)
+                ScanSigForOpaque(of, md.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(r)).Signature,
+                    definedNames, reserved);
+            // External call-site (MemberRef-on-<Module>) signatures — the ones
+            // SymbolResolver turns into P/Invoke stubs (e.g. fileno(FILE*)).
+            for (int r = 1; r <= md.GetTableRowCount(TableIndex.MemberRef); r++)
             {
-                // ExportedMethods is not yet populated here (this pass runs BEFORE the
-                // method-prediction loop), so re-derive the export set via the shared
-                // IsExportForwarder predicate instead of consuming the list.
-                if (!IsExportForwarder(of, m)) continue;
-                var mdef = md.GetMethodDefinition(m.Handle);
-
-                var reader = md.GetBlobReader(mdef.Signature);
-                var header = reader.ReadSignatureHeader();
-                if (header.IsGeneric) reader.ReadCompressedInteger();
-                int paramCount = reader.ReadCompressedInteger();
-                CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);   // return
-                for (int p = 0; p < paramCount; p++)
-                {
-                    if (reader.RemainingBytes > 0)
-                    {
-                        byte peek = reader.ReadByte();
-                        if (peek != (byte)SignatureTypeCode.Sentinel) reader.Offset -= 1;
-                    }
-                    CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);
-                }
+                var mr = md.GetMemberReference(MetadataTokens.MemberReferenceHandle(r));
+                if (mr.Parent.Kind != HandleKind.TypeDefinition) continue;
+                if (md.GetString(md.GetTypeDefinition((TypeDefinitionHandle)mr.Parent).Name) != "<Module>") continue;
+                if (mr.GetKind() != MemberReferenceKind.Method) continue;
+                ScanSigForOpaque(of, mr.Signature, definedNames, reserved);
+            }
+            // FIELD signatures (e.g. a `struct flags_alist[]` global whose element
+            // struct is opaque) — the field's type must resolve for ldsfld/ldsflda.
+            for (int r = 1; r <= md.GetTableRowCount(TableIndex.Field); r++)
+            {
+                var rdr = md.GetBlobReader(md.GetFieldDefinition(MetadataTokens.FieldDefinitionHandle(r)).Signature);
+                rdr.ReadSignatureHeader();   // FIELD
+                CollectSigOpaqueTypeRefs(of, ref rdr, definedNames, reserved);
+            }
+            // LOCAL-variable signatures.
+            for (int r = 1; r <= md.GetTableRowCount(TableIndex.StandAloneSig); r++)
+            {
+                var rdr = md.GetBlobReader(md.GetStandaloneSignature(MetadataTokens.StandaloneSignatureHandle(r)).Signature);
+                if (rdr.ReadSignatureHeader().Kind != SignatureKind.LocalVariables) continue;
+                int cnt = rdr.ReadCompressedInteger();
+                for (int i = 0; i < cnt; i++) CollectSigOpaqueTypeRefs(of, ref rdr, definedNames, reserved);
             }
         }
 
@@ -1436,6 +1443,27 @@ public sealed class MetadataMerger
     /// TypeRef whose (namespace, name) is NOT backed by a TypeDef, reserve an
     /// empty public value-type TypeDef so the TypeRef resolves. Advances the
     /// reader past the Type exactly as the rewriter would.</summary>
+    /// <summary>Walk a whole MethodDefSig (return + params), reserving opaque
+    /// TypeDefs for any module-scoped TypeRef it names with no backing TypeDef.</summary>
+    private void ScanSigForOpaque(ObjectFile of, BlobHandle sigBlob,
+        HashSet<(string ns, string name)> definedNames, Dictionary<(string ns, string name), int> reserved)
+    {
+        var reader = of.Md.GetBlobReader(sigBlob);
+        var header = reader.ReadSignatureHeader();
+        if (header.IsGeneric) reader.ReadCompressedInteger();
+        int paramCount = reader.ReadCompressedInteger();
+        CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);   // return
+        for (int p = 0; p < paramCount; p++)
+        {
+            if (reader.RemainingBytes > 0)
+            {
+                byte peek = reader.ReadByte();
+                if (peek != (byte)SignatureTypeCode.Sentinel) reader.Offset -= 1;
+            }
+            CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);
+        }
+    }
+
     private void CollectSigOpaqueTypeRefs(ObjectFile of, ref BlobReader reader,
         HashSet<(string ns, string name)> definedNames, Dictionary<(string ns, string name), int> reserved)
     {
@@ -1520,7 +1548,9 @@ public sealed class MetadataMerger
             PredictedRow = _outTypeDefRow,
         };
         CopiedTypeDefs.Add(copied);
-        _exportOpaqueTypeRows.Add(copied.PredictedRow);
+        // Promote to PUBLIC only for the export surface (C# consumers must name the
+        // type); internal opaque types just need to exist so the JIT resolves them.
+        if (_exportClass != null) _exportOpaqueTypeRows.Add(copied.PredictedRow);
         reserved[key] = copied.PredictedRow;
     }
 

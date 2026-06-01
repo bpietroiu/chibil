@@ -36,6 +36,64 @@ if (args.Length >= 2 && args[0] == "tables")
     return 0;
 }
 
+// "il <file.dll> <methodName> [full]" — disassemble + flag structural anomalies.
+if (args.Length >= 3 && args[0] == "il")
+{
+    IlDump.Dump(args[1], args[2], args.Length > 3 && args[3] == "full");
+    return 0;
+}
+if (args.Length >= 3 && args[0] == "check")
+{
+    IlDump.Check(args[1], args[2]);
+    return 0;
+}
+if (args.Length >= 2 && args[0] == "dangling")
+{
+    using var fsd = File.OpenRead(args[1]);
+    using var ped = new PEReader(fsd);
+    var rd = ped.GetMetadataReader();
+    var defs = new HashSet<string>();
+    foreach (var th in rd.TypeDefinitions) { var t = rd.GetTypeDefinition(th); defs.Add(rd.GetString(t.Namespace) + "." + rd.GetString(t.Name)); }
+    int n = 0;
+    for (int i = 1; i <= rd.GetTableRowCount(TableIndex.TypeRef); i++)
+    {
+        var tr = rd.GetTypeReference(MetadataTokens.TypeReferenceHandle(i));
+        if (tr.ResolutionScope.Kind != HandleKind.ModuleDefinition && !tr.ResolutionScope.IsNil) continue;
+        string full = rd.GetString(tr.Namespace) + "." + rd.GetString(tr.Name);
+        if (!defs.Contains(full)) { Console.WriteLine($"  DANGLING TypeRef[{i}] {full}"); n++; }
+    }
+    Console.WriteLine($"dangling module-scoped TypeRefs: {n}");
+    return 0;
+}
+if (args.Length >= 2 && args[0] == "refs")
+{
+    using var fs2 = File.OpenRead(args[1]);
+    using var pe2 = new PEReader(fs2);
+    var rr = pe2.GetMetadataReader();
+    Console.WriteLine("== TypeRefs ==");
+    for (int i = 1; i <= rr.GetTableRowCount(TableIndex.TypeRef); i++)
+    {
+        var tr = rr.GetTypeReference(MetadataTokens.TypeReferenceHandle(i));
+        string scope = tr.ResolutionScope.Kind == HandleKind.AssemblyReference
+            ? rr.GetString(rr.GetAssemblyReference((AssemblyReferenceHandle)tr.ResolutionScope).Name)
+            : tr.ResolutionScope.Kind.ToString();
+        Console.WriteLine($"  TypeRef[{i}] {rr.GetString(tr.Namespace)}.{rr.GetString(tr.Name)}  scope={scope}");
+    }
+    Console.WriteLine("== TypeDefs ==");
+    foreach (var tdh in rr.TypeDefinitions)
+    {
+        var td = rr.GetTypeDefinition(tdh);
+        Console.WriteLine($"  TypeDef {rr.GetString(td.Namespace)}.{rr.GetString(td.Name)}");
+    }
+    Console.WriteLine("== StandAloneSigs ==");
+    for (int i = 1; i <= rr.GetTableRowCount(TableIndex.StandAloneSig); i++)
+    {
+        var ss = rr.GetStandaloneSignature(MetadataTokens.StandaloneSignatureHandle(i));
+        Console.WriteLine($"  SAS[{i}] {Convert.ToHexString(rr.GetBlobBytes(ss.Signature))}");
+    }
+    return 0;
+}
+
 // "sig <file.dll|.obj> <methodName>" — dump a method's raw signature blob hex.
 if (args.Length >= 3 && args[0] == "sig")
 {

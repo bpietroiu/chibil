@@ -109,6 +109,39 @@ int main(void){
     }
 
     [Fact]
+    public void Opaque_struct_pointer_in_defined_functions_jits_and_runs()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // An opaque struct (FILE = struct _IO_FILE, layout never defined) used only
+        // by pointer has no TypeDef — it is referenced via a module-scoped TypeRef.
+        // Without a synthesized empty TypeDef the TypeRef dangles and the JIT throws
+        // InvalidProgramException when it compiles a method whose signature names it.
+        // Must now JIT and run. Regression for the bash-to-IL InvalidProgram (FILE*).
+        const string src =
+            "typedef struct _IO_FILE FILE;\n" +
+            "static FILE* getf(void){ return 0; }\n" +
+            "static int usef(FILE* f){ return f == 0 ? 7 : 8; }\n" +
+            "int main(void){ return usef(getf()); }\n";
+        int exit = RunViaHost(src, out string o);
+        Assert.True(exit == 7, $"expected 7, got {exit}. {o}");
+    }
+
+    [Fact]
+    public void Array_global_decays_to_pointer_when_passed()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // Passing an array GLOBAL to a pointer parameter decays it. GenAddr yields a
+        // managed pointer (&array value-type); it must be conv.i'd to a native int or
+        // the JIT rejects it where a native int is required (InvalidProgramException).
+        const string src =
+            "int g_arr4[4] = {10, 20, 30, 40};\n" +
+            "static int sum4(int* p){ return p[0]+p[1]+p[2]+p[3]; }\n" +
+            "int main(void){ return sum4(g_arr4); }\n";   // 100
+        int exit = RunViaHost(src, out string o);
+        Assert.True(exit == 100, $"expected 100, got {exit}. {o}");
+    }
+
+    [Fact]
     public void Main_argc_argv_entry_marshals_argv()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
