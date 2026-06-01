@@ -30,7 +30,8 @@ namespace ChibilLink;
 /// </summary>
 public static class SymbolResolver
 {
-    public static void Resolve(MetadataMerger merger, IReadOnlyList<ObjectFile> objs, List<string> libs)
+    public static void Resolve(MetadataMerger merger, IReadOnlyList<ObjectFile> objs,
+        List<string> libs, Dictionary<string, string> pinvokeMap)
     {
         var table = new LinkSymbolTable();
         foreach (var of in objs)
@@ -93,7 +94,7 @@ public static class SymbolResolver
                 if (!pinvokeByNameSig.TryGetValue(key, out int pinvokeToken))
                 {
                     var sigReader = md.GetBlobReader(mr.Signature);
-                    pinvokeToken = SynthesizePInvoke(merger, of, name, sigReader, libs);
+                    pinvokeToken = SynthesizePInvoke(merger, of, name, sigReader, libs, pinvokeMap);
                     pinvokeByNameSig[key] = pinvokeToken;
                 }
                 map.RecordExternal(originalToken, pinvokeToken);
@@ -102,20 +103,27 @@ public static class SymbolResolver
     }
 
     private static int SynthesizePInvoke(
-        MetadataMerger merger, ObjectFile of, string name, BlobReader signatureBlobReader, List<string> libs)
+        MetadataMerger merger, ObjectFile of, string name, BlobReader signatureBlobReader,
+        List<string> libs, Dictionary<string, string> pinvokeMap)
     {
-        // MVP limitation: when no -l flag is given we cannot bind this symbol.
-        if (libs.Count == 0)
-            throw new LinkException($"unresolved symbol '{name}' and no -l libraries given");
-
-        // MVP limitation: always bind to the first -l library. When multiple
-        // -l flags are given we cannot determine which library exports this
-        // symbol without a symbol table, so we warn and fall through.
-        string lib = MapLib(libs[0]);
-        if (libs.Count > 1)
-            Console.Error.WriteLine(
-                $"chibil-link: warning: '{name}' bound to '{lib}' (first -l library); " +
-                $"per-symbol multi-library resolution is not yet implemented.");
+        string lib;
+        if (pinvokeMap.TryGetValue(name, out string libTok))
+        {
+            lib = MapLib(libTok);                    // explicit per-symbol routing
+        }
+        else if (libs.Count > 0)
+        {
+            lib = MapLib(libs[0]);
+            if (libs.Count > 1)
+                Console.Error.WriteLine(
+                    $"chibil-link: warning: '{name}' bound to '{lib}' (first -l library); " +
+                    $"add it to --pinvoke for explicit routing.");
+        }
+        else
+        {
+            throw new LinkException(
+                $"unresolved symbol '{name}' and no -l libraries or --pinvoke mapping given");
+        }
         var moduleRef = merger.GetOrAddModuleRef(lib);
 
         // Copy the call-site signature, remapping tokens with this object's map.
@@ -136,6 +144,7 @@ public static class SymbolResolver
     {
         "c" => "libc.so.6",
         "m" => "libm.so.6",
+        "kernel32" => "kernel32.dll",
         _ => l.Contains('.') ? l : $"lib{l}.so",   // e.g. "msvcrt.dll" -> used as-is
     };
 }

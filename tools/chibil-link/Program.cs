@@ -29,6 +29,7 @@ public sealed class LinkOptions
     public List<string> Libraries = new();   // from -l (e.g. "c" -> libc.so.6)
     public string Output = "a.dll";
     public string ExportClass = null;   // --export-class=<Namespace.Name>; null = no export type
+    public Dictionary<string, string> PinvokeMap = new();   // symbol -> library token
 
     public static LinkOptions Parse(string[] args)
     {
@@ -39,6 +40,16 @@ public sealed class LinkOptions
             if (a == "-o") { o.Output = args[++i]; continue; }
             if (a.StartsWith("-l")) { o.Libraries.Add(a[2..]); continue; }
             if (a.StartsWith("--export-class=")) { o.ExportClass = a["--export-class=".Length..]; continue; }
+            if (a.StartsWith("--pinvoke="))
+            {
+                foreach (var pair in a["--pinvoke=".Length..].Split(',', System.StringSplitOptions.RemoveEmptyEntries))
+                {
+                    int eq = pair.IndexOf('=');
+                    if (eq <= 0) { System.Console.Error.WriteLine($"bad --pinvoke entry: {pair}"); return null; }
+                    o.PinvokeMap[pair[..eq]] = pair[(eq + 1)..];
+                }
+                continue;
+            }
             if (a.StartsWith("-")) { Console.Error.WriteLine($"unknown flag: {a}"); return null; }
             o.Inputs.Add(a);
         }
@@ -59,7 +70,7 @@ public static class Linker
             objs.Add(ObjectFile.Load(bytes, path));
         }
 
-        byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries, opts.ExportClass);
+        byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries, opts.ExportClass, opts.PinvokeMap);
         File.WriteAllBytes(opts.Output, pe);
 
         WriteRuntimeConfig(opts.Output);
