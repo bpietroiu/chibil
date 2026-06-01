@@ -72,7 +72,7 @@ public static class SymbolResolver
                 string name = md.GetString(mr.Name);
                 int originalToken = MetadataTokens.GetToken(mrH);
 
-                if (name == "__chibil_os_is_windows")
+                if (name == MetadataMerger.OsIsWindowsIntrinsicName)
                 {
                     map.RecordExternal(originalToken, merger.ReserveOsIsWindowsIntrinsic());
                     continue;

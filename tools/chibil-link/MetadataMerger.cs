@@ -56,6 +56,11 @@ public sealed class MetadataMerger
     /// kept verbatim, or remapped). Recorded for diagnostics.</summary>
     public string CoreLibReferenceUsed { get; private set; } = "mscorlib (verbatim)";
 
+    /// <summary>Name of the synthesized C-callable OS-detection intrinsic
+    /// (<c>int __chibil_os_is_windows()</c>). The C side declares this exact name;
+    /// SymbolResolver matches it and the SynthMethod carries it.</summary>
+    public const string OsIsWindowsIntrinsicName = "__chibil_os_is_windows";
+
     // Predicted emission plan: every method, in the deterministic order their
     // MethodDef rows are assigned. The synthesized entry is appended by
     // ReserveEntryRow() as the final entry (with Obj == null).
@@ -360,9 +365,9 @@ public sealed class MetadataMerger
 
     private int _osIsWindowsToken;
 
-    /// <summary>Reserve a C-callable intrinsic `int __chibil_os_is_windows()` whose
-    /// body is `call bool [mscorlib]System.OperatingSystem::IsWindows(); ret` (the
-    /// bool result is the i4 the C `int` ABI expects). Deduped. Returns its MethodDef
+    /// <summary>Reserve a C-callable intrinsic <c>int __chibil_os_is_windows()</c> whose
+    /// body is <c>call bool [mscorlib]System.OperatingSystem::IsWindows(); ret</c> (the
+    /// bool result is the i4 the C <c>int</c> ABI expects). Deduped. Returns its MethodDef
     /// token. Used by the cross-OS disk VFS to pick its backend at runtime.</summary>
     public int ReserveOsIsWindowsIntrinsic()
     {
@@ -382,11 +387,14 @@ public sealed class MetadataMerger
             .Parameters(0, ret => ret.Type().Int32(), _ => { });
 
         var il = new BlobBuilder();
-        il.WriteByte(0x28); il.WriteInt32(MetadataTokens.GetToken(isWin)); // call IsWindows
+        il.WriteByte(0x28);
+        // `call` with a MemberRef token (0x0A...) targeting the static IsWindows() —
+        // valid per ECMA-335 II.25.4; unlike the MethodDef tokens written elsewhere.
+        il.WriteInt32(MetadataTokens.GetToken(isWin));
         il.WriteByte(0x2A);                                                // ret
         var synth = new SynthMethod
         {
-            Name = "__chibil_os_is_windows",
+            Name = OsIsWindowsIntrinsicName,
             SignatureBlob = Builder.GetOrAddBlob(mSig),
             Il = il.ToArray(),
             MaxStack = 1,
