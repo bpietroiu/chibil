@@ -14,11 +14,12 @@ namespace ChibilLink;
 /// </summary>
 public static class LinkPipeline
 {
-    public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null)
+    public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs,
+        string exportClass = null, Dictionary<string, string> pinvokeMap = null)
     {
         if (objs == null || objs.Count == 0)
             throw new LinkException("no input objects.");
-        return new PeWriter(objs, libs ?? new List<string>(), exportClass).Write();
+        return new PeWriter(objs, libs ?? new List<string>(), exportClass, pinvokeMap).Write();
     }
 }
 
@@ -39,13 +40,16 @@ public sealed class PeWriter
     private readonly IReadOnlyList<ObjectFile> _objs;
     private readonly List<string> _libs;
     private readonly string _exportClass;
+    private readonly Dictionary<string, string> _pinvokeMap;
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
-    public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null)
+    public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null,
+        Dictionary<string, string> pinvokeMap = null)
     {
         _objs = objs;
         _libs = libs;
         _exportClass = ValidateExportClass(exportClass);
+        _pinvokeMap = pinvokeMap ?? new Dictionary<string, string>();
     }
 
     private static string ValidateExportClass(string name)
@@ -67,7 +71,7 @@ public sealed class PeWriter
         // Runs after defined-method prediction (so the export table is complete)
         // and before the entry row, reserving any P/Invoke MethodDef rows in the
         // plan so the row-prediction assertions below still hold.
-        SymbolResolver.Resolve(merger, _objs, _libs);
+        SymbolResolver.Resolve(merger, _objs, _libs, _pinvokeMap);
 
         // Collect FieldRVA pointer relocations (function/data pointers baked into
         // initialized globals) and, if any exist, synthesize a <Module> .cctor
@@ -296,11 +300,24 @@ public sealed class PeWriter
                     stub.SignatureBlob,
                     bodyOffset: -1,                              // no body
                     parameterList: MetadataTokens.ParameterHandle(1));
+                // SetLastError=true makes the CLR atomically capture the native
+                // last-error immediately after each P/Invoke, so a subsequent
+                // GetLastError() reflects the call that just ran and is not clobbered
+                // by GC/bookkeeping between the two transitions. We mark every stub
+                // EXCEPT an explicit GetLastError import: marking GetLastError itself
+                // SetLastError=true makes its IL stub overwrite the very value the
+                // caller is trying to read (the CLR's post-call capture resets the
+                // OS error), which breaks the C "ReadFile then GetLastError()" EOF
+                // idiom in the disk VFS. So the *producers* of last-error capture it;
+                // the *reader* must stay a plain PreserveSig call.
+                var importAttrs = MethodImportAttributes.CallingConventionCDecl
+                    | MethodImportAttributes.ExactSpelling
+                    | MethodImportAttributes.CharSetAnsi;
+                if (stub.Name != "GetLastError")
+                    importAttrs |= MethodImportAttributes.SetLastError;
                 mdBuilder.AddMethodImport(
                     pinvokeH,
-                    MethodImportAttributes.CallingConventionCDecl
-                        | MethodImportAttributes.ExactSpelling
-                        | MethodImportAttributes.CharSetAnsi,
+                    importAttrs,
                     mdBuilder.GetOrAddString(stub.Name),
                     (ModuleReferenceHandle)stub.ModuleRef);
                 AssertRow(slot.PredictedRow, MetadataTokens.GetRowNumber(pinvokeH),

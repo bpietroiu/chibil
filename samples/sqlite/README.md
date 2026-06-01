@@ -30,6 +30,19 @@ bash samples/sqlite/build-chibil.sh app.dll   # same app.dll as Linux
 dotnet app.dll ; echo "exit=$?"     # -> exit=55
 ```
 
+## On-disk persistence (SP3a)
+
+A cross-OS `sqlite3_vfs` (`sqlite_vfs_disk.c`) does real file I/O via native
+P/Invoke — libc (`open`/`pread`/`pwrite`/`fsync`/…) on Linux, kernel32
+(`CreateFileA`/`ReadFile`+`OVERLAPPED`/…) on Windows — picked at runtime by the
+linker-synthesized `__chibil_os_is_windows()` intrinsic. The linker routes each
+native symbol to its module via a `--pinvoke name=lib` map (lazy resolution means
+the wrong-OS stubs are present but never loaded). `build-chibil-disk.sh` builds
+`main_disk.c`, which writes `sp3.db`, closes, **reopens**, and `SELECT sum(a)`
+returns 55 — the same `app.dll` on Windows and Linux/WSL
+(`tests/Chibil.Tests/CoreClr/SqliteDiskTests.cs`). Single connection, no locking
+yet; the SQLite byte-range lock protocol (fcntl / LockFileEx) is SP3b.
+
 ## Consuming from C# (SP2)
 
 Linking with `--export-class=Sqlite3.Native` emits a `public static class
