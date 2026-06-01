@@ -1,13 +1,14 @@
 /* samples/sqlite/sqlite_vfs_disk.c — a real on-disk sqlite3_vfs, cross-OS.
  * File I/O goes to libc (Linux) or kernel32 (Windows), picked at runtime via
- * __chibil_os_is_windows(). Single connection, NO locking (xLock/xUnlock no-op);
- * the SQLite lock protocol is SP3b. Register with register_disk_vfs(). */
+ * __chibil_os_is_windows(). Single connection per process; SQLite's byte-range
+ * lock protocol (fcntl / LockFileEx) is implemented below. Register with
+ * register_disk_vfs(). */
 #include "sqlite3.h"
 #include "chibil_os.h"
 
 static int g_win;   /* set ONCE in register_disk_vfs() before any open; read-only thereafter (THREADSAFE=0) */
 
-typedef struct DiskFile { sqlite3_file base; long long h; } DiskFile;
+typedef struct DiskFile { sqlite3_file base; long long h; int eLock; } DiskFile;
 
 static void zero(void *p, int n){ char *z=(char*)p; for(int i=0;i<n;i++) z[i]=0; }
 
@@ -47,10 +48,119 @@ static int dfFileSize(sqlite3_file *f, sqlite3_int64 *pSize){ DiskFile *df=(Disk
     if (g_win){ long long s=0; if(!GetFileSizeEx((void*)df->h,&s)) return SQLITE_IOERR_FSTAT; *pSize=s; return SQLITE_OK; }
     long long s = lseek((int)df->h, 0, SEEK_END); if (s<0) return SQLITE_IOERR_FSTAT; *pSize=s; return SQLITE_OK; }
 static int dfClose(sqlite3_file *f){ DiskFile *df=(DiskFile*)f;
-    if (g_win) CloseHandle((void*)df->h); else close((int)df->h); return SQLITE_OK; }
-static int dfLock(sqlite3_file *f, int e){ (void)f;(void)e; return SQLITE_OK; }      /* SP3b */
-static int dfUnlock(sqlite3_file *f, int e){ (void)f;(void)e; return SQLITE_OK; }
-static int dfCheckLock(sqlite3_file *f, int *p){ (void)f; *p=0; return SQLITE_OK; }
+    if (g_win) CloseHandle((void*)df->h); else close((int)df->h);
+    df->eLock = SQLITE_LOCK_NONE; return SQLITE_OK; }
+/* SQLite canonical lock bytes (must match os_unix.c / os_win.c for interop). */
+#define PENDING_BYTE  0x40000000LL
+#define RESERVED_BYTE (PENDING_BYTE + 1)
+#define SHARED_FIRST  (PENDING_BYTE + 2)
+#define SHARED_SIZE   510
+
+/* Take a byte-range lock: 1 on success, 0 if contended/failed. Non-blocking. */
+static int lock_byte(DiskFile *df, long long off, long long len, int exclusive){
+    if (g_win){
+        OVERLAPPED ov; zero(&ov, sizeof ov);
+        ov.Offset = (unsigned int)off; ov.OffsetHigh = (unsigned int)(off>>32);
+        unsigned int flags = LOCKFILE_FAIL_IMMEDIATELY | (exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0u);
+        return LockFileEx((void*)df->h, flags, 0, (unsigned int)len, (unsigned int)(len>>32), &ov) != 0;
+    }
+    struct flock fl; zero(&fl, sizeof fl);
+    fl.l_type = (short)(exclusive ? F_WRLCK : F_RDLCK);
+    fl.l_whence = (short)SEEK_SET; fl.l_start = off; fl.l_len = len;
+    return fcntl((int)df->h, F_SETLK, &fl) == 0;
+}
+/* Release a byte-range lock (harmless if not held). */
+static void unlock_byte(DiskFile *df, long long off, long long len){
+    if (g_win){
+        OVERLAPPED ov; zero(&ov, sizeof ov);
+        ov.Offset = (unsigned int)off; ov.OffsetHigh = (unsigned int)(off>>32);
+        UnlockFileEx((void*)df->h, 0, (unsigned int)len, (unsigned int)(len>>32), &ov);
+        return;
+    }
+    struct flock fl; zero(&fl, sizeof fl);
+    fl.l_type = (short)F_UNLCK; fl.l_whence = (short)SEEK_SET; fl.l_start = off; fl.l_len = len;
+    fcntl((int)df->h, F_SETLK, &fl);
+}
+
+/* Faithful SQLite lock protocol (single connection per process), mirroring
+   unixLock/unixUnlock/unixCheckReservedLock. Windows can't upgrade a held range
+   lock in place, so the EXCLUSIVE/downgrade steps unlock-then-relock the shared
+   range there; Linux fcntl converts in place. */
+static int dfLock(sqlite3_file *f, int eTarget){
+    DiskFile *df=(DiskFile*)f;
+    if (df->eLock >= eTarget) return SQLITE_OK;
+
+    /* PENDING gate: read-lock when acquiring SHARED, write-lock when jumping to EXCLUSIVE. */
+    int gotPending = 0;
+    if (eTarget == SQLITE_LOCK_SHARED
+        || (eTarget == SQLITE_LOCK_EXCLUSIVE && df->eLock < SQLITE_LOCK_PENDING)){
+        if (!lock_byte(df, PENDING_BYTE, 1, eTarget == SQLITE_LOCK_EXCLUSIVE)) return SQLITE_BUSY;
+        gotPending = 1;
+    }
+
+    if (eTarget == SQLITE_LOCK_SHARED){
+        int ok = lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0 /*read*/);
+        if (gotPending) unlock_byte(df, PENDING_BYTE, 1);   /* PENDING was only a gate */
+        if (!ok) return SQLITE_BUSY;
+        df->eLock = SQLITE_LOCK_SHARED;
+        return SQLITE_OK;
+    }
+    if (eTarget == SQLITE_LOCK_RESERVED){
+        if (!lock_byte(df, RESERVED_BYTE, 1, 1 /*write*/)) return SQLITE_BUSY;
+        df->eLock = SQLITE_LOCK_RESERVED;
+        return SQLITE_OK;
+    }
+    /* EXCLUSIVE: hold the PENDING write lock (just taken, or we were already PENDING),
+       then take the shared range exclusively. */
+    if (eTarget == SQLITE_LOCK_EXCLUSIVE){
+        if (g_win) unlock_byte(df, SHARED_FIRST, SHARED_SIZE);   /* Win: drop shared read-lock first */
+        int ok = lock_byte(df, SHARED_FIRST, SHARED_SIZE, 1 /*write*/);
+        if (!ok){
+            if (g_win) lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0); /* restore shared read-lock; a kernel-level failure here (not contention) would desync eLock — unhandled, as in os_win.c */
+            df->eLock = SQLITE_LOCK_PENDING;     /* we do hold PENDING */
+            return SQLITE_BUSY;
+        }
+        df->eLock = SQLITE_LOCK_EXCLUSIVE;
+        return SQLITE_OK;
+    }
+    /* unreachable: SQLite never requests PENDING directly (it's an internal gate). */
+    return SQLITE_OK;
+}
+static int dfUnlock(sqlite3_file *f, int eTarget){
+    DiskFile *df=(DiskFile*)f;
+    if (df->eLock <= eTarget) return SQLITE_OK;
+    if (eTarget == SQLITE_LOCK_SHARED){
+        if (df->eLock == SQLITE_LOCK_EXCLUSIVE){
+            /* downgrade the shared range from write back to read */
+            if (g_win){ unlock_byte(df, SHARED_FIRST, SHARED_SIZE); lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0); }
+            /* Win: briefly no SHARED-range lock, but the PENDING write-lock is still
+               held so no new reader can enter; same pattern as os_win.c. A relock
+               kernel-failure (not contention) is unhandled. */
+            else lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0);     /* fcntl converts in place */
+        }
+        unlock_byte(df, PENDING_BYTE, 1);
+        unlock_byte(df, RESERVED_BYTE, 1);
+        df->eLock = SQLITE_LOCK_SHARED;
+        return SQLITE_OK;
+    }
+    /* eTarget == NONE: release everything. */
+    unlock_byte(df, SHARED_FIRST, SHARED_SIZE);
+    unlock_byte(df, PENDING_BYTE, 1);
+    unlock_byte(df, RESERVED_BYTE, 1);
+    df->eLock = SQLITE_LOCK_NONE;
+    return SQLITE_OK;
+}
+static int dfCheckLock(sqlite3_file *f, int *pOut){
+    DiskFile *df=(DiskFile*)f;
+    if (df->eLock >= SQLITE_LOCK_RESERVED){ *pOut = 1; return SQLITE_OK; }
+    if (lock_byte(df, RESERVED_BYTE, 1, 1)){     /* trial write-lock */
+        unlock_byte(df, RESERVED_BYTE, 1);
+        *pOut = 0;
+    } else {
+        *pOut = 1;                                /* contended (or a rare lock I/O error, treated conservatively as held) */
+    }
+    return SQLITE_OK;
+}
 static int dfControl(sqlite3_file *f, int op, void *a){ (void)f;(void)op;(void)a; return SQLITE_NOTFOUND; }
 static int dfSectorSize(sqlite3_file *f){ (void)f; return 512; }
 static int dfDevChar(sqlite3_file *f){ (void)f; return 0; }
@@ -80,6 +190,7 @@ static int vOpen(sqlite3_vfs *v, const char *z, sqlite3_file *f, int flags, int 
         if (h < 0) return SQLITE_CANTOPEN;
     }
     df->h = h; df->base.pMethods = &g_io;
+    df->eLock = SQLITE_LOCK_NONE;
     if (pOut) *pOut = flags & (SQLITE_OPEN_READONLY|SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE);
     return SQLITE_OK;
 }
@@ -99,7 +210,7 @@ static int vFullPath(sqlite3_vfs *v, const char *z, int n, char *out){ (void)v;
 /* VFS-level housekeeping (own copies; sqlite_shim.c's are static there). */
 static unsigned int g_rng = 0xC0FFEEu;
 static int vRand(sqlite3_vfs *v,int n,char *o){ (void)v; for(int i=0;i<n;i++){ g_rng=g_rng*1103515245u+12345u; o[i]=(char)(g_rng>>16);} return n; }
-static int vSleep(sqlite3_vfs *v,int us){ (void)v;(void)us; return 0; }
+static int vSleep(sqlite3_vfs *v,int us){ (void)v;(void)us; return 0; }  /* SP3b: no-op; harnesses use busy_timeout=0 (a retrying busy-handler would spin) */
 static int vCurTime(sqlite3_vfs *v,double *p){ (void)v; *p=2440587.5; return SQLITE_OK; }
 static int vLastErr(sqlite3_vfs *v,int n,char *b){ (void)v;(void)n;(void)b; return 0; }
 

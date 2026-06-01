@@ -40,8 +40,15 @@ native symbol to its module via a `--pinvoke name=lib` map (lazy resolution mean
 the wrong-OS stubs are present but never loaded). `build-chibil-disk.sh` builds
 `main_disk.c`, which writes `sp3.db`, closes, **reopens**, and `SELECT sum(a)`
 returns 55 — the same `app.dll` on Windows and Linux/WSL
-(`tests/Chibil.Tests/CoreClr/SqliteDiskTests.cs`). Single connection, no locking
-yet; the SQLite byte-range lock protocol (fcntl / LockFileEx) is SP3b.
+(`tests/Chibil.Tests/CoreClr/SqliteDiskTests.cs`).
+
+Multi-process locking (SP3b) is implemented: the VFS takes SQLite's byte-range
+locks at the canonical lock bytes via `fcntl(F_SETLK)` (Linux) / `LockFileEx`
+(Windows), so a second writer gets `SQLITE_BUSY` while one is held and succeeds
+after release — proven by a two-process contention test on Windows and Linux/WSL
+(`tests/Chibil.Tests/CoreClr/SqliteLockTests.cs`; the Linux legs run on a native
+ext4 path, since the WSL `/mnt` drvfs mount may not honor `fcntl` locks). WAL mode
+is out of scope.
 
 ## Consuming from C# (SP2)
 

@@ -25,7 +25,7 @@ DEFS=(-DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=0 -DSQLITE_TEMP_STORE=3
       -DSQLITE_OMIT_LOADEXTENSION=1 -DSQLITE_OMIT_AUTOINIT=1)
 INC=(-I"$HERE/include" -I"$HERE/vendor")
 
-PINVOKE="open=c,pread=c,pwrite=c,ftruncate=c,fsync=c,close=c,unlink=c,access=c,lseek=c,CreateFileA=kernel32,ReadFile=kernel32,WriteFile=kernel32,SetFilePointerEx=kernel32,SetEndOfFile=kernel32,FlushFileBuffers=kernel32,CloseHandle=kernel32,DeleteFileA=kernel32,GetFileSizeEx=kernel32,GetFileAttributesA=kernel32,GetLastError=kernel32"
+PINVOKE="open=c,pread=c,pwrite=c,ftruncate=c,fsync=c,close=c,unlink=c,access=c,lseek=c,CreateFileA=kernel32,ReadFile=kernel32,WriteFile=kernel32,SetFilePointerEx=kernel32,SetEndOfFile=kernel32,FlushFileBuffers=kernel32,CloseHandle=kernel32,DeleteFileA=kernel32,GetFileSizeEx=kernel32,GetFileAttributesA=kernel32,GetLastError=kernel32,fcntl=c,usleep=c,LockFileEx=kernel32,UnlockFileEx=kernel32,Sleep=kernel32"
 
 OBJS=()
 cleanup(){ rm -f "${OBJS[@]}"; }
