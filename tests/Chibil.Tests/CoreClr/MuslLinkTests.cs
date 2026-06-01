@@ -130,9 +130,9 @@ int main(void){
     public void Array_global_decays_to_pointer_when_passed()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
-        // Passing an array GLOBAL to a pointer parameter decays it. GenAddr yields a
-        // managed pointer (&array value-type); it must be conv.i'd to a native int or
-        // the JIT rejects it where a native int is required (InvalidProgramException).
+        // Passing an array GLOBAL to a pointer parameter decays it to the address of
+        // its first element. The JIT accepts the managed pointer to the array
+        // value-type (&$ArrayType$) where a native int is required, so this must run.
         const string src =
             "int g_arr4[4] = {10, 20, 30, 40};\n" +
             "static int sum4(int* p){ return p[0]+p[1]+p[2]+p[3]; }\n" +

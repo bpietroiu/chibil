@@ -1775,17 +1775,11 @@ public class CodeGen
         switch (ty.Kind)
         {
             case TypeKind.Array:
-            case TypeKind.Vla:
-                // Array decays to a pointer to its first element. GenAddr left a
-                // MANAGED pointer (&array value-type) on the stack; convert it to a
-                // native int so it is a plain unmanaged pointer. The JIT rejects a
-                // managed pointer to an aggregate value-type where a native int is
-                // required (e.g. `sigsetjmp(jmp_buf)` — InvalidProgramException),
-                // even though it tolerates &primitive -> native int.
-                _enc.OpCode(ILOpCode.Conv_i);
-                return;
             case TypeKind.Func:
-                // Address IS the value (function pointers are native int already).
+            case TypeKind.Vla:
+                // Array decays to a pointer to its first element; the address (a
+                // managed pointer to the array value-type) IS that value. The JIT
+                // accepts &$ArrayType$ where a native int is required.
                 return;
             case TypeKind.Struct:
             case TypeKind.Union:
@@ -2468,6 +2462,31 @@ public class CodeGen
             _enc.OpCode(ILOpCode.Localloc);
             // Stack: size → ptr (net 0)
             return;
+        }
+
+        // ── setjmp / longjmp (MUSL-3, partial) ────────────────────────────────
+        // CoreCLR can't save/restore native registers, and passing the jmp_buf
+        // array (an opaque __jmp_buf_tag[1]) is rejected by the JIT. Lower setjmp to
+        // a constant 0 (the value of a DIRECT setjmp call) WITHOUT evaluating the
+        // jmp_buf — bypassing the array-decay InvalidProgram. The longjmp→setjmp
+        // RESUMPTION (setjmp establishing a catch) is not implemented yet, so longjmp
+        // throws instead of unwinding to its setjmp. This runs the no-longjmp path.
+        if (!isIndirect)
+        {
+            string fn = node.Lhs.Var.Name;
+            if (fn is "setjmp" or "_setjmp" or "__setjmp" or "sigsetjmp" or "__sigsetjmp")
+            {
+                EmitConstI4(0);   // direct setjmp() returns 0; jmp_buf arg not evaluated
+                return;
+            }
+            if (fn is "longjmp" or "_longjmp" or "siglongjmp")
+            {
+                // TODO(MUSL-3): throw a ChibilLongjmp carrying the value, caught at the
+                // setjmp site to resume. For now it aborts (cannot resume).
+                _enc.OpCode(ILOpCode.Ldnull); Push();
+                _enc.OpCode(ILOpCode.Throw); Pop();
+                return;
+            }
         }
 
         // ── localloc-producing argument: pre-spill ALL args ──────────────────
