@@ -51,6 +51,15 @@ public sealed class TokenMap
     // merged MethodDef or to a synthesized P/Invoke MethodDef.
     private readonly Dictionary<int, int> _externalOverride = new();
 
+    // Opaque-handle redirects (chibil-link export surface): input TypeRef row →
+    // output TypeDef row. A forward-declared-only opaque struct (e.g.
+    // sqlite3_stmt) is referenced in this object only via a module-scoped
+    // TypeRef, but the linker synthesizes an empty public TypeDef for it so an
+    // external C# consumer can name the pointer target. Roslyn cannot decode a
+    // pointer/array element that is a module-scoped TypeRef, so signatures must
+    // emit the TypeDef token instead. MapEntity consults this for TypeRef inputs.
+    private readonly Dictionary<int, int> _typeRefToTypeDef = new();
+
     public TokenMap(MetadataReader reader, MetadataBuilder builder)
     {
         _reader = reader;
@@ -124,7 +133,13 @@ public sealed class TokenMap
         if (handle.IsNil) return default;
         switch (handle.Kind)
         {
-            case HandleKind.TypeReference: return MapTypeRef((TypeReferenceHandle)handle);
+            case HandleKind.TypeReference:
+                {
+                    int trRow = MetadataTokens.GetRowNumber((TypeReferenceHandle)handle);
+                    if (_typeRefToTypeDef.TryGetValue(trRow, out int tdRow))
+                        return MetadataTokens.TypeDefinitionHandle(tdRow);
+                    return MapTypeRef((TypeReferenceHandle)handle);
+                }
             case HandleKind.TypeDefinition: return MapTypeDef((TypeDefinitionHandle)handle);
             case HandleKind.FieldDefinition: return MapField((FieldDefinitionHandle)handle);
             case HandleKind.MethodDefinition:
@@ -192,6 +207,13 @@ public sealed class TokenMap
     /// </summary>
     public void RecordExternal(int originalToken, int mergedTarget)
         => _externalOverride[originalToken] = mergedTarget;
+
+    /// <summary>Redirect references to an input module-scoped opaque TypeRef to a
+    /// synthesized output TypeDef row, so rewritten signatures emit a TypeDef
+    /// token (which Roslyn can decode as a pointer/array element) instead of the
+    /// undecodable module-scoped TypeRef. See <c>_typeRefToTypeDef</c>.</summary>
+    public void RedirectTypeRefToTypeDef(TypeReferenceHandle input, int typeDefOutputRow)
+        => _typeRefToTypeDef[MetadataTokens.GetRowNumber(input)] = typeDefOutputRow;
 
     // ─── User strings ────────────────────────────────────────────────────────
 

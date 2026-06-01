@@ -35,6 +35,17 @@ static class WslRunner
         } finally { try { Directory.Delete(winDir, true); } catch { } }
     }
 
+    public static (int exit, string output) RunDirEntry(string winDir, string dllName)
+    {
+        string wslPath = "/mnt/" + char.ToLower(winDir[0]) + winDir[2..].Replace('\\', '/');
+        using var p = Process.Start(new ProcessStartInfo("wsl",
+            $"-u root -- bash -lc \"cd '{wslPath}' && dotnet {dllName}\"")
+        { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
+        string outp = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+        p.WaitForExit(30000);
+        return (p.ExitCode, outp);
+    }
+
     public const string NetCoreRuntimeConfig =
         "{\n  \"runtimeOptions\": {\n    \"tfm\": \"net10.0\",\n    \"rollForward\": \"Major\",\n" +
         "    \"framework\": { \"name\": \"Microsoft.NETCore.App\", \"version\": \"10.0.0\" }\n  }\n}\n";

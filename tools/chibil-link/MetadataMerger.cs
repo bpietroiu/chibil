@@ -157,6 +157,11 @@ public sealed class MetadataMerger
     private readonly string _exportClass;
     private int _exportTypeDefRow;   // 0 = no export type
 
+    // Output TypeDef rows of synthesized empty opaque-handle value types (e.g.
+    // sqlite3_stmt) created for the export surface. PeWriter unions these into
+    // the set it promotes to public.
+    private readonly HashSet<int> _exportOpaqueTypeRows = new();
+
     public MetadataMerger(IReadOnlyList<ObjectFile> objs, string exportClass = null)
     {
         _objs = objs;
@@ -175,6 +180,20 @@ public sealed class MetadataMerger
         if (_typeRefByKey.TryGetValue(key, out var existing))
             return existing;
         var h = Builder.AddTypeReference(corlib, Builder.GetOrAddString("System"), Builder.GetOrAddString("Object"));
+        _typeRefByKey[key] = h;
+        return h;
+    }
+
+    /// <summary>TypeRef to System.ValueType in the core library, for the base type
+    /// of a synthesized opaque-handle value-type TypeDef.</summary>
+    private EntityHandle GetOrAddCoreValueTypeRef()
+    {
+        if (!_assemblyRefByName.TryGetValue("mscorlib", out var corlib))
+            throw new LinkException("no core-library AssemblyRef available for the opaque value-type base.");
+        var key = (MetadataTokens.GetToken(corlib), "System", "ValueType");
+        if (_typeRefByKey.TryGetValue(key, out var existing))
+            return existing;
+        var h = Builder.AddTypeReference(corlib, Builder.GetOrAddString("System"), Builder.GetOrAddString("ValueType"));
         _typeRefByKey[key] = h;
         return h;
     }
@@ -248,6 +267,21 @@ public sealed class MetadataMerger
         //    them to a real row instead of row 0 (which corrupts <Module>).
         foreach (var of in _objs)
             EnsureMethodSigTypeDefs(of);
+
+        // ── Opaque-handle TypeDefs for the export surface ─────────────────────
+        //    An exported function whose signature names a forward-declared-only
+        //    opaque struct (e.g. `sqlite3_stmt*` — never given a body in this
+        //    build) references it via a MODULE-SCOPED TypeRef, with no matching
+        //    TypeDef in the assembly. A C# consumer compiled by Roslyn against the
+        //    output can't bind that TypeRef to a same-assembly type, so the
+        //    forwarder method is rejected (CS0570 "not supported by the
+        //    language"). Synthesize an empty PUBLIC value-type TypeDef per such
+        //    opaque name so the existing module-scoped TypeRef resolves and the
+        //    consumer can spell the pointer parameter type. Must run AFTER all
+        //    real value-type TypeDefs are reserved (so we don't duplicate a name
+        //    that has a real body) and is the LAST TypeDef-reserving pass.
+        if (_exportClass != null)
+            ReserveExportOpaqueTypeDefs();
 
         // ── StandAloneSigs (local-variable sigs) ──────────────────────────────
         foreach (var of in _objs)
@@ -597,6 +631,10 @@ public sealed class MetadataMerger
                 CollectSigTypeDefRows(of, ref reader, rows);
             }
         }
+        // Empty opaque-handle value types (sqlite3_stmt, …) are referenced via
+        // module-scoped TypeRefs, not TypeDef handles, so CollectSigTypeDefRows
+        // never sees them — add their rows explicitly.
+        rows.UnionWith(_exportOpaqueTypeRows);
         return rows;
     }
 
@@ -756,6 +794,164 @@ public sealed class MetadataMerger
         // and the pointee's TypeDef must still be copied/predicted or the rewritten
         // signature maps it to row 0 (decodes as malformed → CLR rejects <Module>).
         ScanSigTypeForTypeDefs(of, ref sigReader);
+    }
+
+    /// <summary>For every exported function whose signature names an opaque
+    /// struct that has no TypeDef in the merged output (a forward-declared-only
+    /// type referenced via a module-scoped TypeRef, e.g. <c>sqlite3_stmt</c>),
+    /// synthesize an empty PUBLIC value-type TypeDef of that (namespace, name).
+    /// The existing module-scoped TypeRef in the signature then binds to it, so a
+    /// Roslyn-compiled C# consumer can name the pointer parameter type. Real
+    /// struct bodies are already reserved by earlier passes and are skipped here.
+    /// </summary>
+    private void ReserveExportOpaqueTypeDefs()
+    {
+        // Names already backed by a real (possibly bodied) TypeDef — never shadow.
+        var definedNames = new HashSet<(string ns, string name)>();
+        foreach (var ct in CopiedTypeDefs)
+            definedNames.Add((ct.Namespace, ct.Name));
+
+        // Reserve one empty public TypeDef per opaque (ns,name) seen in an
+        // exported signature.
+        var reserved = new Dictionary<(string ns, string name), int>();
+        foreach (var of in _objs)
+        {
+            var md = of.Md;
+            foreach (var m in of.Methods)
+            {
+                if (m.Name == "main") continue;
+                var mdef = md.GetMethodDefinition(m.Handle);
+                if ((mdef.Attributes & UnmanagedExportFlag) == 0) continue;
+
+                var reader = md.GetBlobReader(mdef.Signature);
+                var header = reader.ReadSignatureHeader();
+                if (header.IsGeneric) reader.ReadCompressedInteger();
+                int paramCount = reader.ReadCompressedInteger();
+                CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);   // return
+                for (int p = 0; p < paramCount; p++)
+                {
+                    if (reader.RemainingBytes > 0)
+                    {
+                        byte peek = reader.ReadByte();
+                        if (peek != (byte)SignatureTypeCode.Sentinel) reader.Offset -= 1;
+                    }
+                    CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);
+                }
+            }
+        }
+
+        if (reserved.Count == 0) return;
+
+        // Redirect EVERY object's module-scoped TypeRef whose (ns,name) matches a
+        // reserved opaque type to that type's output TypeDef row, so rewritten
+        // signatures emit a TypeDef token (decodable by Roslyn) rather than the
+        // module-scoped TypeRef. (An opaque type may be named by exported sigs in
+        // more than one object, and each object's own TypeRef must be redirected.)
+        foreach (var of in _objs)
+        {
+            var md = of.Md;
+            var map = _maps[of];
+            for (int r = 1; r <= md.GetTableRowCount(TableIndex.TypeRef); r++)
+            {
+                var trH = MetadataTokens.TypeReferenceHandle(r);
+                var tr = md.GetTypeReference(trH);
+                if (tr.ResolutionScope.Kind != HandleKind.ModuleDefinition) continue;
+                var k = (md.GetString(tr.Namespace), md.GetString(tr.Name));
+                if (reserved.TryGetValue(k, out int row))
+                    map.RedirectTypeRefToTypeDef(trH, row);
+            }
+        }
+    }
+
+    /// <summary>Walk one signature Type, and for any embedded module-scoped
+    /// TypeRef whose (namespace, name) is NOT backed by a TypeDef, reserve an
+    /// empty public value-type TypeDef so the TypeRef resolves. Advances the
+    /// reader past the Type exactly as the rewriter would.</summary>
+    private void CollectSigOpaqueTypeRefs(ObjectFile of, ref BlobReader reader,
+        HashSet<(string ns, string name)> definedNames, Dictionary<(string ns, string name), int> reserved)
+    {
+        var md = of.Md;
+    again:
+        var tc = reader.ReadSignatureTypeCode();
+        switch (tc)
+        {
+            case SignatureTypeCode.RequiredModifier:
+            case SignatureTypeCode.OptionalModifier:
+                reader.ReadTypeHandle();   // modifier type (CallConvCdecl etc.) — never opaque
+                goto again;
+            case SignatureTypeCode.Pinned:
+            case SignatureTypeCode.ByReference:
+                goto again;
+            case SignatureTypeCode.Pointer:
+            case SignatureTypeCode.SZArray:
+                CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);
+                return;
+            case SignatureTypeCode.Array:
+                CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);   // element
+                reader.ReadCompressedInteger();                                 // rank
+                int bounds = reader.ReadCompressedInteger();
+                for (int b = 0; b < bounds; b++) reader.ReadCompressedInteger();
+                int los = reader.ReadCompressedInteger();
+                for (int l = 0; l < los; l++) reader.ReadCompressedSignedInteger();
+                return;
+            case SignatureTypeCode.GenericTypeInstance:
+                reader.ReadByte();
+                MaybeReserveOpaque(of, reader.ReadTypeHandle(), definedNames, reserved);
+                int args = reader.ReadCompressedInteger();
+                for (int a = 0; a < args; a++) CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);
+                return;
+            case SignatureTypeCode.TypeHandle:
+                reader.Offset -= 1; reader.ReadByte();
+                MaybeReserveOpaque(of, reader.ReadTypeHandle(), definedNames, reserved);
+                return;
+            case SignatureTypeCode.GenericTypeParameter:
+            case SignatureTypeCode.GenericMethodParameter:
+                reader.ReadCompressedInteger();
+                return;
+            case SignatureTypeCode.FunctionPointer:
+                var h = reader.ReadSignatureHeader();
+                if (h.IsGeneric) reader.ReadCompressedInteger();
+                int count = reader.ReadCompressedInteger();
+                CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);   // return
+                for (int p = 0; p < count; p++) CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);
+                return;
+            default:
+                return; // primitive
+        }
+    }
+
+    private void MaybeReserveOpaque(ObjectFile of, EntityHandle h,
+        HashSet<(string ns, string name)> definedNames, Dictionary<(string ns, string name), int> reserved)
+    {
+        if (h.Kind != HandleKind.TypeReference) return;   // TypeDef names already exist
+        var tr = of.Md.GetTypeReference((TypeReferenceHandle)h);
+        // Only forward-declared module-local opaque types (resolution scope =
+        // the module itself) lack a TypeDef. A TypeRef into another assembly
+        // (mscorlib etc.) resolves on its own and must not be shadowed.
+        if (tr.ResolutionScope.Kind != HandleKind.ModuleDefinition) return;
+
+        string ns = of.Md.GetString(tr.Namespace);
+        string name = of.Md.GetString(tr.Name);
+        var key = (ns, name);
+        if (definedNames.Contains(key) || reserved.ContainsKey(key)) return;
+
+        _outTypeDefRow++;
+        var copied = new CopiedTypeDef
+        {
+            Name = name,
+            Namespace = ns,
+            BaseType = GetOrAddCoreValueTypeRef(),
+            // Opaque handle: never instantiated by value, only used as a pointer
+            // target. Give it an explicit 1-byte ClassLayout so the TypeDef has a
+            // definite non-zero size (a zero-field, no-layout value type can trip
+            // the loader); 1 byte mirrors an empty C# struct.
+            LayoutSize = 1,
+            LayoutPack = 1,
+            PredictedRow = _outTypeDefRow,
+        };
+        CopiedTypeDefs.Add(copied);
+        _exportOpaqueTypeRows.Add(copied.PredictedRow);
+        reserved[key] = copied.PredictedRow;
     }
 
     private void EnsureTypeDefCopied(ObjectFile of, TypeDefinitionHandle inH)
