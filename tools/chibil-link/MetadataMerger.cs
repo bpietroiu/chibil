@@ -148,9 +148,30 @@ public sealed class MetadataMerger
     private int _outTypeDefRow = ModuleTypeDefRow;   // row 1 = <Module>
     private int _outFieldRow;
 
-    public MetadataMerger(IReadOnlyList<ObjectFile> objs)
+    private readonly string _exportClass;
+    private int _exportTypeDefRow;   // 0 = no export type
+
+    public MetadataMerger(IReadOnlyList<ObjectFile> objs, string exportClass = null)
     {
         _objs = objs;
+        _exportClass = exportClass;
+    }
+
+    /// <summary>Output TypeDef row reserved for the export class (row 2), or 0 if disabled.</summary>
+    public int ExportTypeDefRow => _exportTypeDefRow;
+    public string ExportClass => _exportClass;
+
+    /// <summary>TypeRef to System.Object in the core library, for the export class's base.</summary>
+    public EntityHandle GetOrAddCoreObjectRef()
+    {
+        if (!_assemblyRefByName.TryGetValue("mscorlib", out var corlib))
+            throw new LinkException("no core-library AssemblyRef available for the export class base type.");
+        var key = (MetadataTokens.GetToken(corlib), "System", "Object");
+        if (_typeRefByKey.TryGetValue(key, out var existing))
+            return existing;
+        var h = Builder.AddTypeReference(corlib, Builder.GetOrAddString("System"), Builder.GetOrAddString("Object"));
+        _typeRefByKey[key] = h;
+        return h;
     }
 
     public TokenMap MapFor(ObjectFile of) => _maps[of];
@@ -194,6 +215,11 @@ public sealed class MetadataMerger
         //    field-data RVAs can be assigned by the writer. Must run BEFORE the
         //    StandAloneSig rewrite below so any value-type TypeDef referenced by
         //    a local-variable signature is already predicted (mapped).
+        // Reserve the export class's TypeDef row (row 2) BEFORE value-type TypeDefs
+        // so they shift to 3+ and the export type sits directly after <Module>.
+        if (_exportClass != null)
+            _exportTypeDefRow = ++_outTypeDefRow;
+
         foreach (var of in _objs)
             CopyDataFieldsAndTypeDefs(of);
 

@@ -14,11 +14,11 @@ namespace ChibilLink;
 /// </summary>
 public static class LinkPipeline
 {
-    public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs)
+    public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null)
     {
         if (objs == null || objs.Count == 0)
             throw new LinkException("no input objects.");
-        return new PeWriter(objs, libs ?? new List<string>()).Write();
+        return new PeWriter(objs, libs ?? new List<string>(), exportClass).Write();
     }
 }
 
@@ -38,16 +38,28 @@ public sealed class PeWriter
 {
     private readonly IReadOnlyList<ObjectFile> _objs;
     private readonly List<string> _libs;
+    private readonly string _exportClass;
 
-    public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs)
+    public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null)
     {
         _objs = objs;
         _libs = libs;
+        _exportClass = ValidateExportClass(exportClass);
+    }
+
+    private static string ValidateExportClass(string name)
+    {
+        if (name == null) return null;
+        if (name.Length == 0) throw new LinkException("--export-class name must not be empty.");
+        foreach (var part in name.Split('.'))
+            if (part.Length == 0)
+                throw new LinkException($"--export-class '{name}' has an empty namespace/type segment.");
+        return name;
     }
 
     public byte[] Write()
     {
-        var merger = new MetadataMerger(_objs);
+        var merger = new MetadataMerger(_objs, _exportClass);
         merger.MergeAndPredict();
 
         // Resolve cross-object references and synthesize native P/Invoke stubs.
@@ -208,6 +220,29 @@ public sealed class PeWriter
             MetadataTokens.MethodDefinitionHandle(1));
         AssertRow(MetadataMerger.ModuleTypeDefRow, MetadataTokens.GetRowNumber(moduleTypeDef), "TypeDef <Module>");
 
+        // ── Export class TypeDef (row 2), public static class owning the forwarder
+        //    tail. With zero forwarders, MethodList points past the end (empty).
+        if (merger.ExportTypeDefRow != 0)
+        {
+            int firstForwarderRow = FirstForwarderRow(merger); // = totalMethods+1 when there are no forwarders
+            string full = merger.ExportClass;
+            int dot = full.LastIndexOf('.');
+            string ns = dot < 0 ? "" : full[..dot];
+            string nm = dot < 0 ? full : full[(dot + 1)..];
+            var exportTd = mdBuilder.AddTypeDefinition(
+                System.Reflection.TypeAttributes.Public
+                    | System.Reflection.TypeAttributes.Abstract
+                    | System.Reflection.TypeAttributes.Sealed
+                    | System.Reflection.TypeAttributes.Class
+                    | System.Reflection.TypeAttributes.BeforeFieldInit,
+                ns.Length == 0 ? default : mdBuilder.GetOrAddString(ns),
+                mdBuilder.GetOrAddString(nm),
+                merger.GetOrAddCoreObjectRef(),
+                MetadataTokens.FieldDefinitionHandle(merger.TotalFieldRows + 1),  // owns no fields
+                MetadataTokens.MethodDefinitionHandle(firstForwarderRow));
+            AssertRow(merger.ExportTypeDefRow, MetadataTokens.GetRowNumber(exportTd), "TypeDef export class");
+        }
+
         // ── Step 5a1: value-type TypeDefs referenced by field signatures ──────
         // These own no fields/methods, so their lists point past the end of the
         // Field/MethodDef tables (1-based, exclusive upper bound = count + 1).
@@ -360,6 +395,10 @@ public sealed class PeWriter
         writer.WriteBytes(il);
         return body.Offset;
     }
+
+    // First MethodDef row owned by the export class. In Task 1 there are no
+    // forwarders, so the export class owns an empty range at the end.
+    private static int FirstForwarderRow(MetadataMerger merger) => merger.Plan.Count + 1;
 
     private static void AssertRow(int expected, int actual, string what)
     {
