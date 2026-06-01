@@ -2099,6 +2099,24 @@ public class CodeGen
                     StoreLocalOrParam(node.Lhs.Var);
                     return;
                 }
+                // If the RHS emits a `localloc` (alloca / Layer-1 variadic call),
+                // it must run with an empty evaluation stack — so it cannot be
+                // generated AFTER the destination address is pushed. Evaluate the
+                // RHS into a scratch FIRST (stack empty), then take the lvalue
+                // address and store. C leaves assignment operand evaluation order
+                // unspecified, so this reordering is conforming.
+                if (ProducesLocalloc(node.Rhs))
+                {
+                    GenExpr(node.Rhs);
+                    int rhsScratch = AddFreshScratchLocal(node.Ty);
+                    _enc.StoreLocal(rhsScratch); Pop();
+                    GenAddr(node.Lhs);
+                    _enc.LoadLocal(rhsScratch); Push();
+                    Store(node.Ty);
+                    _enc.LoadLocal(rhsScratch); Push();
+                    return;
+                }
+
                 GenAddr(node.Lhs);
                 if ((node.Ty.Kind == TypeKind.Struct || node.Ty.Kind == TypeKind.Union) &&
                     GetStructTypeHandle(node.Ty).IsNil)
@@ -2366,6 +2384,52 @@ public class CodeGen
     }
 
     // ─── Function call ───────────────────────────────────────────
+
+    /// <summary>True if evaluating <paramref name="node"/>'s VALUE emits a
+    /// <c>localloc</c> (alloca, or a Layer-1 variadic call that packs a stack
+    /// va-buffer). ECMA-335 requires the evaluation stack be empty (apart from the
+    /// size) when <c>localloc</c> runs, so such an expression cannot be generated
+    /// while a destination lvalue address is already on the stack — the caller must
+    /// evaluate it into a scratch local first. Only walks value-producing children
+    /// of the immediate expression (not nested full statements / calls' own bodies),
+    /// which is sufficient: the localloc, if any, is emitted directly by THIS
+    /// expression's lowering before the surrounding store.</summary>
+    private bool ProducesLocalloc(Node node)
+    {
+        if (node == null) return false;
+        switch (node.Kind)
+        {
+            case NodeKind.FunCall:
+            {
+                bool isIndirect = node.Lhs.Kind != NodeKind.Var || !node.Lhs.Var.IsFunction;
+                if (!isIndirect && node.Lhs.Var.Name == "alloca") return true;
+                // Layer-1 variadic call packs its va-buffer with localloc when it
+                // has at least one variadic argument.
+                var ft = node.FuncTy;
+                if (ft != null && ft.IsVariadic && ft.Params != null)
+                {
+                    int nFixed = 0;
+                    for (CType p = ft.Params; p != null; p = p.Next) nFixed++;
+                    int nArgs = 0;
+                    for (Node a = node.Args; a != null; a = a.Next) nArgs++;
+                    // Layer 2 (extern concrete) emits no localloc; only the Layer-1
+                    // (locally-defined) path does. Be conservative: treat any
+                    // variadic-with-extra-args call as localloc-producing.
+                    if (nArgs > nFixed) return true;
+                }
+                return false;
+            }
+            // Transparent wrappers whose value is their child's.
+            case NodeKind.Comma:
+                return ProducesLocalloc(node.Rhs);
+            case NodeKind.Cast:
+                return ProducesLocalloc(node.Lhs);
+            case NodeKind.Cond:
+                return ProducesLocalloc(node.Then) || ProducesLocalloc(node.Els);
+            default:
+                return false;
+        }
+    }
 
     private void GenFunCall(Node node)
     {

@@ -275,6 +275,25 @@ int main(void){ char b[16]; _snprintf(b, 16, ""%d"", 42); return strcmp(b, ""42"
     }
 
     [Fact]
+    public void Variadic_call_as_store_rhs_keeps_localloc_stack_empty()
+    {
+        // A Layer-1 variadic call packs its va-buffer with `localloc`, which
+        // ECMA-335 requires to run with an empty evaluation stack. When the call
+        // is the RHS of a store to a COMPUTED lvalue (e.g. p->b = sum(...)), the
+        // destination address is otherwise pushed first and localloc then runs
+        // with it underneath -> InvalidProgramException. The codegen must spill
+        // the RHS to a scratch first. Regression for the SQLite bring-up.
+        string src = @"
+typedef __builtin_va_list va_list;
+int sum_n(int n, ...){ va_list ap; __builtin_va_start(ap,n); int s=0; for(int i=0;i<n;i++) s+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; }
+struct S { int a; int b; };
+int main(void){ struct S s; struct S* p = &s; p->b = sum_n(2, 20, 35); return p->b; }
+";
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[] { new string[0] }));
+    }
+
+    [Fact]
     public void Indirect_variadic_call_is_rejected()
     {
         // A variadic function called through a function pointer must produce a clean
