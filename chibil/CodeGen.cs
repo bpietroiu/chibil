@@ -385,7 +385,7 @@ public class CodeGen
                 while (canonical.Origin != null) canonical = canonical.Origin;
                 if (canonical.IsNestedMember)
                     throw new InvalidOperationException(
-                        $"Internal error: nested member type '{GetStructName(canonical)}' reached signature encoding");
+                        $"Internal error: nested member type '{GetStructName(canonical)}' reached signature encoding (in function '{_currentFn?.Name}')");
                 int typeId = GetTypeId(ty);
                 if (_structTypeDefs.TryGetValue(typeId, out var structTd))
                 {

@@ -1012,7 +1012,19 @@ public class Parser
         Token tok = binary.Tok;
         if (binary.Lhs.Kind == NodeKind.Member)
         {
-            Obj v = NewLvar("", _types.PointerTo(binary.Lhs.Lhs.Ty));
+            // The spill local only holds the *address* of the base aggregate; its
+            // pointee type is irrelevant for codegen (the member offset is applied
+            // directly). When the base is an anonymous (tagless) nested struct/union
+            // it has no standalone TypeDef and cannot be signature-encoded, so use a
+            // generic char* for the spill local to keep the local encodable.
+            CType baseTy = binary.Lhs.Lhs.Ty;
+            CType baseCanon = baseTy;
+            while (baseCanon.Origin != null) baseCanon = baseCanon.Origin;
+            CType spillPointee =
+                ((baseCanon.Kind == TypeKind.Struct || baseCanon.Kind == TypeKind.Union) && baseCanon.IsNestedMember)
+                    ? _types.TyChar
+                    : baseTy;
+            Obj v = NewLvar("", _types.PointerTo(spillPointee));
             Node e1 = NewBinary(NodeKind.Assign, NewVarNode(v, tok), NewUnary(NodeKind.Addr, binary.Lhs.Lhs, tok), tok);
             Node e2 = NewUnary(NodeKind.Member, NewUnary(NodeKind.Deref, NewVarNode(v, tok), tok), tok); e2.Member = binary.Lhs.Member;
             Node e3 = NewUnary(NodeKind.Member, NewUnary(NodeKind.Deref, NewVarNode(v, tok), tok), tok); e3.Member = binary.Lhs.Member;
