@@ -12,12 +12,18 @@ namespace Chibil.Tests.CoreClr;
 
 public class SqliteExportTests
 {
+    // The SQLite amalgamation compile (~250k LOC, ~40s) is deterministic and the
+    // resulting bytes are read-only, so build it once and share across all tests.
+    static readonly Lazy<byte[]> s_app =
+        new(() => SqliteSmokeTests.BuildSqliteAppDll("Sqlite3.Native"));
+
     const string ConsumerSource = @"
 using System;
 using System.Text;
 using Sqlite3;
 public static class Program
 {
+    // NUL-terminated UTF8; the SQL/path literals here are ASCII.
     static sbyte[] Z(string s){ var u = Encoding.UTF8.GetBytes(s); var b = new sbyte[u.Length + 1]; for (int i = 0; i < u.Length; i++) b[i] = (sbyte)u[i]; return b; }
     public static unsafe int Main()
     {
@@ -41,7 +47,9 @@ public static class Program
     static byte[] CompileConsumer(byte[] appDll)
     {
         var consumerRef = MetadataReference.CreateFromImage(appDll);
-        string tpa = (string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES");
+        string tpa = AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") as string;
+        if (string.IsNullOrEmpty(tpa))
+            throw new InvalidOperationException("TRUSTED_PLATFORM_ASSEMBLIES unavailable; cannot resolve framework refs for the consumer compile.");
         var fxRefs = tpa.Split(Path.PathSeparator)
             .Where(p => p.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
             .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p));
@@ -77,7 +85,7 @@ public static class Program
     [Fact]
     public void Native_surface_shape()
     {
-        byte[] app = SqliteSmokeTests.BuildSqliteAppDll("Sqlite3.Native");
+        byte[] app = s_app.Value;
         Assembly asm = Assembly.Load(app);
         Type t = asm.GetType("Sqlite3.Native");
         Assert.NotNull(t);
@@ -91,7 +99,7 @@ public static class Program
     public void Csharp_consumer_crud_returns_55_on_windows()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
-        byte[] app = SqliteSmokeTests.BuildSqliteAppDll("Sqlite3.Native");
+        byte[] app = s_app.Value;
         byte[] consumer = CompileConsumer(app);
         string outp = "";
         int exit = RunConsumer(app, consumer, dir =>
@@ -103,7 +111,7 @@ public static class Program
     public void Csharp_consumer_crud_returns_55_on_linux()
     {
         if (!WslRunner.Available()) return;
-        byte[] app = SqliteSmokeTests.BuildSqliteAppDll("Sqlite3.Native");
+        byte[] app = s_app.Value;
         byte[] consumer = CompileConsumer(app);
         string outp = "";
         int exit = RunConsumer(app, consumer, dir =>

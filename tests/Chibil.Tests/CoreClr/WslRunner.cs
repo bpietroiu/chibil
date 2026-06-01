@@ -42,7 +42,7 @@ static class WslRunner
             $"-u root -- bash -lc \"cd '{wslPath}' && dotnet {dllName}\"")
         { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
         string outp = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-        p.WaitForExit(30000);
+        if (!p.WaitForExit(30000)) { p.Kill(true); throw new System.Exception("wsl dotnet host timed out"); }
         return (p.ExitCode, outp);
     }
 

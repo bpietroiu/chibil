@@ -98,6 +98,18 @@ public sealed class MetadataMerger
 
     private const MethodAttributes UnmanagedExportFlag = (MethodAttributes)0x0008;
 
+    /// <summary>The single criterion for "this real method is an export forwarder":
+    /// not the C entry <c>main</c>, and flagged extern-linkage (UnmanagedExport).
+    /// Shared by the method-prediction loop (which builds <see cref="ExportedMethods"/>)
+    /// and <see cref="ReserveExportOpaqueTypeDefs"/> (which runs BEFORE that loop, so it
+    /// cannot consume the list) to keep the filter from drifting between the two.</summary>
+    private static bool IsExportForwarder(ObjectFile of, ObjMethod m)
+    {
+        if (m.Name == "main") return false;
+        var mdef = of.Md.GetMethodDefinition(m.Handle);
+        return (mdef.Attributes & UnmanagedExportFlag) != 0;
+    }
+
     // Output <Module> TypeDef is row 1; methods all hang off it.
     public const int ModuleTypeDefRow = 1;
 
@@ -171,32 +183,25 @@ public sealed class MetadataMerger
     /// <summary>Output TypeDef row reserved for the export class (row 2), or 0 if disabled.</summary>
     public int ExportTypeDefRow => _exportTypeDefRow;
 
-    /// <summary>TypeRef to System.Object in the core library, for the export class's base.</summary>
-    public EntityHandle GetOrAddCoreObjectRef()
+    /// <summary>Get-or-add a deduped TypeRef to a core-library type (mscorlib scope).</summary>
+    private EntityHandle GetOrAddCoreTypeRef(string ns, string name)
     {
         if (!_assemblyRefByName.TryGetValue("mscorlib", out var corlib))
-            throw new LinkException("no core-library AssemblyRef available for the export class base type.");
-        var key = (MetadataTokens.GetToken(corlib), "System", "Object");
+            throw new LinkException($"no core-library AssemblyRef available for {ns}.{name}.");
+        var key = (MetadataTokens.GetToken(corlib), ns, name);
         if (_typeRefByKey.TryGetValue(key, out var existing))
             return existing;
-        var h = Builder.AddTypeReference(corlib, Builder.GetOrAddString("System"), Builder.GetOrAddString("Object"));
+        var h = Builder.AddTypeReference(corlib, Builder.GetOrAddString(ns), Builder.GetOrAddString(name));
         _typeRefByKey[key] = h;
         return h;
     }
 
+    /// <summary>TypeRef to System.Object in the core library, for the export class's base.</summary>
+    public EntityHandle GetOrAddCoreObjectRef() => GetOrAddCoreTypeRef("System", "Object");
+
     /// <summary>TypeRef to System.ValueType in the core library, for the base type
     /// of a synthesized opaque-handle value-type TypeDef.</summary>
-    private EntityHandle GetOrAddCoreValueTypeRef()
-    {
-        if (!_assemblyRefByName.TryGetValue("mscorlib", out var corlib))
-            throw new LinkException("no core-library AssemblyRef available for the opaque value-type base.");
-        var key = (MetadataTokens.GetToken(corlib), "System", "ValueType");
-        if (_typeRefByKey.TryGetValue(key, out var existing))
-            return existing;
-        var h = Builder.AddTypeReference(corlib, Builder.GetOrAddString("System"), Builder.GetOrAddString("ValueType"));
-        _typeRefByKey[key] = h;
-        return h;
-    }
+    private EntityHandle GetOrAddCoreValueTypeRef() => GetOrAddCoreTypeRef("System", "ValueType");
 
     public TokenMap MapFor(ObjectFile of) => _maps[of];
 
@@ -299,12 +304,8 @@ public sealed class MetadataMerger
                 map.SetMethodDef(m.Handle, _outMethodRow);
                 Plan.Add(new MethodSlot { Obj = of, Method = m, PredictedRow = _outMethodRow });
 
-                if (_exportClass != null && m.Name != "main")
-                {
-                    var mdef = of.Md.GetMethodDefinition(m.Handle);
-                    if ((mdef.Attributes & UnmanagedExportFlag) != 0)
-                        ExportedMethods.Add((of, m));
-                }
+                if (_exportClass != null && IsExportForwarder(of, m))
+                    ExportedMethods.Add((of, m));
             }
         }
     }
@@ -712,6 +713,10 @@ public sealed class MetadataMerger
     /// <summary>Walk one Type element of a signature blob, recursing through
     /// composite forms, and copy any embedded value-type/class TypeDef. Advances
     /// the reader past the Type exactly as the rewriter would.</summary>
+    /// NOTE: three walkers share this exact reader-advance grammar with different
+    /// leaf actions — ScanSigTypeForTypeDefs (ensure-copied), CollectSigTypeDefRows
+    /// (collect rows), CollectSigOpaqueTypeRefs (reserve opaque TypeDefs). Keep the
+    /// reader-advance logic in all three in sync.
     private void ScanSigTypeForTypeDefs(ObjectFile of, ref BlobReader reader)
     {
     again:
@@ -819,9 +824,11 @@ public sealed class MetadataMerger
             var md = of.Md;
             foreach (var m in of.Methods)
             {
-                if (m.Name == "main") continue;
+                // ExportedMethods is not yet populated here (this pass runs BEFORE the
+                // method-prediction loop), so re-derive the export set via the shared
+                // IsExportForwarder predicate instead of consuming the list.
+                if (!IsExportForwarder(of, m)) continue;
                 var mdef = md.GetMethodDefinition(m.Handle);
-                if ((mdef.Attributes & UnmanagedExportFlag) == 0) continue;
 
                 var reader = md.GetBlobReader(mdef.Signature);
                 var header = reader.ReadSignatureHeader();
@@ -870,7 +877,6 @@ public sealed class MetadataMerger
     private void CollectSigOpaqueTypeRefs(ObjectFile of, ref BlobReader reader,
         HashSet<(string ns, string name)> definedNames, Dictionary<(string ns, string name), int> reserved)
     {
-        var md = of.Md;
     again:
         var tc = reader.ReadSignatureTypeCode();
         switch (tc)
