@@ -25,6 +25,9 @@
     <Compile Include="..\..\tools\chibil-link\PeWriter.cs" />
     <Compile Include="..\..\tools\chibil-link\LinkSymbolTable.cs" />
     <Compile Include="..\..\tools\chibil-link\SymbolResolver.cs" />
+    <Compile Include="..\..\tools\chibil-link\FieldDataRelocator.cs" />
+    <Compile Include="..\..\tools\chibil-link\WritableDataPEBuilder.cs" />
+    <Compile Include="..\..\tools\chibil-link\FieldRvaRebaser.cs" />
   </ItemGroup>
 
   <ItemGroup>
