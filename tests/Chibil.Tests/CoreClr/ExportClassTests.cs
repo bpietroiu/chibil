@@ -22,6 +22,30 @@ public class ExportClassTests
     {
         Assembly asm = LinkAndLoad("int main(void){ return 0; }", null);
         Assert.Null(asm.GetType("Foo.Bar"));
+        Assert.DoesNotContain(asm.GetTypes(), t => t.IsPublic); // no public types without --export-class
+    }
+
+    [Fact]
+    public void Export_class_without_namespace()
+    {
+        Assembly asm = LinkAndLoad("int main(void){ return 0; }", "MyNative");
+        Type t = asm.GetType("MyNative");
+        Assert.NotNull(t);
+        Assert.True(t.IsPublic && t.IsAbstract && t.IsSealed);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(".Foo")]
+    [InlineData("Foo.")]
+    [InlineData("Foo..Bar")]
+    [InlineData(".")]
+    public void Malformed_export_class_throws(string bad)
+    {
+        byte[] obj = TestCompiler.CompileToObj("int main(void){ return 0; }", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        Assert.Throws<LinkException>(() =>
+            LinkPipeline.LinkToBytes(new[] { of }, new System.Collections.Generic.List<string>(), bad));
     }
 
     [Fact]

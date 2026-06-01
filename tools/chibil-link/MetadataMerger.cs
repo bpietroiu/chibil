@@ -159,7 +159,6 @@ public sealed class MetadataMerger
 
     /// <summary>Output TypeDef row reserved for the export class (row 2), or 0 if disabled.</summary>
     public int ExportTypeDefRow => _exportTypeDefRow;
-    public string ExportClass => _exportClass;
 
     /// <summary>TypeRef to System.Object in the core library, for the export class's base.</summary>
     public EntityHandle GetOrAddCoreObjectRef()

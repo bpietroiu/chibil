@@ -225,7 +225,7 @@ public sealed class PeWriter
         if (merger.ExportTypeDefRow != 0)
         {
             int firstForwarderRow = FirstForwarderRow(merger); // = totalMethods+1 when there are no forwarders
-            string full = merger.ExportClass;
+            string full = _exportClass;
             int dot = full.LastIndexOf('.');
             string ns = dot < 0 ? "" : full[..dot];
             string nm = dot < 0 ? full : full[(dot + 1)..];
@@ -396,8 +396,11 @@ public sealed class PeWriter
         return body.Offset;
     }
 
-    // First MethodDef row owned by the export class. In Task 1 there are no
-    // forwarders, so the export class owns an empty range at the end.
+    // First MethodDef row owned by the export class. The forwarder methods (added
+    // in a later task) MUST be the contiguous TAIL of the MethodDef table, and this
+    // value MUST equal the predicted row of the FIRST forwarder — i.e. it must be
+    // computed BEFORE any forwarder slots are reserved into merger.Plan. With no
+    // forwarders yet, that is Plan.Count + 1 (an empty range at the end).
     private static int FirstForwarderRow(MetadataMerger merger) => merger.Plan.Count + 1;
 
     private static void AssertRow(int expected, int actual, string what)
