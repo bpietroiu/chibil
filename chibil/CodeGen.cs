@@ -2495,14 +2495,15 @@ public class CodeGen
         // Push arguments
         int argCount = 0;
 
-        // ── Indirect variadic calls: not supported ────────────────────────
-        // An indirect call through a function pointer to a variadic function
-        // cannot be lowered correctly: the Layer-1 va-buffer packing would push
-        // a hidden __va pointer, but the calli standalone signature encodes only
-        // the fixed declared params → stack mismatch → InvalidProgramException.
-        // Emit a clean compile error rather than a silent runtime crash.
-        if (isIndirect && funcTy.IsVariadic && funcTy.Params != null)
-            Util.ErrorTok(node.Tok, "indirect calls to variadic functions are not supported");
+        // ── Indirect variadic calls: lowered via the Layer-1 va-buffer ABI ──
+        // A function pointer to a variadic function (e.g. bash's `(*pfunc)(fmt, …)`
+        // where pfunc points at a chibil-defined `cprintf(const char*, …)`) is
+        // lowered like a direct Layer-1 call: the va-buffer packing block below
+        // pushes the fixed args + a hidden __va pointer, and the calli standalone
+        // signature (further down) appends the matching trailing void* param so the
+        // stack and signature agree. This matches the lowered MethodDef of any
+        // chibil-compiled variadic (fixed params + void* __va, Default conv) — the
+        // only kind of variadic a managed function pointer can target.
 
         // ── Layer 2: native __cdecl variadic call (e.g. printf) ──────────
         // A variadic callee that is an EXTERNAL declaration (not defined in this
@@ -2655,8 +2656,13 @@ public class CodeGen
                 });
             calliSig.WriteByte(calliConv);
 
+            // A variadic function pointer carries a hidden trailing va-buffer
+            // pointer (Layer-1 ABI), matching the callee's lowered MethodDef — count
+            // and encode it so the calli sig agrees with the packed stack above.
+            bool hasVaPtr = funcTy.IsVariadic && funcTy.Params != null;
             int paramCount = 0;
             for (CType p = funcTy.Params; p != null; p = p.Next) paramCount++;
+            if (hasVaPtr) paramCount++;
             calliSig.WriteCompressedInteger(paramCount);
 
             // Return type (with modopt for calling convention)
@@ -2665,6 +2671,8 @@ public class CodeGen
             // Params
             for (CType p = funcTy.Params; p != null; p = p.Next)
                 EncodeType(calliSig, p);
+            if (hasVaPtr)
+                EncodeType(calliSig, _types.TyVaList); // hidden __va pointer
 
             var calliSigHandle = _md.AddStandaloneSignature(_md.GetOrAddBlob(calliSig));
             _enc.CallIndirect(calliSigHandle);

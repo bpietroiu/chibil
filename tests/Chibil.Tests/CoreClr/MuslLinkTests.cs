@@ -1,0 +1,177 @@
+using System.Collections.Generic;
+using ChibilLink;
+using Xunit;
+
+namespace Chibil.Tests.CoreClr;
+
+/// <summary>
+/// MUSL-1 acceptance: link a C program whose libc symbols are all UNRESOLVED to a
+/// single native library via the bulk <c>-l c</c> fallback (no per-symbol
+/// <c>--pinvoke</c> map) — the exact mode the bash-to-IL bring-up uses, where the
+/// ~220 libc externals all route to one library. The resolver synthesizes a
+/// pinvokeimpl stub per (name, signature) and the program runs against real libc.
+///
+/// The mechanism (cross-object resolution, P/Invoke synthesis, variadic per-sig
+/// stub forking, bulk <c>-l c</c>) already ships and is covered by
+/// <see cref="VarargsTests"/> (native snprintf) and <see cref="PinvokeRoutingTests"/>
+/// (getpid / kernel32). This test pins the milestone program that those don't:
+/// a variadic writing to a real <c>FILE</c> stream (<c>printf</c> → stdout, vs
+/// snprintf-to-buffer) PLUS a heap round-trip (<c>malloc</c>/<c>free</c>).
+/// </summary>
+public class MuslLinkTests
+{
+    // printf (variadic → stdout) + malloc/free (heap) + strlen/strcpy (fixed-arg),
+    // every callee unresolved and bound through one `-l c`.
+    const string Milestone = @"
+typedef unsigned long size_t;
+int   __cdecl printf(const char*, ...);
+void* __cdecl malloc(size_t);
+void  __cdecl free(void*);
+size_t __cdecl strlen(const char*);
+char* __cdecl strcpy(char*, const char*);
+int main(void){
+    char* p = (char*)malloc(8);
+    strcpy(p, ""hi"");
+    printf(""[%s]\n"", p);
+    int n = (int)strlen(p);
+    free(p);
+    return n;            /* strlen(""hi"") == 2 */
+}";
+
+    [Fact]
+    public void Milestone_printf_malloc_strlen_runs_on_linux_via_bulk_libc()
+    {
+        if (!WslRunner.Available()) return;
+
+        byte[] obj = TestCompiler.CompileToObj(Milestone, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "musl1.obj");
+        // Bulk fallback: one library, no per-symbol map. All of printf/malloc/free/
+        // strlen/strcpy resolve to libc.so.6.
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string> { "c" });
+
+        var (exit, output) = WslRunner.Run(pe, WslRunner.NetCoreRuntimeConfig);
+        Assert.True(exit == 2, $"expected exit 2 (strlen \"hi\"), got {exit}. Output:\n{output}");
+        Assert.Contains("[hi]", output);   // printf actually wrote to the real stdout stream
+    }
+
+    [Fact]
+    public void Native_data_import_stdout_initialized_from_libc()
+    {
+        if (!WslRunner.Available()) return;
+        // `stdout` is a libc DATA global (FILE*). MSIL can't import native data, so
+        // the linker synthesizes storage and initializes it at module load from
+        // libc via NativeLibrary.GetExport. Writing through it must reach the real
+        // stdout stream — proves the data-import mechanism end-to-end.
+        const string src =
+            "typedef struct _IO_FILE FILE;\n" +
+            "extern FILE* stdout;\n" +
+            "int fputs(const char*, FILE*);\n" +
+            "int fflush(FILE*);\n" +
+            "int main(void){ fputs(\"data-import-ok\\n\", stdout); fflush(stdout); return 7; }\n";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "sout.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string> { "c" });
+        var (exit, output) = WslRunner.Run(pe, WslRunner.NetCoreRuntimeConfig);
+        Assert.True(exit == 7, $"expected exit 7, got {exit}. Output:\n{output}");
+        Assert.Contains("data-import-ok", output);   // the libc-initialized stdout pointer worked
+    }
+
+    static int RunViaHost(string src, out string output)
+    {
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string>());
+        return DotnetHostRunner.RunPeViaDotnetHost(pe, out output);
+    }
+
+    [Fact]
+    public void Main_argc_argv_entry_marshals_argv()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // `int main(int argc, char** argv)` must now link: the entry synthesizes a
+        // char** from the host command line (argv[0] = program path, argv[argc] =
+        // NULL). No libc — pure pointer checks — so it runs on the bare host.
+        const string src =
+            "int main(int argc, char** argv){\n" +
+            "  if (argc < 1) return 10;\n" +
+            "  if (argv[0] == 0) return 11;\n" +
+            "  if (argv[argc] != 0) return 12;   /* NUL terminator at index argc */\n" +
+            "  if (argv[0][0] == 0) return 13;   /* program path is non-empty */\n" +
+            "  return 42;\n" +
+            "}\n";
+        int exit = RunViaHost(src, out string o);
+        Assert.True(exit == 42, $"expected 42, got {exit}. {o}");
+    }
+
+    static int LinkRun(string[] sources, out string output)
+    {
+        var objs = new List<ObjectFile>();
+        for (int i = 0; i < sources.Length; i++)
+            objs.Add(ObjectFile.Load(
+                TestCompiler.CompileToObj(sources[i], Chibil.TargetProfile.CoreClr), $"tu{i}.obj"));
+        byte[] pe = LinkPipeline.LinkToBytes(objs, new List<string>());
+        return DotnetHostRunner.RunPeViaDotnetHost(pe, out output);
+    }
+
+    [Fact]
+    public void Cross_object_data_global_resolves_by_name()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // An initialized global defined in TU 0 and read from TU 1 — the data
+        // analog of cross-object function resolution. Real multi-TU bash shares
+        // dozens of such globals (loop_level, extglob_flag, …).
+        int exit = LinkRun(new[]
+        {
+            "int g = 42;",
+            "extern int g; int main(void){ return g; }",
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (cross-TU global g), got {exit}. {o}");
+    }
+
+    [Fact]
+    public void Uninitialized_external_global_gets_bss_storage()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // `int counter;` at file scope is a COMMON symbol (external tentative def,
+        // Sect=0/Value=size), not a section-bound slot — previously dropped, so the
+        // program failed to link. The linker must now allocate a zero-init .bss slot.
+        int exit = LinkRun(new[]
+        {
+            "int counter; int main(void){ counter++; counter++; return counter; }",
+        }, out string o);
+        Assert.True(exit == 2, $"expected 2 (bss-allocated common global), got {exit}. {o}");
+    }
+
+    [Fact]
+    public void Cross_object_bss_global_mutated_then_read()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // An UNINITIALIZED (.bss) global defined in TU 0, mutated by a function in
+        // TU 0, and read from TU 1 — exercises cross-TU resolution of a BSS global
+        // alongside a cross-TU function call.
+        int exit = LinkRun(new[]
+        {
+            "int counter; void bump(void){ counter++; }",
+            "extern int counter; extern void bump(void);" +
+            " int main(void){ bump(); bump(); bump(); return counter; }",
+        }, out string o);
+        Assert.True(exit == 3, $"expected 3 (cross-TU bss global), got {exit}. {o}");
+    }
+
+    [Fact]
+    public void Main_three_arg_entry_links_with_null_envp()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // bash's real entry is `int main(int, char**, char**)`. It must link; envp
+        // is currently passed as NULL (real envp marshalling is a follow-up). This
+        // pins that contract — flip to 56 when envp is implemented.
+        const string src =
+            "int main(int argc, char** argv, char** envp){\n" +
+            "  if (argc < 1) return 10;\n" +
+            "  if (argv[argc] != 0) return 11;\n" +
+            "  return envp == 0 ? 55 : 56;\n" +
+            "}\n";
+        int exit = RunViaHost(src, out string o);
+        Assert.True(exit == 55, $"expected 55 (NULL envp), got {exit}. {o}");
+    }
+}

@@ -1952,6 +1952,11 @@ public class Parser
         // Mark as a function so call sites classify it as a direct call and hit
         // GenFunCall's alloca special-case (localloc), not the indirect-call path.
         _builtinAlloca.IsFunction = true;
+        // musl's <alloca.h> does `#define alloca __builtin_alloca`, so an `alloca(n)`
+        // call reaches the parser as `__builtin_alloca(n)`. Bind that GCC builtin name
+        // to the SAME object so it resolves (not "implicit declaration") and hits the
+        // localloc special-case too.
+        PushScope("__builtin_alloca").Var = _builtinAlloca;
     }
 
     // ═══════════════════════════════════════════════════════════════

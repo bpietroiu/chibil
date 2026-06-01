@@ -805,7 +805,13 @@ public class Preprocessor
     private void ReadLineMarker(ref Token rest, Token tok)
     {
         Token start = tok;
-        Token processed = Preprocess(CopyLine(ref rest, tok));
+        // Use Preprocess2 (not the public Preprocess): the latter's epilogue raises
+        // "unterminated conditional directive" when _condIncl != null, which is the
+        // case whenever a #line marker sits inside an open #if block (e.g. the
+        // union YYSTYPE block in yacc-generated y.tab.h). We still need the PP number
+        // and filename tokens converted, so do that explicitly.
+        Token processed = Preprocess2(CopyLine(ref rest, tok));
+        _tokenizer.ConvertPpTokens(processed);
         if (processed.Kind != TokenKind.Num || processed.Ty.Kind != TypeKind.Int)
             Util.ErrorTok(processed, "invalid line marker");
         start.File.LineDelta = (int)processed.Val - start.LineNo;

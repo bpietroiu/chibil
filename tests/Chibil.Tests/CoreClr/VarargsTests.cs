@@ -330,14 +330,21 @@ int main(void){ return consume(vsum(2, 20, 13), vsum(2, 12, 10)); }   /* 33 + 22
     }
 
     [Fact]
-    public void Indirect_variadic_call_is_rejected()
+    public void Indirect_variadic_call_through_pointer_works()
     {
-        // A variadic function called through a function pointer must produce a clean
-        // compile error. Use __clrcall so taking the function's address succeeds
-        // (ldftn path); the indirect call site is the one that must be rejected.
-        string src = "int __clrcall f(int n, ...){ return n; } int main(void){ int(__clrcall *fp)(int,...) = f; return fp(1, 2, 3); }";
-        var ex = Assert.Throws<ChibiException>(() => TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr));
-        Assert.Contains("variadic", ex.Message);
+        // A variadic function called through a function pointer is lowered via the
+        // Layer-1 va-buffer ABI: the va-buffer packing pushes the fixed args + a
+        // hidden __va pointer, and the calli standalone signature includes the
+        // matching trailing void* param. (Previously rejected; needed by bash's
+        // print_cmd.c `(*pfunc)("%s%s", …)` where pfunc points at a chibil-defined
+        // variadic.) The call must produce the correct result.
+        string src =
+            "typedef __builtin_va_list va_list;" +
+            " int vsum(int n, ...){ va_list ap; __builtin_va_start(ap, n); int s = 0;" +
+            " for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int); __builtin_va_end(ap); return s; }" +
+            " int main(void){ int (*fp)(int, ...) = vsum; return fp(3, 20, 22, 13); }"; // 55
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[] { new string[0] }));
     }
 
     // Per spec §7, native FLOAT varargs do NOT work through a monomorphized

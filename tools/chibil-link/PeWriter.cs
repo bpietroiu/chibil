@@ -64,7 +64,7 @@ public sealed class PeWriter
 
     public byte[] Write()
     {
-        var merger = new MetadataMerger(_objs, _exportClass);
+        var merger = new MetadataMerger(_objs, _exportClass, _libs);
         merger.MergeAndPredict();
 
         // Resolve cross-object references and synthesize native P/Invoke stubs.
@@ -83,20 +83,37 @@ public sealed class PeWriter
             if (cf.Kind == MetadataMerger.CopiedField.FieldKind.Mutable)
                 fieldInits.Add((cf.PredictedRow, cf.SourceFieldRow, cf.Size));
 
+        // Native DATA imports are initialized from their library at load time; this
+        // IL is spliced ahead of the FieldRVA relocations in the single <Module>
+        // .cctor (a type may have only one). It has no trailing ret.
+        byte[] dataInitIl = merger.BuildDataImportInitIl();
+
         MetadataMerger.SynthMethod cctorSynth = null;
-        if (fieldRelocs.Count > 0 || fieldInits.Count > 0)
+        if (fieldRelocs.Count > 0 || fieldInits.Count > 0 || dataInitIl.Length > 0)
         {
             // void .cctor() — default calling convention, no params, returns void.
             var cctorSig = new BlobBuilder();
             new BlobEncoder(cctorSig)
                 .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
                 .Parameters(0, ret => ret.Void(), _ => { });
+
+            // .cctor body = [data-import init] + [FieldRVA relocs ... ret], or just
+            // [data-import init][ret] when there are no relocations.
+            byte[] tail = (fieldRelocs.Count > 0 || fieldInits.Count > 0)
+                ? FieldDataRelocator.BuildCctorIl(fieldRelocs, fieldInits)   // ends in ret
+                : new byte[] { 0x2A };                                       // ret
+            byte[] body = new byte[dataInitIl.Length + tail.Length];
+            System.Buffer.BlockCopy(dataInitIl, 0, body, 0, dataInitIl.Length);
+            System.Buffer.BlockCopy(tail, 0, body, dataInitIl.Length, tail.Length);
+
             cctorSynth = new MetadataMerger.SynthMethod
             {
                 Name = ".cctor",
                 SignatureBlob = merger.Builder.GetOrAddBlob(cctorSig),
-                Il = FieldDataRelocator.BuildCctorIl(fieldRelocs, fieldInits),
+                Il = body,
                 MaxStack = 4,   // cpblk needs 3; reloc phase peaks at 3 — 4 is safe
+                LocalSig = merger.BuildDataImportInitLocalSig(),
+                InitLocals = dataInitIl.Length > 0,
                 Attributes = MethodAttributes.Private | MethodAttributes.Static
                            | MethodAttributes.HideBySig | MethodAttributes.SpecialName
                            | MethodAttributes.RTSpecialName,
@@ -149,11 +166,13 @@ public sealed class PeWriter
 
             if (slot.Synth != null)
             {
-                // Synthesized method with prebuilt IL (the FieldRVA .cctor).
+                // Synthesized method with prebuilt IL (FieldRVA .cctor, OS
+                // intrinsic, argv helpers). LocalSig is nil unless the body
+                // needs locals (the argv-marshalling loop).
                 il = slot.Synth.Il;
                 maxStack = slot.Synth.MaxStack;
-                localSig = default;
-                initLocals = false;
+                localSig = slot.Synth.LocalSig;
+                initLocals = slot.Synth.InitLocals;
             }
             else if (slot.Method == null)
             {

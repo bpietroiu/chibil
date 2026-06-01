@@ -49,10 +49,14 @@ public static class EntrySynthesizer
 
         int mainFinalToken = merger.MapToken(mainObj, mainMethod.OriginalToken);
 
-        // Determine main's parameter count to decide the call shape.
+        // Determine main's parameter count from its SIGNATURE (authoritative;
+        // the Param table may also carry a sequence-0 return row) to decide the
+        // call shape.
         var md = mainObj.Md;
         var def = md.GetMethodDefinition(mainMethod.Handle);
-        int paramCount = def.GetParameters().Count;
+        var sigReader = md.GetBlobReader(def.Signature);
+        sigReader.ReadSignatureHeader();                 // calling convention
+        int paramCount = sigReader.ReadCompressedInteger();
 
         var b = merger.Builder;
 
@@ -76,13 +80,35 @@ public static class EntrySynthesizer
             il.WriteByte(0x2A);                 // ret
             maxStack = 1;
         }
+        else if (paramCount >= 1 && paramCount <= 3)
+        {
+            // Bridge `int main(int argc, char** argv[, char** envp])`. Push argc
+            // and a freshly-marshalled char** argv via the synthesized helpers,
+            // then NULL for envp if main takes three params, and call main.
+            //
+            //   call int32 __chibil_argc()            ; argc
+            //   [call void* __chibil_make_argv()]     ; argv  (params >= 2)
+            //   [ldc.i4.0; conv.i]                    ; envp = NULL (params == 3)
+            //   call int32 main(...); ret
+            il.WriteByte(0x28); il.WriteInt32(merger.ReserveArgcHelper());        // call __chibil_argc
+            if (paramCount >= 2)
+            {
+                il.WriteByte(0x28); il.WriteInt32(merger.ReserveMakeArgvHelper()); // call __chibil_make_argv
+            }
+            if (paramCount == 3)
+            {
+                il.WriteByte(0x16);             // ldc.i4.0
+                il.WriteByte(0xD3);             // conv.i   (envp = (char**)NULL)
+            }
+            il.WriteByte(0x28); il.WriteInt32(mainFinalToken);   // call main
+            il.WriteByte(0x2A);                 // ret
+            maxStack = 3;
+        }
         else
         {
-            // TODO: marshalling argv for int main(int, char**) is a later task.
-            // The previous fallback emitted `ldc.i4.0; ldnull; call; ret`, but
-            // `ldnull` for a char** pointer parameter is a verifier type mismatch,
-            // so reject it loudly instead of emitting invalid IL.
-            throw new LinkException("int main(int, char**) entry not yet supported");
+            throw new LinkException(
+                $"unsupported main arity {paramCount}; expected int main(void), " +
+                "(int, char**), or (int, char**, char**)");
         }
 
         return new Result
