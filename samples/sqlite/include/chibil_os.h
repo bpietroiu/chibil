@@ -27,6 +27,24 @@ extern int  unlink(const char *path);
 extern int  access(const char *path, int mode);
 extern long long lseek(int fd, long long off, int whence);
 
+/* ---- POSIX file locking (libc fcntl) ---- */
+#define F_RDLCK 0
+#define F_WRLCK 1
+#define F_UNLCK 2
+#define F_SETLK 6
+/* struct flock, Linux x86-64 layout (32 bytes): l_type@0, l_whence@2, [pad@4],
+   l_start@8, l_len@16, l_pid@24, [pad@28]. The natural 4-byte pad after l_whence
+   aligns the 8-byte l_start — declared in field order, the compiler inserts it. */
+struct flock {
+    short l_type;
+    short l_whence;
+    long long l_start;
+    long long l_len;
+    int l_pid;
+};
+extern int fcntl(int fd, int cmd, void *arg);   /* non-variadic: arg is always &flock here */
+extern int usleep(unsigned int usec);           /* libc */
+
 /* ---- Win32 (kernel32) ---- */
 #define GENERIC_READ          0x80000000u
 #define GENERIC_WRITE         0x40000000u
@@ -63,6 +81,15 @@ extern int  DeleteFileA(const char *name);
 extern int  GetFileSizeEx(void *h, long long *size);
 extern unsigned int GetFileAttributesA(const char *name);
 extern unsigned int GetLastError(void);
+
+/* ---- Win32 file locking + sleep (kernel32) ---- */
+#define LOCKFILE_FAIL_IMMEDIATELY 0x00000001u
+#define LOCKFILE_EXCLUSIVE_LOCK   0x00000002u
+extern int LockFileEx(void *h, unsigned int flags, unsigned int reserved,
+                      unsigned int nLow, unsigned int nHigh, OVERLAPPED *ov);
+extern int UnlockFileEx(void *h, unsigned int reserved,
+                        unsigned int nLow, unsigned int nHigh, OVERLAPPED *ov);
+extern void Sleep(unsigned int millis);          /* kernel32 */
 
 /* INVALID_HANDLE_VALUE == (void*)-1 */
 #define INVALID_HANDLE_VALUE ((void *)(long long)-1)
