@@ -2431,6 +2431,23 @@ public class CodeGen
         }
     }
 
+    // When a call argument is pre-spilled (see GenFunCall), maps that argument
+    // Node to the scratch local holding its already-evaluated value. GenArg loads
+    // the scratch instead of re-evaluating.
+    private Dictionary<Node, int> _argSpill;
+
+    /// <summary>Evaluate (or, if pre-spilled, reload) a call argument's value onto
+    /// the stack. See the pre-spill logic in <see cref="GenFunCall"/>.</summary>
+    private void GenArg(Node arg)
+    {
+        if (_argSpill != null && _argSpill.TryGetValue(arg, out int slot))
+        {
+            _enc.LoadLocal(slot); Push();
+            return;
+        }
+        GenExpr(arg);
+    }
+
     private void GenFunCall(Node node)
     {
         CType funcTy = node.FuncTy;
@@ -2444,6 +2461,36 @@ public class CodeGen
             // Stack: size → ptr (net 0)
             return;
         }
+
+        // ── localloc-producing argument: pre-spill ALL args ──────────────────
+        // If any argument's value emits a `localloc` (a nested alloca or Layer-1
+        // variadic call), it must run with an empty evaluation stack. But the
+        // argument-push loops below accumulate earlier args on the stack first, so
+        // a sibling localloc would run with them underneath -> InvalidProgramException
+        // (e.g. SQLite's `sqlite3VdbeAddOp4(v, .., sqlite3MPrintf(..), ..)`).
+        // Evaluate every argument into a fresh scratch local up front — each runs
+        // with an empty stack — then the loops below just reload the scratch via
+        // GenArg. C leaves argument evaluation order unspecified, so left-to-right
+        // pre-evaluation is conforming. The spill map is scoped to THIS call and
+        // saved/restored to support nested calls.
+        var savedSpill = _argSpill;
+        bool anyLocalloc = false;
+        for (Node a = node.Args; a != null; a = a.Next)
+            if (ProducesLocalloc(a)) { anyLocalloc = true; break; }
+        if (anyLocalloc)
+        {
+            var spill = new Dictionary<Node, int>();
+            for (Node a = node.Args; a != null; a = a.Next)
+            {
+                GenExpr(a);                               // stack empty at each localloc
+                int slot = AddFreshScratchLocal(a.Ty);
+                _enc.StoreLocal(slot); Pop();
+                spill[a] = slot;
+            }
+            _argSpill = spill;
+        }
+        try
+        {
 
         // Push arguments
         int argCount = 0;
@@ -2481,7 +2528,7 @@ public class CodeGen
             int idx = 0;
             for (Node arg = node.Args; arg != null; arg = arg.Next, idx++)
             {
-                GenExpr(arg);
+                GenArg(arg);
                 if (idx >= nFixed2)
                 {
                     CType promoted = VaPromote(arg.Ty);
@@ -2549,7 +2596,7 @@ public class CodeGen
                         _enc.OpCode(ILOpCode.Add); Pop();
                     }
                     // value (promoted)
-                    GenExpr(va);
+                    GenArg(va);
                     if (promoted != va.Ty)
                         EmitCast(va.Ty, promoted);
                     Store(promoted); // stind into slot, pops addr+value
@@ -2560,7 +2607,7 @@ public class CodeGen
             arg = node.Args;
             for (int i = 0; i < nFixed; i++)
             {
-                GenExpr(arg);
+                GenArg(arg);
                 argCount++;
                 arg = arg.Next;
             }
@@ -2583,7 +2630,7 @@ public class CodeGen
         {
             for (Node arg = node.Args; arg != null; arg = arg.Next)
             {
-                GenExpr(arg);
+                GenArg(arg);
                 argCount++;
             }
         }
@@ -2647,6 +2694,12 @@ public class CodeGen
         // Push return value if non-void
         if (funcTy.ReturnTy.Kind != TypeKind.Void)
             Push();
+
+        }
+        finally
+        {
+            _argSpill = savedSpill;
+        }
     }
 
     // ─── Atomic operations ───────────────────────────────────────

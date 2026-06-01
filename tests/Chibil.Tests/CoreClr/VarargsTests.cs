@@ -294,6 +294,42 @@ int main(void){ struct S s; struct S* p = &s; p->b = sum_n(2, 20, 35); return p-
     }
 
     [Fact]
+    public void Variadic_call_as_argument_keeps_localloc_stack_empty()
+    {
+        // A Layer-1 variadic call packs its va-buffer with `localloc`, which must
+        // run with an empty evaluation stack. When such a call is NESTED as an
+        // argument of another call, the outer call's earlier args are already on
+        // the stack when the inner localloc runs -> InvalidProgramException. The
+        // codegen must pre-spill the outer call's args to scratch locals first.
+        // SQLite hit this in sqlite3EndTable via
+        //   sqlite3VdbeAddOp4(v, OP_SqlExec, .., sqlite3MPrintf(..), P4_DYNAMIC).
+        string src = @"
+typedef __builtin_va_list va_list;
+int vsum(int n, ...){ va_list ap; __builtin_va_start(ap,n); int s=0; for(int i=0;i<n;i++) s+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; }
+int consume4(int a, int b, int c, int d){ return a + b + c + d; }
+int main(void){
+  /* nested variadic call with sibling args already on the stack */
+  return consume4(10, vsum(3, 14, 15, 16), 0, 0);   /* 10 + 45 = 55 */
+}";
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[] { new string[0] }));
+    }
+
+    [Fact]
+    public void Two_variadic_calls_as_arguments()
+    {
+        // Two localloc-producing args in the same call: both must be pre-spilled.
+        string src = @"
+typedef __builtin_va_list va_list;
+int vsum(int n, ...){ va_list ap; __builtin_va_start(ap,n); int s=0; for(int i=0;i<n;i++) s+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; }
+int consume(int a, int b){ return a + b; }
+int main(void){ return consume(vsum(2, 20, 13), vsum(2, 12, 10)); }   /* 33 + 22 = 55 */
+";
+        var asm = System.Reflection.Assembly.Load(LinkSource(src));
+        Assert.Equal(55, (int)asm.EntryPoint.Invoke(null, new object[] { new string[0] }));
+    }
+
+    [Fact]
     public void Indirect_variadic_call_is_rejected()
     {
         // A variadic function called through a function pointer must produce a clean
