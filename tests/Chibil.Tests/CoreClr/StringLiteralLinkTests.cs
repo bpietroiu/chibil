@@ -6,17 +6,16 @@ using Xunit;
 namespace Chibil.Tests.CoreClr;
 
 /// <summary>
-/// Regression tests for cross-object string-literal (FieldRVA) data placement.
+/// Regression tests for cross-object string-literal (FieldRVA) data placement:
+/// literals defined in a LATER object must not read back as zero once enough
+/// initialized data precedes them.
 ///
-/// Two linker bugs caused string literals defined in a LATER object to read back
-/// as zero once enough initialized data preceded them:
-///   1. WritableDataPEBuilder.SerializeSection used BlobBuilder.LinkSuffix on the
-///      shared field-data blob. ManagedPEBuilder serializes in multiple passes; the
-///      first pass drained the blob, so later passes wrote a desynchronized/zeroed
-///      .sdata whose bytes no longer matched the FieldRVA offsets.
-///   2. FieldRvaRebaser inferred a single rebase delta from the placeholder RVAs,
-///      whose base shifts by a file-alignment quantum once the field data crosses a
-///      size threshold, mis-addressing every field uniformly.
+/// This oracle originally caught two bugs in a since-retired custom writable-.sdata
+/// emitter (a multi-pass blob-drain that zeroed the section, and a rebase that
+/// inferred a single delta from placeholder RVAs and mis-addressed every field).
+/// That path is gone — field data now rides in ManagedPEBuilder's standard
+/// mappedFieldData section — but the test stays as the guard that literal
+/// addressing remains correct under the current emitter.
 /// </summary>
 public class StringLiteralLinkTests
 {
