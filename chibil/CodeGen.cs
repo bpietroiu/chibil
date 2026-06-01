@@ -431,12 +431,18 @@ public class CodeGen
         // Calling convention byte per ECMA-335:
         // MSVC /clr uses CDecl (0x01) for cdecl, StdCall (0x02) for __stdcall,
         // and Default (0x00) for __clrcall function pointers.
-        sig.WriteByte(funcTy.CallConv switch
-        {
-            CallConv.Clrcall => (byte)SignatureCallingConvention.Default,
-            CallConv.Stdcall => (byte)SignatureCallingConvention.StdCall,
-            _ => (byte)SignatureCallingConvention.CDecl,
-        });
+        // In CoreCLR/pure-MSIL there is no native interop: every C function is a
+        // managed method with the Default (0x00) convention, so force Default to
+        // match the ldftn'd method pointer (Spot 1) and the calli sig (Spot 3).
+        byte conv = _options.Target == TargetProfile.CoreClr
+            ? (byte)SignatureCallingConvention.Default
+            : (funcTy.CallConv switch
+            {
+                CallConv.Clrcall => (byte)SignatureCallingConvention.Default,
+                CallConv.Stdcall => (byte)SignatureCallingConvention.StdCall,
+                _ => (byte)SignatureCallingConvention.CDecl,
+            });
+        sig.WriteByte(conv);
 
         // Count parameters
         int paramCount = 0;
@@ -1948,6 +1954,23 @@ public class CodeGen
     private void EmitFunctionAddress(Obj fn, Token tok = null)
     {
         CType funcTy = fn.Ty;
+        if (_options.Target == TargetProfile.CoreClr)
+        {
+            // Pure-MSIL: every C function is a managed method. Take its address with
+            // ldftn regardless of (cdecl/stdcall/clrcall) calling convention — there
+            // are no native __unep@ slots in this target.
+            if (_methodDefs.TryGetValue(fn, out var mdef))
+            {
+                _enc.OpCode(ILOpCode.Ldftn); _enc.Token(mdef); Push(); return;
+            }
+            // External function: ldftn its member reference.
+            if (!_externalFuncRefs.TryGetValue(fn.Name, out var extRef))
+            {
+                RegisterExternalFunction(fn);
+                extRef = _externalFuncRefs[fn.Name];
+            }
+            _enc.OpCode(ILOpCode.Ldftn); _enc.Token(extRef); Push(); return;
+        }
         if (funcTy.CallConv == CallConv.Clrcall)
         {
             if (_methodDefs.TryGetValue(fn, out var md))
@@ -2502,12 +2525,18 @@ public class CodeGen
 
             // Build standalone signature for calli
             var calliSig = new BlobBuilder();
-            calliSig.WriteByte(funcTy.CallConv switch
-            {
-                CallConv.Clrcall => (byte)SignatureCallingConvention.Default,
-                CallConv.Stdcall => (byte)SignatureCallingConvention.StdCall,
-                _ => (byte)SignatureCallingConvention.CDecl,
-            });
+            // In CoreCLR/pure-MSIL the callee is a managed method (Default conv) and
+            // its address was taken via ldftn; the calli sig must match (Default),
+            // not cdecl/stdcall — otherwise InvalidProgramException at runtime.
+            byte calliConv = _options.Target == TargetProfile.CoreClr
+                ? (byte)SignatureCallingConvention.Default
+                : (funcTy.CallConv switch
+                {
+                    CallConv.Clrcall => (byte)SignatureCallingConvention.Default,
+                    CallConv.Stdcall => (byte)SignatureCallingConvention.StdCall,
+                    _ => (byte)SignatureCallingConvention.CDecl,
+                });
+            calliSig.WriteByte(calliConv);
 
             int paramCount = 0;
             for (CType p = funcTy.Params; p != null; p = p.Next) paramCount++;
