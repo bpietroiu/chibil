@@ -72,6 +72,12 @@ public static class SymbolResolver
                 string name = md.GetString(mr.Name);
                 int originalToken = MetadataTokens.GetToken(mrH);
 
+                if (name == "__chibil_os_is_windows")
+                {
+                    map.RecordExternal(originalToken, merger.ReserveOsIsWindowsIntrinsic());
+                    continue;
+                }
+
                 if (table.DefinedMethodToken.TryGetValue(name, out int definedToken))
                 {
                     // Cross-object: redirect to the defining function's merged row.

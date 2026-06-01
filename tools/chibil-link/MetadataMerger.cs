@@ -358,6 +358,46 @@ public sealed class MetadataMerger
         return MetadataTokens.GetToken(MetadataTokens.MethodDefinitionHandle(_outMethodRow));
     }
 
+    private int _osIsWindowsToken;
+
+    /// <summary>Reserve a C-callable intrinsic `int __chibil_os_is_windows()` whose
+    /// body is `call bool [mscorlib]System.OperatingSystem::IsWindows(); ret` (the
+    /// bool result is the i4 the C `int` ABI expects). Deduped. Returns its MethodDef
+    /// token. Used by the cross-OS disk VFS to pick its backend at runtime.</summary>
+    public int ReserveOsIsWindowsIntrinsic()
+    {
+        if (_osIsWindowsToken != 0) return _osIsWindowsToken;
+
+        var boolSig = new BlobBuilder();
+        new BlobEncoder(boolSig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(0, ret => ret.Type().Boolean(), _ => { });
+        var osType = GetOrAddCoreTypeRef("System", "OperatingSystem");
+        var isWin = Builder.AddMemberReference(osType, Builder.GetOrAddString("IsWindows"),
+            Builder.GetOrAddBlob(boolSig));
+
+        var mSig = new BlobBuilder();
+        new BlobEncoder(mSig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(0, ret => ret.Type().Int32(), _ => { });
+
+        var il = new BlobBuilder();
+        il.WriteByte(0x28); il.WriteInt32(MetadataTokens.GetToken(isWin)); // call IsWindows
+        il.WriteByte(0x2A);                                                // ret
+        var synth = new SynthMethod
+        {
+            Name = "__chibil_os_is_windows",
+            SignatureBlob = Builder.GetOrAddBlob(mSig),
+            Il = il.ToArray(),
+            MaxStack = 1,
+            Attributes = System.Reflection.MethodAttributes.Public
+                       | System.Reflection.MethodAttributes.Static
+                       | System.Reflection.MethodAttributes.HideBySig,
+        };
+        _osIsWindowsToken = ReserveSynthRow(synth);
+        return _osIsWindowsToken;
+    }
+
     /// <summary>Reserve the MethodDef row for the synthesized entry method.
     /// Returns the predicted row (and handle). Call exactly once, after
     /// MergeAndPredict, before emitting bodies.</summary>
