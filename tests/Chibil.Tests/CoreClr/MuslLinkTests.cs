@@ -76,6 +76,30 @@ int main(void){
         Assert.Contains("data-import-ok", output);   // the libc-initialized stdout pointer worked
     }
 
+    [Fact]
+    public void External_call_with_struct_pointer_sig_keeps_assembly_loadable()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // A struct type named ONLY in an external function's call-site signature
+        // (never in a local/field/defined method) must still be copied, or the
+        // synthesized P/Invoke stub's rewritten signature references TypeDef[0]
+        // (VALUETYPE with a null token) — a corrupt signature that makes CoreCLR
+        // reject the entire assembly at load ("entry point not found"). The call is
+        // guarded by a global so it never executes (the stub targets a nonexistent
+        // libc symbol); the program must load and return 42. Regression for the
+        // bash-to-IL entry-point-at-scale bug (shell.o: make_word/sigsetjmp/…).
+        const string src =
+            "struct Opaque { int x; long y; };\n" +
+            "extern struct Opaque* ext_make(int);\n" +
+            "int g = 0;\n" +
+            "int main(void){ if (g) ext_make(1); return 42; }\n";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string> { "c" });
+        int exit = DotnetHostRunner.RunPeViaDotnetHost(pe, out string o);
+        Assert.True(exit == 42, $"expected 42 (assembly loaded with valid sigs), got {exit}. {o}");
+    }
+
     static int RunViaHost(string src, out string output)
     {
         byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);

@@ -325,6 +325,16 @@ public sealed class MetadataMerger
         foreach (var of in _objs)
             EnsureMethodSigTypeDefs(of);
 
+        // ── Value-type TypeDefs referenced by EXTERNAL-CALL (MemberRef) signatures.
+        //    A function CALLED but not defined here (e.g. make_word -> WORD_DESC*,
+        //    sigsetjmp -> jmp_buf) whose struct type appears in no defined method,
+        //    field, or local sig is otherwise never copied; SymbolResolver then
+        //    rewrites that call-site signature into a P/Invoke stub with the struct
+        //    token mapping to row 0 (VALUETYPE TypeDef[0]) — a corrupt signature
+        //    CoreCLR rejects, poisoning the whole assembly's load. Ensure them here.
+        foreach (var of in _objs)
+            EnsureMemberRefSigTypeDefs(of);
+
         // ── Opaque-handle TypeDefs for the export surface ─────────────────────
         //    An exported function whose signature names a forward-declared-only
         //    opaque struct (e.g. `sqlite3_stmt*` — never given a body in this
@@ -1118,21 +1128,45 @@ public sealed class MetadataMerger
         for (int r = 1; r <= md.GetTableRowCount(TableIndex.MethodDef); r++)
         {
             var def = md.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(r));
-            var reader = md.GetBlobReader(def.Signature);
-            SignatureHeader header = reader.ReadSignatureHeader();
-            if (header.IsGeneric) reader.ReadCompressedInteger(); // generic param count
-            int paramCount = reader.ReadCompressedInteger();
-            ScanSigTypeForTypeDefs(of, ref reader);              // return type
-            for (int p = 0; p < paramCount; p++)
+            EnsureSigTypeDefs(of, def.Signature);
+        }
+    }
+
+    /// <summary>Ensure value-type TypeDefs referenced by external FUNCTION call-site
+    /// (MemberRef-on-&lt;Module&gt;) signatures — see the caller in MergeAndPredict.</summary>
+    private void EnsureMemberRefSigTypeDefs(ObjectFile of)
+    {
+        var md = of.Md;
+        for (int r = 1; r <= md.GetTableRowCount(TableIndex.MemberRef); r++)
+        {
+            var mr = md.GetMemberReference(MetadataTokens.MemberReferenceHandle(r));
+            if (mr.Parent.Kind != HandleKind.TypeDefinition) continue;
+            var parent = md.GetTypeDefinition((TypeDefinitionHandle)mr.Parent);
+            if (md.GetString(parent.Name) != "<Module>") continue;
+            if (mr.GetKind() != MemberReferenceKind.Method) continue;
+            EnsureSigTypeDefs(of, mr.Signature);
+        }
+    }
+
+    /// <summary>Walk a MethodDefSig blob (return + params) ensuring every value-type
+    /// TypeDef it names is copied/predicted, so the rewritten signature maps to a real
+    /// row rather than row 0.</summary>
+    private void EnsureSigTypeDefs(ObjectFile of, BlobHandle sigBlob)
+    {
+        var reader = of.Md.GetBlobReader(sigBlob);
+        SignatureHeader header = reader.ReadSignatureHeader();
+        if (header.IsGeneric) reader.ReadCompressedInteger(); // generic param count
+        int paramCount = reader.ReadCompressedInteger();
+        ScanSigTypeForTypeDefs(of, ref reader);              // return type
+        for (int p = 0; p < paramCount; p++)
+        {
+            // A SENTINEL (vararg "...") may appear before a param; skip it.
+            if (reader.RemainingBytes > 0)
             {
-                // A SENTINEL (vararg "...") may appear before a param; skip it.
-                if (reader.RemainingBytes > 0)
-                {
-                    byte peek = reader.ReadByte();
-                    if (peek != (byte)SignatureTypeCode.Sentinel) reader.Offset -= 1;
-                }
-                ScanSigTypeForTypeDefs(of, ref reader);
+                byte peek = reader.ReadByte();
+                if (peek != (byte)SignatureTypeCode.Sentinel) reader.Offset -= 1;
             }
+            ScanSigTypeForTypeDefs(of, ref reader);
         }
     }
 

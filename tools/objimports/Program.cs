@@ -1,6 +1,70 @@
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
 using ChibilLink;
+
+// "tables <file.dll>" — authoritative metadata dump for debugging the load bug.
+if (args.Length >= 2 && args[0] == "tables")
+{
+    using var fs = File.OpenRead(args[1]);
+    using var pe = new PEReader(fs);
+    var r = pe.GetMetadataReader();
+    Console.WriteLine($"== {Path.GetFileName(args[1])} ==");
+    foreach (TableIndex ti in Enum.GetValues(typeof(TableIndex)))
+    {
+        int c = r.GetTableRowCount(ti);
+        if (c > 0) Console.WriteLine($"  {ti,-18} {c}");
+    }
+    // Try decoding every MethodDef signature; report the first failures.
+    int ok = 0, bad = 0;
+    var prov = new DummySig();
+    foreach (var mh in r.MethodDefinitions)
+    {
+        var md = r.GetMethodDefinition(mh);
+        try
+        {
+            md.DecodeSignature(prov, null);
+            ok++;
+        }
+        catch (Exception e)
+        {
+            if (bad < 5) Console.WriteLine($"  SIG-FAIL {r.GetString(md.Name)}: {e.GetType().Name} {e.Message}");
+            bad++;
+        }
+    }
+    Console.WriteLine($"  method sigs: ok={ok} bad={bad}");
+    return 0;
+}
+
+// "sig <file.dll|.obj> <methodName>" — dump a method's raw signature blob hex.
+if (args.Length >= 3 && args[0] == "sig")
+{
+    string target = args[2];
+    if (args[1].EndsWith(".obj"))
+    {
+        var of = ObjectFile.Load(File.ReadAllBytes(args[1]), Path.GetFileName(args[1]));
+        var mr = of.Md;
+        foreach (var m in of.Methods)
+            if (m.Name == target)
+            {
+                var sig = mr.GetMethodDefinition(m.Handle).Signature;
+                Console.WriteLine($"OBJ {target}: {Convert.ToHexString(mr.GetBlobBytes(sig))}");
+            }
+    }
+    else
+    {
+        using var fs = File.OpenRead(args[1]);
+        using var pe = new PEReader(fs);
+        var r = pe.GetMetadataReader();
+        foreach (var mh in r.MethodDefinitions)
+        {
+            var md = r.GetMethodDefinition(mh);
+            if (r.GetString(md.Name) == target)
+                Console.WriteLine($"DLL {target}: {Convert.ToHexString(r.GetBlobBytes(md.Signature))}");
+        }
+    }
+    return 0;
+}
 
 // Usage: objimports <dir-of-.obj-files> [data]
 //   default : external FUNCTION symbols referenced but defined by none (libc surface)
