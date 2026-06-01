@@ -915,12 +915,14 @@ public sealed class MetadataMerger
                 reader.ReadCompressedInteger();
                 return;
             case SignatureTypeCode.FunctionPointer:
+            {
                 var h = reader.ReadSignatureHeader();
                 if (h.IsGeneric) reader.ReadCompressedInteger();
                 int count = reader.ReadCompressedInteger();
                 CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);   // return
                 for (int p = 0; p < count; p++) CollectSigOpaqueTypeRefs(of, ref reader, definedNames, reserved);
                 return;
+            }
             default:
                 return; // primitive
         }

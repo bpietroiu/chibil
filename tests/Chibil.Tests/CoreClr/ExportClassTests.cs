@@ -124,4 +124,27 @@ public class ExportClassTests
         Type q = Array.Find(asm.GetTypes(), x => x.Name == "Q");
         if (q != null) Assert.False(q.IsPublic, "unreferenced struct Q must stay non-public");
     }
+
+    [Fact]
+    public void Opaque_forward_declared_struct_becomes_public_for_export()
+    {
+        // `struct Opaque;` is forward-declared only (no body in this TU), so it is
+        // referenced via a module-scoped TypeRef with no TypeDef. The export feature
+        // must synthesize an empty PUBLIC value-type TypeDef for it so external C#
+        // can name `Opaque*`. `use` takes `struct Opaque*` and is exported.
+        Assembly asm = LinkAndLoad(
+            "struct Opaque; " +
+            "int use(struct Opaque *p); " +              // prototype only — opaque pointer
+            "int use(struct Opaque *p){ return p ? 1 : 0; } " +
+            "int main(void){ return use(0); }",
+            "N.S");
+        Type t = asm.GetType("N.S");
+        MethodInfo use = t.GetMethod("use", BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(use);
+        Type paramType = use.GetParameters()[0].ParameterType; // Opaque*
+        Assert.True(paramType.IsPointer, "expected a pointer parameter");
+        Type pointee = paramType.GetElementType();            // Opaque
+        Assert.True(pointee.IsValueType, "opaque handle should be a value type");
+        Assert.True(pointee.IsPublic, "forward-declared-only opaque struct must be synthesized public");
+    }
 }
