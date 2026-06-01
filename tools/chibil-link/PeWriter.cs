@@ -56,6 +56,32 @@ public sealed class PeWriter
         // plan so the row-prediction assertions below still hold.
         SymbolResolver.Resolve(merger, _objs, _libs);
 
+        // Collect FieldRVA pointer relocations (function/data pointers baked into
+        // initialized globals) and, if any exist, synthesize a <Module> .cctor
+        // that applies them at load time. Reserve its row BEFORE the entry row so
+        // its body is encoded with the rest of the plan.
+        var fieldRelocs = FieldDataRelocator.Collect(merger, _objs);
+        MetadataMerger.SynthMethod cctorSynth = null;
+        if (fieldRelocs.Count > 0)
+        {
+            // void .cctor() — default calling convention, no params, returns void.
+            var cctorSig = new BlobBuilder();
+            new BlobEncoder(cctorSig)
+                .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+                .Parameters(0, ret => ret.Void(), _ => { });
+            cctorSynth = new MetadataMerger.SynthMethod
+            {
+                Name = ".cctor",
+                SignatureBlob = merger.Builder.GetOrAddBlob(cctorSig),
+                Il = FieldDataRelocator.BuildCctorIl(fieldRelocs),
+                MaxStack = 4,
+                Attributes = MethodAttributes.Private | MethodAttributes.Static
+                           | MethodAttributes.HideBySig | MethodAttributes.SpecialName
+                           | MethodAttributes.RTSpecialName,
+            };
+            merger.ReserveSynthRow(cctorSynth);
+        }
+
         // Reserve the entry method's row (last in the plan) so its token is known.
         var (entryRow, entryHandle) = merger.ReserveEntryRow();
 
@@ -89,7 +115,15 @@ public sealed class PeWriter
             StandaloneSignatureHandle localSig;
             bool initLocals;
 
-            if (slot.Method == null)
+            if (slot.Synth != null)
+            {
+                // Synthesized method with prebuilt IL (the FieldRVA .cctor).
+                il = slot.Synth.Il;
+                maxStack = slot.Synth.MaxStack;
+                localSig = default;
+                initLocals = false;
+            }
+            else if (slot.Method == null)
             {
                 // Synthesized entry.
                 il = entry.Il;
@@ -194,7 +228,14 @@ public sealed class PeWriter
             MethodAttributes attrs;
             MethodImplAttributes impl;
 
-            if (slot.Method == null)
+            if (slot.Synth != null)
+            {
+                sig = slot.Synth.SignatureBlob;
+                name = mdBuilder.GetOrAddString(slot.Synth.Name);
+                attrs = slot.Synth.Attributes;
+                impl = MethodImplAttributes.IL;
+            }
+            else if (slot.Method == null)
             {
                 sig = entry.SignatureBlob;
                 name = entry.Name;
@@ -246,17 +287,27 @@ public sealed class PeWriter
 
         var peHeader = PEHeaderBuilder.CreateExecutableHeader();
 
-        var peBuilder = new ManagedPEBuilder(
+        byte[] pe;
+        var peBuilder = new WritableDataPEBuilder(
             peHeader,
             rootBuilder,
             ilBuilder,
-            mappedFieldData: mappedFieldData,
+            fieldData: mappedFieldData,
             entryPoint: entryHandle,
             flags: CorFlags.ILOnly);
 
         var peBlob = new BlobBuilder();
         peBuilder.Serialize(peBlob);
-        return peBlob.ToArray();
+        pe = peBlob.ToArray();
+
+        // The FieldRVA rows were written with offsets RELATIVE to the start of the
+        // .sdata field-data blob (we did not use ManagedPEBuilder's mappedFieldData,
+        // which is hardwired to .text). Now that .sdata's base RVA is known, rebase
+        // every FieldRVA entry by adding it. Patching 32-bit RVA values does not
+        // change any table size, so the layout (and SDataRva) is unaffected.
+        if (peBuilder.SDataRva > 0 && merger.CopiedFields.Count > 0)
+            FieldRvaRebaser.Rebase(pe, peBuilder.SDataRva);
+        return pe;
     }
 
     private static int AddBody(
