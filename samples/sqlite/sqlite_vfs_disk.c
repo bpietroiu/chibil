@@ -1,7 +1,8 @@
 /* samples/sqlite/sqlite_vfs_disk.c — a real on-disk sqlite3_vfs, cross-OS.
  * File I/O goes to libc (Linux) or kernel32 (Windows), picked at runtime via
- * __chibil_os_is_windows(). Single connection, NO locking (xLock/xUnlock no-op);
- * the SQLite lock protocol is SP3b. Register with register_disk_vfs(). */
+ * __chibil_os_is_windows(). Single connection per process; SQLite's byte-range
+ * lock protocol (fcntl / LockFileEx) is implemented below. Register with
+ * register_disk_vfs(). */
 #include "sqlite3.h"
 #include "chibil_os.h"
 
@@ -114,13 +115,14 @@ static int dfLock(sqlite3_file *f, int eTarget){
         if (g_win) unlock_byte(df, SHARED_FIRST, SHARED_SIZE);   /* Win: drop shared read-lock first */
         int ok = lock_byte(df, SHARED_FIRST, SHARED_SIZE, 1 /*write*/);
         if (!ok){
-            if (g_win) lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0); /* restore shared read-lock */
+            if (g_win) lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0); /* restore shared read-lock; a kernel-level failure here (not contention) would desync eLock — unhandled, as in os_win.c */
             df->eLock = SQLITE_LOCK_PENDING;     /* we do hold PENDING */
             return SQLITE_BUSY;
         }
         df->eLock = SQLITE_LOCK_EXCLUSIVE;
         return SQLITE_OK;
     }
+    /* unreachable: SQLite never requests PENDING directly (it's an internal gate). */
     return SQLITE_OK;
 }
 static int dfUnlock(sqlite3_file *f, int eTarget){
@@ -129,7 +131,7 @@ static int dfUnlock(sqlite3_file *f, int eTarget){
     if (eTarget == SQLITE_LOCK_SHARED){
         if (df->eLock == SQLITE_LOCK_EXCLUSIVE){
             /* downgrade the shared range from write back to read */
-            if (g_win){ unlock_byte(df, SHARED_FIRST, SHARED_SIZE); lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0); }
+            if (g_win){ unlock_byte(df, SHARED_FIRST, SHARED_SIZE); lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0); } /* brief no-lock window between unlock and relock — same as os_win.c; a relock kernel-failure is unhandled */
             else lock_byte(df, SHARED_FIRST, SHARED_SIZE, 0);     /* fcntl converts in place */
         }
         unlock_byte(df, PENDING_BYTE, 1);
@@ -151,7 +153,7 @@ static int dfCheckLock(sqlite3_file *f, int *pOut){
         unlock_byte(df, RESERVED_BYTE, 1);
         *pOut = 0;
     } else {
-        *pOut = 1;                                /* someone else holds RESERVED */
+        *pOut = 1;                                /* contended (or a rare lock I/O error, treated conservatively as held) */
     }
     return SQLITE_OK;
 }
