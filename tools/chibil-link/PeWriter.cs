@@ -470,7 +470,6 @@ public sealed class PeWriter
                 {
                     DocumentName = of.Debug.SourceFile,
                     Hash = of.Debug.SourceHash,
-                    IlSize = info.IlSize,
                 };
                 foreach (var (il, line, sc, ec) in info.Points)
                     m.SequencePoints.Add(new PortablePdbWriter.SeqPoint
@@ -483,8 +482,17 @@ public sealed class PeWriter
                         StartColumn = sc > 0 ? sc : 1,
                         EndColumn = ec > sc ? ec : (sc > 0 ? sc + 1 : 2),
                     });
-                foreach (var (slot, name) in info.Locals)
-                    m.Locals.Add(new PortablePdbWriter.LocalVar { Slot = slot, Name = name });
+                foreach (var scope in info.Scopes)
+                {
+                    var si = new PortablePdbWriter.ScopeInfo
+                    {
+                        StartOffset = scope.Start,
+                        Length = scope.Length,
+                    };
+                    foreach (var (slot, name) in scope.Locals)
+                        si.Locals.Add(new PortablePdbWriter.LocalVar { Slot = slot, Name = name });
+                    m.Scopes.Add(si);
+                }
                 byRid[finalRid] = m;
             }
         }

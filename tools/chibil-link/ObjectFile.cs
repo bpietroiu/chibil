@@ -50,6 +50,14 @@ public sealed unsafe class ObjectFile
     {
         public int IlSize;
         public List<(int Il, int Line, int StartCol, int EndCol)> Points = new();
+        public List<ScopeDbg> Scopes = new();
+    }
+
+    /// <summary>A lexical block scope: its IL range and the locals it declares.</summary>
+    public sealed class ScopeDbg
+    {
+        public int Start;
+        public int Length;
         public List<(int Slot, string Name)> Locals = new();
     }
 
@@ -145,15 +153,15 @@ public sealed unsafe class ObjectFile
     }
 
     // Parse the .chidbg side-stream emitted by chibil (see CodeGen.BuildChibilDebugBlob):
-    // magic 'CDBG', version 3, source path + SHA-256, then per-method (RID, IL size,
-    // line points with columns, named locals).
+    // magic 'CDBG', version 4, source path + SHA-256, then per-method (RID, IL size,
+    // line points with columns, and nested lexical scopes with their named locals).
     private static ChibilDebug ParseChibilDebug(byte[] data)
     {
         using var br = new System.IO.BinaryReader(new System.IO.MemoryStream(data));
         if (br.ReadByte() != 'C' || br.ReadByte() != 'D' || br.ReadByte() != 'B' || br.ReadByte() != 'G')
             return null;
         int version = br.ReadByte();
-        if (version != 3)
+        if (version != 4)
             return null;
 
         var dbg = new ChibilDebug();
@@ -178,13 +186,19 @@ public sealed unsafe class ObjectFile
                 info.Points.Add((il, line, sc, ec));
             }
 
-            int locCount = br.ReadInt32();
-            for (int l = 0; l < locCount; l++)
+            int scopeCount = br.ReadInt32();
+            for (int s = 0; s < scopeCount; s++)
             {
-                int slot = br.ReadInt32();
-                int nameLen = br.ReadUInt16();
-                string name = System.Text.Encoding.UTF8.GetString(br.ReadBytes(nameLen));
-                info.Locals.Add((slot, name));
+                var scope = new ScopeDbg { Start = br.ReadInt32(), Length = br.ReadInt32() };
+                int locCount = br.ReadInt32();
+                for (int l = 0; l < locCount; l++)
+                {
+                    int slot = br.ReadInt32();
+                    int nameLen = br.ReadUInt16();
+                    string name = System.Text.Encoding.UTF8.GetString(br.ReadBytes(nameLen));
+                    scope.Locals.Add((slot, name));
+                }
+                info.Scopes.Add(scope);
             }
 
             dbg.Methods[rid] = info;

@@ -38,8 +38,9 @@ public class ChidbgTests
         // IL offsets within a method are non-negative.
         Assert.All(of.Debug.Methods.Values.SelectMany(m => m.Points), pt => Assert.True(pt.Il >= 0));
 
-        // The named local `s` from add() is captured.
-        var localNames = of.Debug.Methods.Values.SelectMany(m => m.Locals).Select(l => l.Name).ToHashSet();
+        // The named local `s` from add() is captured (inside a lexical scope now).
+        var localNames = of.Debug.Methods.Values
+            .SelectMany(m => m.Scopes).SelectMany(sc => sc.Locals).Select(l => l.Name).ToHashSet();
         Assert.Contains("s", localNames);
     }
 }

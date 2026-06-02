@@ -184,6 +184,7 @@ public class Obj
 
     // Local variable
     public int Offset;
+    public int ScopeId;     // parser scope index of the declaring block (debug local scopes)
 
     // Global variable or function
     public bool IsFunction;
@@ -256,6 +257,7 @@ public class Node
 
     // Block or statement expression
     public Node Body;
+    public int ScopeId = -1; // parser scope index if this node opens a lexical scope (-1 = none)
 
     // Struct member access
     public Member Member;

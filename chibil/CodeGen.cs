@@ -33,7 +33,13 @@ public class CodeGen
     // document per TU suffices.
     private string _dbgSourceFile;
     private byte[] _dbgSourceHash;
-    private readonly List<(int Rid, int IlSize, List<(int Il, int Line, int StartCol, int EndCol)> Pts, List<(int Slot, string Name)> Locals)> _dbgMethods = new();
+    private readonly List<(int Rid, int IlSize,
+        List<(int Il, int Line, int StartCol, int EndCol)> Pts,
+        List<(int Start, int Len, List<(int Slot, string Name)> Locals)> Scopes)> _dbgMethods = new();
+    // Per-function: measured IL range [start, start+len) of each lexical scope, keyed
+    // by the parser's scope index. Drives nested LocalScope emission so block-scoped
+    // and shadowed locals are visible only within their block.
+    private Dictionary<int, (int Start, int Len)> _dbgScopeRanges = new();
 
     private BlobBuilder _ilStreamBuilder, _ilRelocBuilder;
     private BlobBuilder _dataStream, _dataRelocs;
@@ -1513,6 +1519,7 @@ public class CodeGen
             new BlobBuilder(), new MethodRelocationBuilder(),
             new RelocatableControlFlowBuilder(), new CodeViewLineNumberBuilder());
         _localSlots = new Dictionary<Obj, int>();
+        _dbgScopeRanges = new Dictionary<int, (int, int)>();
         _paramSlots = new Dictionary<Obj, int>();
         _scratchLocals = new List<(CType, int)>();
         _vaArgPApLocal = -1;
@@ -1616,11 +1623,29 @@ public class CodeGen
         var pts = new List<(int Il, int Line, int StartCol, int EndCol)>();
         foreach (var (_, off, line, sc, ec) in _enc.LineNumberBuilder.Entries())
             pts.Add((off, line, sc, ec));
-        var dbgLocals = new List<(int Slot, string Name)>();
-        foreach (var s in localSlotList)
-            dbgLocals.Add((s.Slot, s.Name));
-        if (pts.Count > 0 || dbgLocals.Count > 0)
-            _dbgMethods.Add((MetadataTokens.GetRowNumber(methodDef), _enc.CodeBuilder.Count, pts, dbgLocals));
+
+        // Group named locals by their declaring lexical scope, attaching each scope's
+        // measured IL range (or the whole method when unmeasured, e.g. the function
+        // scope). chibil-link emits one nested LocalScope per group so shadowed names
+        // resolve to the innermost block.
+        int ilSize = _enc.CodeBuilder.Count;
+        var byScope = new Dictionary<int, List<(int Slot, string Name)>>();
+        if (localsSig != default)
+            foreach (var (local, slot) in _localSlots)
+            {
+                if (local.Name == null) continue;
+                if (!byScope.TryGetValue(local.ScopeId, out var list))
+                    byScope[local.ScopeId] = list = new List<(int, string)>();
+                list.Add((slot, local.Name));
+            }
+        var scopes = new List<(int Start, int Len, List<(int Slot, string Name)> Locals)>();
+        foreach (var (scopeId, locals) in byScope)
+        {
+            var (start, len) = _dbgScopeRanges.TryGetValue(scopeId, out var r) ? r : (0, ilSize);
+            scopes.Add((start, len, locals));
+        }
+        if (pts.Count > 0 || scopes.Count > 0)
+            _dbgMethods.Add((MetadataTokens.GetRowNumber(methodDef), ilSize, pts, scopes));
 
         _currentFn = null;
     }
@@ -2208,6 +2233,14 @@ public class CodeGen
         while (i > 0 && i <= t.Buf.Length && t.Buf[i - 1] != (byte)'\n') { i--; col++; }
         int len = t.Len > 0 ? t.Len : 1;
         return (col, col + len);
+    }
+
+    // Record a lexical scope's measured IL range [start, current) under its parser
+    // scope index, for nested LocalScope emission in the Portable PDB.
+    private void RecordScopeRange(int scopeId, int start)
+    {
+        if (scopeId < 0) return;
+        _dbgScopeRanges[scopeId] = (start, _enc.CodeBuilder.Count - start);
     }
 
     private void GenExpr(Node node)
@@ -3244,6 +3277,7 @@ public class CodeGen
 
             case NodeKind.For:
             {
+                int forScopeStart = _enc.CodeBuilder.Count;
                 var beginLabel = _enc.DefineLabel();
                 var contLabel = _enc.DefineLabel();
                 var brkLabel = _enc.DefineLabel();
@@ -3268,6 +3302,7 @@ public class CodeGen
                 }
                 _enc.Branch(ILOpCode.Br, beginLabel);
                 _enc.MarkLabel(brkLabel);
+                RecordScopeRange(node.ScopeId, forScopeStart);
                 return;
             }
 
@@ -3345,9 +3380,13 @@ public class CodeGen
                 return;
 
             case NodeKind.Block:
+            {
+                int blockScopeStart = _enc.CodeBuilder.Count;
                 for (Node n = node.Body; n != null; n = n.Next)
                     GenStmt(n);
+                RecordScopeRange(node.ScopeId, blockScopeStart);
                 return;
+            }
 
             case NodeKind.Goto:
                 if (!_labels.TryGetValue(node.UniqueLabel, out var gotoTarget))
@@ -3866,10 +3905,10 @@ public class CodeGen
         return output.ToArray();
     }
 
-    // Serialize the .chidbg side-stream: magic 'CDBG', version 3, the primary
+    // Serialize the .chidbg side-stream: magic 'CDBG', version 4, the primary
     // source file + SHA-256, then per-method (RID, IL size,
-    // [(IL offset, line, startCol, endCol)], [(local slot, name)]). chibil-link
-    // transcodes this to the Portable PDB.
+    // [(IL offset, line, startCol, endCol)], [scope: (start, len, [(slot, name)])]).
+    // chibil-link transcodes this to the Portable PDB.
     private BlobBuilder BuildChibilDebugBlob()
     {
         if (_dbgMethods.Count == 0 || _dbgSourceFile == null)
@@ -3877,7 +3916,7 @@ public class CodeGen
 
         var b = new BlobBuilder();
         b.WriteByte((byte)'C'); b.WriteByte((byte)'D'); b.WriteByte((byte)'B'); b.WriteByte((byte)'G');
-        b.WriteByte(3);                                         // version
+        b.WriteByte(4);                                         // version
 
         byte[] path = System.Text.Encoding.UTF8.GetBytes(_dbgSourceFile);
         b.WriteUInt16((ushort)path.Length); b.WriteBytes(path);
@@ -3885,7 +3924,7 @@ public class CodeGen
         b.WriteByte((byte)hash.Length); b.WriteBytes(hash);
 
         b.WriteInt32(_dbgMethods.Count);
-        foreach (var (rid, ilSize, pts, locals) in _dbgMethods)
+        foreach (var (rid, ilSize, pts, scopes) in _dbgMethods)
         {
             b.WriteInt32(rid);
             b.WriteInt32(ilSize);
@@ -3897,12 +3936,18 @@ public class CodeGen
                 b.WriteInt32(sc);
                 b.WriteInt32(ec);
             }
-            b.WriteInt32(locals.Count);
-            foreach (var (slot, name) in locals)
+            b.WriteInt32(scopes.Count);
+            foreach (var (start, len, locals) in scopes)
             {
-                b.WriteInt32(slot);
-                byte[] nm = System.Text.Encoding.UTF8.GetBytes(name ?? "");
-                b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
+                b.WriteInt32(start);
+                b.WriteInt32(len);
+                b.WriteInt32(locals.Count);
+                foreach (var (slot, name) in locals)
+                {
+                    b.WriteInt32(slot);
+                    byte[] nm = System.Text.Encoding.UTF8.GetBytes(name ?? "");
+                    b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
+                }
             }
         }
         return b;

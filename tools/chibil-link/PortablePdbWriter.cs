@@ -13,7 +13,8 @@ namespace ChibilLink;
 /// <c>MethodDef</c>, so the caller supplies the final method count and a map keyed
 /// by FINAL <c>MethodDef</c> RID; this fills every row in order (nil where a method
 /// has no debug info). Sequence-point blobs are encoded by hand per the Portable
-/// PDB spec. Locals/scopes are a later increment.
+/// PDB spec. Locals are grouped into nested lexical scopes (block-scoped, so
+/// shadowed C locals resolve to the innermost block).
 /// </summary>
 public static class PortablePdbWriter
 {
@@ -34,13 +35,21 @@ public static class PortablePdbWriter
         public string Name;
     }
 
+    /// <summary>A lexical block scope: an IL range and the locals visible within it.
+    /// Nested/sibling scopes let shadowed C locals resolve to the innermost block.</summary>
+    public sealed class ScopeInfo
+    {
+        public int StartOffset;
+        public int Length;
+        public List<LocalVar> Locals = new();
+    }
+
     public sealed class MethodDebug
     {
         public string DocumentName;             // source file path
         public byte[] Hash;                     // SHA-256 of the source (or null)
         public List<SeqPoint> SequencePoints = new();
-        public List<LocalVar> Locals = new();   // named C locals (one method-wide scope)
-        public int IlSize;                      // method body IL byte length (scope length)
+        public List<ScopeInfo> Scopes = new();  // nested lexical scopes (block-scoped locals)
     }
 
     /// <param name="methodCount">total MethodDef rows in the PE (table is 1:1).</param>
@@ -89,23 +98,35 @@ public static class PortablePdbWriter
             else
                 md.AddMethodDebugInformation(default, default);
 
-            if (m != null && m.Locals.Count > 0)
+            if (m != null && m.Scopes.Count > 0)
             {
-                LocalVariableHandle first = default;
-                for (int i = 0; i < m.Locals.Count; i++)
+                // The LocalScope table must be sorted by (Method, StartOffset asc,
+                // Length desc) — i.e. an enclosing scope precedes the scopes it
+                // encloses. Each scope's LocalVariable rows form a contiguous run, so
+                // emit the variables immediately before each scope row, in this order.
+                var ordered = new List<ScopeInfo>(m.Scopes);
+                ordered.Sort((a, b) => a.StartOffset != b.StartOffset
+                    ? a.StartOffset.CompareTo(b.StartOffset)
+                    : b.Length.CompareTo(a.Length));
+
+                foreach (var sc in ordered)
                 {
-                    var lv = m.Locals[i];
-                    var h = md.AddLocalVariable(LocalVariableAttributes.None, lv.Slot,
-                        md.GetOrAddString(string.IsNullOrEmpty(lv.Name) ? ("V_" + lv.Slot) : lv.Name));
-                    if (i == 0) first = h;
+                    LocalVariableHandle first = default;
+                    bool isFirst = true;
+                    foreach (var lv in sc.Locals)
+                    {
+                        var h = md.AddLocalVariable(LocalVariableAttributes.None, lv.Slot,
+                            md.GetOrAddString(string.IsNullOrEmpty(lv.Name) ? ("V_" + lv.Slot) : lv.Name));
+                        if (isFirst) { first = h; isFirst = false; }
+                    }
+                    md.AddLocalScope(
+                        MetadataTokens.MethodDefinitionHandle(rid),
+                        rootScope,
+                        first,
+                        MetadataTokens.LocalConstantHandle(1),    // no local constants
+                        startOffset: sc.StartOffset,
+                        length: sc.Length > 0 ? sc.Length : 1);
                 }
-                md.AddLocalScope(
-                    MetadataTokens.MethodDefinitionHandle(rid),
-                    rootScope,
-                    first,
-                    MetadataTokens.LocalConstantHandle(1),    // no local constants
-                    startOffset: 0,
-                    length: m.IlSize > 0 ? m.IlSize : 1);
             }
         }
 

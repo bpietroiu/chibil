@@ -103,6 +103,7 @@ public class Parser
     {
         Obj v = NewVar(name, ty);
         v.IsLocal = true;
+        v.ScopeId = _scope?.ScopeIndex ?? 0;   // declaring lexical scope (debug local scopes)
         v.Next = _locals;
         _locals = v;
         return v;
@@ -1284,6 +1285,7 @@ public class Parser
         {
             var node = NewNode(NodeKind.For, tok); tok = Util.Skip(tok.Next, "(");
             EnterScope();
+            node.ScopeId = _scope.ScopeIndex;   // the for-loop's lexical scope (holds the init declaration)
             string brk = _brkLabel, cont = _contLabel;
             _brkLabel = node.BrkLabel = NewUniqueName(); _contLabel = node.ContLabel = NewUniqueName();
             if (IsTypename(tok)) { CType basety = Declspec(ref tok, tok, null); node.Init = Declaration(ref tok, tok, basety, null); }
@@ -1348,6 +1350,7 @@ public class Parser
         var node = NewNode(NodeKind.Block, tok);
         Node head = new(), cur = head;
         EnterScope();
+        node.ScopeId = _scope.ScopeIndex;   // this block's lexical scope (debug local scopes)
         while (!Util.Equal(tok, "}"))
         {
             if (IsTypename(tok) && !Util.Equal(tok.Next, ":"))
