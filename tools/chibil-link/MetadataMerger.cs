@@ -650,6 +650,7 @@ public sealed class MetadataMerger
 
     private int _argcToken;
     private int _makeArgvToken;
+    private int _makeEnvpToken;
     private EntityHandle _getCmdLineArgsRef;
 
     /// <summary>MemberRef to <c>string[] [mscorlib]System.Environment::GetCommandLineArgs()</c>.
@@ -801,6 +802,132 @@ public sealed class MetadataMerger
                        | System.Reflection.MethodAttributes.HideBySig,
         });
         return _makeArgvToken;
+    }
+
+    /// <summary>Reserve <c>void* __chibil_make_envp()</c>: marshal the process
+    /// environment (Environment.GetEnvironmentVariables()) into a freshly
+    /// AllocHGlobal'd, NULL-terminated <c>char**</c> of UTF-8 <c>"KEY=VALUE"</c> C
+    /// strings (a NULL terminator at index count, per the C standard) — the third
+    /// parameter of <c>int main(int, char**, char** envp)</c>. Memory is intentionally
+    /// never freed; it lives for the process. Deduped; returns its MethodDef token.</summary>
+    public int ReserveMakeEnvpHelper()
+    {
+        if (_makeEnvpToken != 0) return _makeEnvpToken;
+
+        var environ   = GetOrAddCoreTypeRef("System", "Environment");
+        var idict     = GetOrAddCoreTypeRef("System.Collections", "IDictionary");
+        var idictEnum = GetOrAddCoreTypeRef("System.Collections", "IDictionaryEnumerator");
+        var ienum     = GetOrAddCoreTypeRef("System.Collections", "IEnumerator");
+        var icoll     = GetOrAddCoreTypeRef("System.Collections", "ICollection");
+        var strType   = GetOrAddCoreTypeRef("System", "String");
+        var marshal   = GetOrAddCoreTypeRef("System.Runtime.InteropServices", "Marshal");
+
+        EntityHandle MRef(EntityHandle parent, string name, int nParams, bool instance,
+            Action<ReturnTypeEncoder> ret, Action<ParametersEncoder> ps)
+        {
+            var sb = new BlobBuilder();
+            new BlobEncoder(sb).MethodSignature(SignatureCallingConvention.Default, 0, instance)
+                .Parameters(nParams, ret, ps);
+            return Builder.AddMemberReference(parent, Builder.GetOrAddString(name), Builder.GetOrAddBlob(sb));
+        }
+
+        int tokGetEnv  = MetadataTokens.GetToken(MRef(environ, "GetEnvironmentVariables", 0, false, r => r.Type().Type(idict, false), _ => { }));
+        int tokCount   = MetadataTokens.GetToken(MRef(icoll, "get_Count", 0, true, r => r.Type().Int32(), _ => { }));
+        int tokGetEnum = MetadataTokens.GetToken(MRef(idict, "GetEnumerator", 0, true, r => r.Type().Type(idictEnum, false), _ => { }));
+        int tokMove    = MetadataTokens.GetToken(MRef(ienum, "MoveNext", 0, true, r => r.Type().Boolean(), _ => { }));
+        int tokKey     = MetadataTokens.GetToken(MRef(idictEnum, "get_Key", 0, true, r => r.Type().Object(), _ => { }));
+        int tokVal     = MetadataTokens.GetToken(MRef(idictEnum, "get_Value", 0, true, r => r.Type().Object(), _ => { }));
+        int tokConcat  = MetadataTokens.GetToken(MRef(strType, "Concat", 3, false, r => r.Type().String(),
+                            p => { p.AddParameter().Type().Object(); p.AddParameter().Type().Object(); p.AddParameter().Type().Object(); }));
+        int tokAlloc   = MetadataTokens.GetToken(MRef(marshal, "AllocHGlobal", 1, false, r => r.Type().IntPtr(), p => p.AddParameter().Type().Int32()));
+        int tokS2m     = MetadataTokens.GetToken(MRef(marshal, "StringToCoTaskMemUTF8", 1, false, r => r.Type().IntPtr(), p => p.AddParameter().Type().String()));
+        int tokEq      = MetadataTokens.GetToken(Builder.GetOrAddUserString("="));
+
+        // locals: [0] IDictionary d, [1] native int block, [2] int32 i, [3] int32 n,
+        //         [4] IDictionaryEnumerator e
+        var localSig = new BlobBuilder();
+        var locals = new BlobEncoder(localSig).LocalVariableSignature(5);
+        locals.AddVariable().Type().Type(idict, false);
+        locals.AddVariable().Type().IntPtr();
+        locals.AddVariable().Type().Int32();
+        locals.AddVariable().Type().Int32();
+        locals.AddVariable().Type().Type(idictEnum, false);
+        var localSigHandle = Builder.AddStandaloneSignature(Builder.GetOrAddBlob(localSig));
+
+        // Offsets verified by hand: br.s CHK = +0x28 (CHK at 0x4C from 0x24);
+        // brtrue.s LOOPBODY = -0x31 (0x24 from 0x55) = 0xCF.
+        var il = new BlobBuilder();
+        il.WriteByte(0x28); il.WriteInt32(tokGetEnv);  // call GetEnvironmentVariables -> IDictionary
+        il.WriteByte(0x0A);                            // stloc.0   d
+        il.WriteByte(0x06);                            // ldloc.0
+        il.WriteByte(0x6F); il.WriteInt32(tokCount);   // callvirt get_Count
+        il.WriteByte(0x0D);                            // stloc.3   n
+        il.WriteByte(0x09);                            // ldloc.3
+        il.WriteByte(0x17);                            // ldc.i4.1
+        il.WriteByte(0x58);                            // add
+        il.WriteByte(0x1E);                            // ldc.i4.8
+        il.WriteByte(0x5A);                            // mul       (n+1)*8
+        il.WriteByte(0x28); il.WriteInt32(tokAlloc);   // call AllocHGlobal
+        il.WriteByte(0x0B);                            // stloc.1   block
+        il.WriteByte(0x06);                            // ldloc.0
+        il.WriteByte(0x6F); il.WriteInt32(tokGetEnum); // callvirt GetEnumerator
+        il.WriteByte(0x13); il.WriteByte(0x04);        // stloc.s 4 e
+        il.WriteByte(0x16);                            // ldc.i4.0
+        il.WriteByte(0x0C);                            // stloc.2   i = 0
+        il.WriteByte(0x2B); il.WriteByte(0x28);        // br.s CHK
+        // LOOPBODY (0x24): *(block + i*8) = StringToCoTaskMemUTF8(Concat(e.Key, "=", e.Value))
+        il.WriteByte(0x07);                            // ldloc.1   block
+        il.WriteByte(0x08);                            // ldloc.2   i
+        il.WriteByte(0x1E);                            // ldc.i4.8
+        il.WriteByte(0x5A);                            // mul       i*8
+        il.WriteByte(0xD3);                            // conv.i
+        il.WriteByte(0x58);                            // add       addr
+        il.WriteByte(0x11); il.WriteByte(0x04);        // ldloc.s 4 e
+        il.WriteByte(0x6F); il.WriteInt32(tokKey);     // callvirt get_Key -> object
+        il.WriteByte(0x72); il.WriteInt32(tokEq);      // ldstr "="
+        il.WriteByte(0x11); il.WriteByte(0x04);        // ldloc.s 4 e
+        il.WriteByte(0x6F); il.WriteInt32(tokVal);     // callvirt get_Value -> object
+        il.WriteByte(0x28); il.WriteInt32(tokConcat);  // call Concat(object,object,object)
+        il.WriteByte(0x28); il.WriteInt32(tokS2m);     // call StringToCoTaskMemUTF8
+        il.WriteByte(0xDF);                            // stind.i   *addr = ptr
+        il.WriteByte(0x08);                            // ldloc.2
+        il.WriteByte(0x17);                            // ldc.i4.1
+        il.WriteByte(0x58);                            // add
+        il.WriteByte(0x0C);                            // stloc.2   i++
+        // CHK (0x4C):
+        il.WriteByte(0x11); il.WriteByte(0x04);        // ldloc.s 4 e
+        il.WriteByte(0x6F); il.WriteInt32(tokMove);    // callvirt MoveNext
+        il.WriteByte(0x2D); il.WriteByte(0xCF);        // brtrue.s LOOPBODY
+        // envp[n] = NULL
+        il.WriteByte(0x07);                            // ldloc.1   block
+        il.WriteByte(0x09);                            // ldloc.3   n
+        il.WriteByte(0x1E);                            // ldc.i4.8
+        il.WriteByte(0x5A);                            // mul
+        il.WriteByte(0xD3);                            // conv.i
+        il.WriteByte(0x58);                            // add
+        il.WriteByte(0x16);                            // ldc.i4.0
+        il.WriteByte(0xD3);                            // conv.i
+        il.WriteByte(0xDF);                            // stind.i   *(block+n*8) = NULL
+        il.WriteByte(0x07);                            // ldloc.1   return block
+        il.WriteByte(0x2A);                            // ret
+
+        var envpSig = new BlobBuilder();
+        new BlobEncoder(envpSig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+            .Parameters(0, ret => ret.Type().IntPtr(), _ => { });
+        _makeEnvpToken = ReserveSynthRow(new SynthMethod
+        {
+            Name = "__chibil_make_envp",
+            SignatureBlob = Builder.GetOrAddBlob(envpSig),
+            Il = il.ToArray(),
+            MaxStack = 4,
+            LocalSig = localSigHandle,
+            InitLocals = true,
+            Attributes = System.Reflection.MethodAttributes.Public
+                       | System.Reflection.MethodAttributes.Static
+                       | System.Reflection.MethodAttributes.HideBySig,
+        });
+        return _makeEnvpToken;
     }
 
     /// <summary>

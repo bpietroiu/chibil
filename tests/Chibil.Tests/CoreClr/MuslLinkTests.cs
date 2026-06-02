@@ -293,19 +293,27 @@ int main(void){
     }
 
     [Fact]
-    public void Main_three_arg_entry_links_with_null_envp()
+    public void Main_three_arg_entry_marshals_envp()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
-        // bash's real entry is `int main(int, char**, char**)`. It must link; envp
-        // is currently passed as NULL (real envp marshalling is a follow-up). This
-        // pins that contract — flip to 56 when envp is implemented.
+        // bash's real entry is `int main(int, char**, char**)`. envp must be the
+        // process environment as a NUL-terminated char** of "KEY=VALUE" UTF-8 C
+        // strings (the third main parameter), not NULL.
         const string src =
             "int main(int argc, char** argv, char** envp){\n" +
             "  if (argc < 1) return 10;\n" +
-            "  if (argv[argc] != 0) return 11;\n" +
-            "  return envp == 0 ? 55 : 56;\n" +
+            "  if (argv[argc] != 0) return 11;\n" +     // argv NUL-terminated
+            "  if (envp == 0) return 12;\n" +           // envp present
+            "  int n = 0; while (envp[n]) n++;\n" +     // envp NUL-terminated
+            "  if (n == 0) return 13;\n" +              // and non-empty
+            "  for (int i = 0; i < n; i++) {\n" +       // every entry is KEY=VALUE
+            "    char* e = envp[i]; int has = 0;\n" +
+            "    for (int j = 0; e[j]; j++) if (e[j] == '=') { has = 1; break; }\n" +
+            "    if (!has) return 14;\n" +
+            "  }\n" +
+            "  return 56;\n" +
             "}\n";
         int exit = RunViaHost(src, out string o);
-        Assert.True(exit == 55, $"expected 55 (NULL envp), got {exit}. {o}");
+        Assert.True(exit == 56, $"expected 56 (envp marshalled), got {exit}. {o}");
     }
 }

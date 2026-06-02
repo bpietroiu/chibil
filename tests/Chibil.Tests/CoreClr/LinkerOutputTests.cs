@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Linq;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using ChibilLink;
@@ -53,5 +54,26 @@ public class LinkerOutputTests
 
         byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string>(), entrySymbol: "go");
         Assert.NotEmpty(pe);
+    }
+
+    // int main(int, char**, char**) gets argc/argv/envp marshalling helpers wired
+    // into the entry; envp is the process environment as KEY=VALUE C strings (verified
+    // at runtime in the vssmoke harness; here we check the helpers are synthesized).
+    [Fact]
+    public void Main_with_envp_synthesizes_environment_marshalling()
+    {
+        byte[] obj = TestCompiler.CompileToObj(
+            "int main(int argc, char** argv, char** envp){ return envp[0] != 0; }\n",
+            Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "envp.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string>());
+
+        using var pr = new PEReader(ImmutableArray.Create(pe));
+        var md = pr.GetMetadataReader();
+        var names = md.MethodDefinitions
+            .Select(h => md.GetString(md.GetMethodDefinition(h).Name)).ToHashSet();
+        Assert.Contains("__chibil_make_envp", names);
+        Assert.Contains("__chibil_make_argv", names);
+        Assert.Contains("__chibil_argc", names);
     }
 }

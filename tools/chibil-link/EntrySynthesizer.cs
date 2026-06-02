@@ -10,9 +10,11 @@ namespace ChibilLink;
 /// CLR's <c>static int32 Main(string[])</c> entry-point contract to the C
 /// <c>int main(...)</c> function.
 ///
-/// Phase 0 supports <c>int main(void)</c>: the entry's IL is simply
-/// <c>call int32 &lt;main&gt;; ret</c>. Marshalling argv for
-/// <c>int main(int, char**)</c> is a later task.
+/// Supports <c>int main(void)</c>, <c>int main(int, char**)</c>, and
+/// <c>int main(int, char**, char**)</c>: argc/argv/envp are produced by the
+/// synthesized <c>__chibil_argc</c>/<c>__chibil_make_argv</c>/<c>__chibil_make_envp</c>
+/// helpers (argv from GetCommandLineArgs, envp from the process environment as
+/// NUL-terminated UTF-8 <c>KEY=VALUE</c> C strings) and passed to main.
 /// </summary>
 public static class EntrySynthesizer
 {
@@ -88,7 +90,7 @@ public static class EntrySynthesizer
             //
             //   call int32 __chibil_argc()            ; argc
             //   [call void* __chibil_make_argv()]     ; argv  (params >= 2)
-            //   [ldc.i4.0; conv.i]                    ; envp = NULL (params == 3)
+            //   [call void* __chibil_make_envp()]     ; envp  (params == 3)
             //   call int32 main(...); ret
             il.WriteByte(0x28); il.WriteInt32(merger.ReserveArgcHelper());        // call __chibil_argc
             if (paramCount >= 2)
@@ -97,8 +99,7 @@ public static class EntrySynthesizer
             }
             if (paramCount == 3)
             {
-                il.WriteByte(0x16);             // ldc.i4.0
-                il.WriteByte(0xD3);             // conv.i   (envp = (char**)NULL)
+                il.WriteByte(0x28); il.WriteInt32(merger.ReserveMakeEnvpHelper()); // call __chibil_make_envp
             }
             il.WriteByte(0x28); il.WriteInt32(mainFinalToken);   // call main
             il.WriteByte(0x2A);                 // ret
