@@ -37,6 +37,14 @@ namespace System.Reflection.PortableExecutable
             _entries.Add(new LineNumberEntry(file, codeOffset, lineNumber));
         }
 
+        /// <summary>(fileIndex, IL offset, line) for each marked point — used to build
+        /// the .chibildbg side-stream that becomes the Portable PDB sequence points.</summary>
+        public IEnumerable<(int FileIndex, int Offset, int Line)> Entries()
+        {
+            foreach (var e in _entries)
+                yield return (e.File._index, e.CodeOffset, e.LineNumber);
+        }
+
         public void Reset()
         {
             _entries.Clear();
@@ -2380,6 +2388,12 @@ namespace System.Reflection.PortableExecutable
         private const string IlFixupSectionName = ".rdata$ilfixup";
         private const string NepSectionName = ".nep";
         private const string CodeViewSymbolsSectionName = ".debug$S";
+        private const string ChibilDbgSectionName = ".chidbg";   // chibil managed-PDB side-stream (<=8 chars: inline COFF name)
+
+        private BlobBuilder _chibilDbg;
+        /// <summary>Attach the serialized per-method line side-stream (consumed by
+        /// chibil-link to build the Portable PDB). Null = no managed debug info.</summary>
+        public void SetChibilDebug(BlobBuilder data) => _chibilDbg = data;
 
         private readonly CodeViewSymbolBuilder _codeViewSymbols;
         private readonly MetadataRootBuilder _metadataRootBuilder;
@@ -2535,6 +2549,10 @@ namespace System.Reflection.PortableExecutable
             {
                 builder.Add(new Section(NepSectionName, SectionCharacteristics.ContainsCode | SectionCharacteristics.MemRead | SectionCharacteristics.MemExecute | SectionCharacteristics.Align4Bytes));
             }
+            if (_chibilDbg != null && _chibilDbg.Count > 0)
+            {
+                builder.Add(new Section(ChibilDbgSectionName, SectionCharacteristics.ContainsInitializedData | SectionCharacteristics.MemDiscardable | SectionCharacteristics.MemRead | SectionCharacteristics.Align1Bytes));
+            }
 
             return builder.ToImmutable();
         }
@@ -2549,6 +2567,7 @@ namespace System.Reflection.PortableExecutable
                 CodeViewSymbolsSectionName => SerializeCodeViewSymbols(location),
                 IlFixupSectionName => _ilFixupStream,
                 NepSectionName => _nepStream,
+                ChibilDbgSectionName => _chibilDbg,
                 _ => throw new ArgumentException(),
             };
 

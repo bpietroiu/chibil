@@ -27,6 +27,14 @@ public class CodeGen
     private CodeViewFileHandle _cvFile;
     private RelocatableMethodBodyStreamEncoder _bodyEncoder;
 
+    // Managed-PDB side-stream (.chibildbg): the primary source file + per-method
+    // (MethodDef RID -> [(IL offset, line)]). chibil-link transcodes this to a
+    // Portable PDB. chibil marks every line against the primary _cvFile, so one
+    // document per TU suffices.
+    private string _dbgSourceFile;
+    private byte[] _dbgSourceHash;
+    private readonly List<(int Rid, List<(int Il, int Line)> Pts)> _dbgMethods = new();
+
     private BlobBuilder _ilStreamBuilder, _ilRelocBuilder;
     private BlobBuilder _dataStream, _dataRelocs;
     private BlobBuilder _rdataStream;
@@ -1602,6 +1610,14 @@ public class CodeGen
             debugName: fn.Name,
             localSlots: localSlotList.Count > 0 ? localSlotList.ToArray() : null);
         _methodBodyOffsets[fn] = bodyOffset;
+
+        // Collect line points for the managed-PDB side-stream (deduped + sorted by
+        // chibil-link when it builds the Portable PDB).
+        var pts = new List<(int Il, int Line)>();
+        foreach (var (_, off, line) in _enc.LineNumberBuilder.Entries())
+            pts.Add((off, line));
+        if (pts.Count > 0)
+            _dbgMethods.Add((MetadataTokens.GetRowNumber(methodDef), pts));
 
         _currentFn = null;
     }
@@ -3765,10 +3781,13 @@ public class CodeGen
         {
             byte[] sourceHash = SHA256.HashData(File.ReadAllBytes(sourceFile));
             _cvFile = _codeviewSymbols.GetOrAddFile(sourceFile, CodeViewChecksumType.SHA256, sourceHash);
+            _dbgSourceFile = sourceFile;
+            _dbgSourceHash = sourceHash;
         }
         else
         {
             _cvFile = _codeviewSymbols.GetOrAddFile(sourceFile, CodeViewChecksumType.None, Array.Empty<byte>());
+            _dbgSourceFile = sourceFile;
         }
 
         _bodyEncoder = new RelocatableMethodBodyStreamEncoder(
@@ -3815,9 +3834,44 @@ public class CodeGen
             nepStream: _nepStream, nepRelocs: _nepRelocs,
             bssSize: _bssSize);
 
+        var dbg = BuildChibilDebugBlob();
+        if (dbg != null)
+            coffBuilder.SetChibilDebug(dbg);
+
         var output = new BlobBuilder();
         coffBuilder.Serialize(output);
 
         return output.ToArray();
+    }
+
+    // Serialize the .chibildbg side-stream: magic 'CDBG', version, the primary
+    // source file + SHA-256, then per-method (RID, [(IL offset, line)]).
+    // chibil-link parses this to build the unified Portable PDB.
+    private BlobBuilder BuildChibilDebugBlob()
+    {
+        if (_dbgMethods.Count == 0 || _dbgSourceFile == null)
+            return null;
+
+        var b = new BlobBuilder();
+        b.WriteByte((byte)'C'); b.WriteByte((byte)'D'); b.WriteByte((byte)'B'); b.WriteByte((byte)'G');
+        b.WriteByte(1);                                         // version
+
+        byte[] path = System.Text.Encoding.UTF8.GetBytes(_dbgSourceFile);
+        b.WriteUInt16((ushort)path.Length); b.WriteBytes(path);
+        byte[] hash = _dbgSourceHash ?? Array.Empty<byte>();
+        b.WriteByte((byte)hash.Length); b.WriteBytes(hash);
+
+        b.WriteInt32(_dbgMethods.Count);
+        foreach (var (rid, pts) in _dbgMethods)
+        {
+            b.WriteInt32(rid);
+            b.WriteInt32(pts.Count);
+            foreach (var (il, line) in pts)
+            {
+                b.WriteInt32(il);
+                b.WriteInt32(line);
+            }
+        }
+        return b;
     }
 }
