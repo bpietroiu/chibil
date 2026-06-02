@@ -1,0 +1,6 @@
+# Keep the patch byte-for-byte (CRLF would break `git apply`); harness scripts +
+# lists run under WSL/Linux and need LF.
+*.patch          -text
+*.sh             text eol=lf
+*.chibil         text eol=lf
+chibil-sources.list text eol=lf

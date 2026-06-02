@@ -79,44 +79,45 @@ The chibil build adds these to the include path:
 
 ---
 
-## 4. Get and configure bash 5.3
+## 4. Get bash 5.3, apply the chibil patch, and configure
+
+The upstream bash source is **not vendored** in this repo. You download a pristine
+`bash-5.3` and apply the chibil bring-up changes from
+[`targets/build/`](targets/build/) (which holds the patch + build harness — see
+[`targets/build/README.md`](targets/build/README.md)).
 
 ```bash
 cd /mnt/d/sandbox/chibil/targets
-wget https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz
-tar xf bash-5.3.tar.gz
-cd bash-5.3
+
+# pristine bash 5.3 — either the GNU git tag …
+git clone https://git.savannah.gnu.org/git/bash.git bash-5.3
+cd bash-5.3 && git checkout bash-5.3
+# … or the release tarball:  wget https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz && tar xf …
+
 ./configure                 # generates config.h, version.h, pathnames.h, …
 make                        # native build: generates y.tab.c, syntax.c, builtins/*.c
                             # (also gives you a reference native bash to compare against)
+
+# apply the chibil changes
+sh  ../build/config-tweaks.sh                 # config.h: disable bash-malloc / arc4random
+git apply ../build/chibil-bash-5.3.patch      # the 6-file fork-on-CoreCLR source changes
+cp  ../build/Makefile.chibil ../build/chibil-sources.list .
 ```
 
 The native `make` is the easiest way to produce every *generated* C source the IL
 build also needs (the yacc parser `y.tab.c`, `syntax.c`, `builtins/*.c` and
 `builtext.h` from the `.def` files, `version.h`, `pathnames.h`).
 
-### 4a. config.h tweaks for the IL/host environment
-
-Two defaults in the generated `config.h` must be turned **off**:
-
-```c
-/* #define USING_BASH_MALLOC 1 */   /* was: #define USING_BASH_MALLOC 1 */
-/* #define HAVE_ARC4RANDOM   1 */   /* was: #define HAVE_ARC4RANDOM   1 */
-```
-
-- **`USING_BASH_MALLOC`** — bash's bundled allocator is `sbrk`-based and fights the
-  .NET runtime heap (every allocation fails). Disabling it routes `malloc`/`free`
-  to the host libc allocator. (`lib/malloc` is also filtered out of the source
-  list by the Makefile.)
-- **`HAVE_ARC4RANDOM`** — musl/glibc here has no `arc4random`; bash falls back to
-  `getrandom`.
+`config-tweaks.sh` turns off two `config.h` defaults: **`USING_BASH_MALLOC`** (the
+bundled `sbrk` allocator fights the .NET heap — route `malloc`/`free` to host libc)
+and **`HAVE_ARC4RANDOM`** (absent here; bash falls back to `getrandom`).
 
 ---
 
 ## 5. The chibil build harness
 
-Three files in `targets/bash-5.3/` drive the IL build (they ship in this working
-tree; see the design doc for the rationale behind each):
+After the steps above, the bash source root contains the harness from
+[`targets/build/`](targets/build/):
 
 - **`Makefile.chibil`** — compiles every TU with one uniform flag set and links the
   result. Key flags: `--target=coreclr -nostdinc -mlp64 -DHAVE_CONFIG_H -DSHELL
@@ -130,11 +131,12 @@ tree; see the design doc for the rationale behind each):
 - The runtimeconfig is emitted automatically (invariant globalization — required, or
   the single-file image stack-overflows the first time the BCL formats an exception).
 
-### 5a. fork-on-CoreCLR source changes (`-DCHIBIL_REEXEC`)
+### 5a. fork-on-CoreCLR source changes (the patch)
 
 CoreCLR has no usable `fork()` (forking the CLR corrupts even the parent). The
-bring-up replaces bash's process model with `posix_spawn` + re-exec, in six bash
-source files guarded by `#if defined (CHIBIL_REEXEC)`:
+bring-up replaces bash's process model with `posix_spawn` + re-exec. This is the
+entire content of `chibil-bash-5.3.patch` — **6 files**, all guarded by
+`#if defined (CHIBIL_REEXEC)`:
 
 | File | Change |
 |---|---|

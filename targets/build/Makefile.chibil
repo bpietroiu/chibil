@@ -1,0 +1,96 @@
+# Makefile.chibil — compile GNU bash 5.3 to pure MSIL with chibil and link to libc.
+#
+# Part of the "compile bash to IL, link to musl/libc" project. Run under WSL
+# (needs `dotnet`; the `gen` target also needs host `gcc`). The 221 translation
+# units are the same set the native bash binary links (listed in
+# chibil-sources.list). Every TU is compiled with one uniform flag set — bash's
+# per-directory Makefiles only vary the relative -I depth, which the per-source
+# `-I$(dir ...)` below reproduces.
+#
+#   make -f Makefile.chibil -j$(nproc)   # compile all 221 TUs + link -> bash.dll
+#   make -f Makefile.chibil gen          # (re)generate builtins/*.c from *.def
+#   make -f Makefile.chibil run ARGS='-c "echo hi"'
+#   make -f Makefile.chibil clean
+#
+CHIBILDIR := /mnt/d/sandbox/chibil
+CHIBIL    := dotnet $(CHIBILDIR)/chibil/bin/Debug/net10.0/chibil.dll
+LINK      := dotnet $(CHIBILDIR)/tools/chibil-link/bin/Debug/net10.0/chibil-link.dll
+OBJDIR    := _il
+
+# Compile against the natively-built musl 1.2.6 headers (chibil rejects glibc's
+# gcc-ism stddef.h; -nostdinc keeps the host glibc headers out entirely).
+MUSL    := ../musl-1.2.6
+MUSLINC := -I$(MUSL)/arch/x86_64 -I$(MUSL)/arch/generic -I$(MUSL)/obj/include -I$(MUSL)/include
+# Runtime libc: bind unresolved symbols to the HOST glibc (libc.so.6). musl's
+# libc.so cannot be used at run time — dlopen'd into the glibc/.NET host its
+# __init_libc never runs and __init_tls would hijack CoreCLR's thread pointer.
+# glibc is already loaded+initialised by the runtime, so no init/TLS conflict.
+# Override with `make LIBC=<path>` to experiment.
+LIBC    ?= c
+
+DEFS := -DHAVE_CONFIG_H -DSHELL -DPROGRAM='"bash"' -DCONF_HOSTTYPE='"x86_64"' \
+        -DCONF_OSTYPE='"linux-gnu"' -DCONF_MACHTYPE='"x86_64-pc-linux-gnu"' \
+        -DCONF_VENDOR='"pc"' -DLOCALEDIR='"/usr/local/share/locale"' -DPACKAGE='"bash"' \
+        -DCHIBIL_REEXEC=1
+INCS   := -I. -Iinclude -Ilib $(MUSLINC)
+CFLAGS := -c --target=coreclr -nostdinc -mlp64 $(DEFS) $(INCS)
+
+SOURCES := $(shell cat chibil-sources.list)
+# bash's bundled malloc is sbrk-based; under the .NET host linked to musl it
+# fights the runtime heap and every allocation fails. Drop it so malloc/free
+# resolve to musl's mmap-based allocator. Set USE_BASH_MALLOC=1 to keep bash's.
+ifndef USE_BASH_MALLOC
+SOURCES := $(filter-out lib/malloc/%,$(SOURCES))
+endif
+# Flattened obj name: directory slashes -> underscores, placed under $(OBJDIR).
+OBJECTS := $(patsubst %,$(OBJDIR)/%,$(subst /,_,$(SOURCES:.c=.obj)))
+
+.PHONY: all gen run clean
+all: bash.dll
+
+# -ltinfo provides the termcap/terminfo symbols (tgetent, tputs, …) that readline
+# uses for interactive mode; chibil-link probes each -l library and routes every
+# symbol to the one that actually exports it (libc vs libtinfo), like a real linker.
+bash.dll: $(OBJECTS)
+	$(LINK) -o $@ -l$(LIBC) -ltinfo $(OBJECTS)
+
+# One compile rule per source: flattened obj name, plus the source's own dir on -I.
+# Every object order-only-depends on .builtins-ready so the generated builtins/*.c
+# exist before any compile starts.
+define _cc
+$(OBJDIR)/$(subst /,_,$(1:.c=.obj)): $(1) | $(OBJDIR) .builtins-ready
+	$(CHIBIL) $(CFLAGS) -I$(dir $(1)) $$< -o $$@
+endef
+$(foreach s,$(SOURCES),$(eval $(call _cc,$(s))))
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+# builtins/*.c, builtext.h and the builtins.c dispatch table are generated from
+# *.def by mkbuiltins (built with host gcc). Generate them all once via a stamp;
+# .PRECIOUS stops make from deleting them as intermediates.
+.PRECIOUS: builtins/%.c
+builtins/%.c: .builtins-ready ;
+.builtins-ready:
+	$(MAKE) -C builtins mkbuiltins
+	cd builtins && $(MAKE) builtext.h builtins.c $$(for d in *.def; do echo $${d%.def}.c; done)
+	touch $@
+
+# NOTE: chibil-link also emits this (with the same content) as a side effect of
+# linking bash.dll. Keep them in sync. Invariant globalization + system resource
+# keys are REQUIRED: without them, the single-file image fatally stack-overflows
+# the first time the BCL formats an exception message (culture/resource grovel
+# recursion). See chibil-link Program.cs WriteRuntimeConfig.
+bash.runtimeconfig.json:
+	printf '%s\n' '{ "runtimeOptions": { "tfm": "net10.0", "rollForward": "Major", "framework": { "name": "Microsoft.NETCore.App", "version": "10.0.0" }, "configProperties": { "System.Globalization.Invariant": true, "System.Resources.UseSystemResourceKeys": true } } }' > $@
+
+# Regenerate builtins/*.c from their .def files (host gcc builds mkbuiltins first).
+gen:
+	$(MAKE) -C builtins mkbuiltins
+	cd builtins && for d in *.def; do ./mkbuiltins -D . $$d; done
+
+run: bash.dll bash.runtimeconfig.json
+	dotnet bash.dll $(ARGS)
+
+clean:
+	rm -rf $(OBJDIR) bash.dll bash.runtimeconfig.json

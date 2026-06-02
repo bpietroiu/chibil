@@ -1,0 +1,8 @@
+# Third-party source trees are NOT vendored — download them per CompileBash.md and
+# apply build/chibil-bash-5.3.patch. Only the build harness (build/) is tracked.
+/bash-5.3/
+/musl-1.2.6/
+*.tar.gz
+*.tar.xz
+# scratch scripts
+/gen-patch.sh

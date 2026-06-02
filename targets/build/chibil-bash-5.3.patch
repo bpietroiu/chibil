@@ -1,0 +1,758 @@
+diff --git a/execute_cmd.c b/execute_cmd.c
+index 070f511..00764e7 100644
+--- a/execute_cmd.c
++++ b/execute_cmd.c
+@@ -4461,6 +4461,43 @@ is_dirname (char *pathname)
+   return ret;
+ }
+ 
++#if defined (CHIBIL_REEXEC)
++/* A pipeline stage we can run WITHOUT forking the CLR: a single literal command
++   word (nothing that could expand to a different command), not a leading
++   assignment, not a shell function. A plain EXTERNAL reaches execute_disk_command
++   and is posix_spawned with the pipe as file actions. A side-effect-free output
++   BUILTIN (echo/printf/pwd/true/false/:) is run in the parent with the pipe wired
++   to fd 0/1 (see the builtin-stage handling in execute_simple_command); other
++   builtins (read/cd/exit/set/...) are NOT eligible because running them in the
++   parent would leak state or bypass the pipe. Conservative — any uncertainty
++   returns 0 so the stage keeps the (CLR-forking) path. */
++static int
++chibil_stage_can_run_unforked (SIMPLE_COM *sc)
++{
++  char *name;
++
++  if (sc == 0 || sc->words == 0 || sc->words->word == 0)
++    return 0;
++  name = sc->words->word->word;
++  if (name == 0 || *name == 0)
++    return 0;
++  if (assignment (name, 0))			/* VAR=val ... : command word is later */
++    return 0;
++  if (strpbrk (name, "$`\\\"'*?[]{}~!=") != 0)	/* only literal command names */
++    return 0;
++  if (find_function (name) != 0)		/* functions stay forking (in-parent unsafe) */
++    return 0;
++  if (find_shell_builtin (name) != 0)
++    {
++      /* Only output-only, side-effect-free builtins may run unforked. */
++      if (strcmp (name, "echo") && strcmp (name, "printf") && strcmp (name, "pwd") &&
++	  strcmp (name, "true") && strcmp (name, "false") && strcmp (name, ":"))
++	return 0;
++    }
++  return 1;
++}
++#endif /* CHIBIL_REEXEC */
++
+ /* The meaty part of all the executions.  We have to start hacking the
+    real execution of commands here.  Fork a process, set things up,
+    execute the command. */
+@@ -4475,6 +4512,9 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
+   sh_builtin_func_t *builtin;
+   SHELL_VAR *func;
+   volatile int old_builtin, old_command_builtin;
++#if defined (CHIBIL_REEXEC)
++  int chibil_save0 = -1, chibil_save1 = -1;	/* saved fd 0/1 for unforked builtin pipe stage */
++#endif
+ 
+   result = EXECUTION_SUCCESS;
+   special_builtin_failed = builtin_is_special = 0;
+@@ -4527,6 +4567,18 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
+      should not. */
+   dofork = pipe_in != NO_PIPE || pipe_out != NO_PIPE || async;
+ 
++#if defined (CHIBIL_REEXEC)
++  /* On CoreCLR we cannot fork the CLR to run a pipeline stage's expansion +
++     command in a child. If this stage would fork ONLY because of a pipe (not
++     async/background) and is a plain external, don't fork: let it reach
++     execute_disk_command, which posix_spawns it with the pipe set up as file
++     actions. Builtins/functions keep the forking path (running them in the parent
++     would bypass the pipe and silently corrupt output). */
++  if (dofork && async == 0 && (pipe_in != NO_PIPE || pipe_out != NO_PIPE) &&
++      chibil_stage_can_run_unforked (simple_command))
++    dofork = 0;
++#endif
++
+   /* Something like `%2 &' should restart job 2 in the background, not cause
+      the shell to fork here. */
+   if (dofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE &&
+@@ -4812,6 +4864,24 @@ run_builtin:
+   last_shell_builtin = this_shell_builtin;
+   this_shell_builtin = builtin;
+ 
++#if defined (CHIBIL_REEXEC)
++  /* Unforked builtin pipeline stage (CoreCLR can't fork the CLR): wire the pipe
++     to fd 0/1 in the parent for the duration of the builtin, restored at
++     return_result. Only the safe output builtins chibil_stage_can_run_unforked
++     admits reach here with builtin != 0, func == 0, already_forked == 0 and the
++     pipe still set. The builtin then writes to / reads from the pipe directly. */
++  if (already_forked == 0 && builtin != 0 && func == 0 &&
++      (pipe_in != NO_PIPE || pipe_out != NO_PIPE))
++    {
++      if (pipe_in != NO_PIPE)
++	chibil_save0 = fcntl (0, F_DUPFD_CLOEXEC, 10);
++      if (pipe_out != NO_PIPE)
++	chibil_save1 = fcntl (1, F_DUPFD_CLOEXEC, 10);
++      do_piping (pipe_in, pipe_out);
++      pipe_in = pipe_out = NO_PIPE;
++    }
++#endif
++
+   if (builtin || func)
+     {
+       if (builtin)
+@@ -4940,6 +5010,14 @@ execute_from_filesystem:
+ 			cmdflags);
+ 
+  return_result:
++#if defined (CHIBIL_REEXEC)
++  /* Restore fd 0/1 saved for an unforked builtin pipeline stage. (No-op for
++     external/non-piped stages, where these stay -1.) */
++  if (chibil_save0 >= 0)
++    { dup2 (chibil_save0, 0); close (chibil_save0); chibil_save0 = -1; }
++  if (chibil_save1 >= 0)
++    { dup2 (chibil_save1, 1); close (chibil_save1); chibil_save1 = -1; }
++#endif
+   bind_lastarg (lastarg);
+   FREE (command_line);
+   dispose_words (words);
+@@ -5831,6 +5909,57 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+   else
+     {
+       fork_flags = async ? FORK_ASYNC : 0;
++#if defined (CHIBIL_REEXEC)
++      /* No usable fork() on CoreCLR. For a found external, spawn a real process
++	 (posix_spawn) instead of forking the CLR. The in-process child body below
++	 (do_piping/do_redirections/shell_execve) must not run here: forking clones
++	 the CLR with its GC/JIT/finalizer threads dead, which corrupts even the
++	 parent. Pipes and fds_to_close are reproduced as posix_spawn file actions.
++	 REDIRECTIONS (redirects != 0) are reproduced by applying them in the parent
++	 UNDOABLY, spawning (the child inherits the redirected fds; the saved fds are
++	 close-on-exec so they don't leak), then restoring — exactly how bash runs a
++	 builtin under redirection. This reuses do_redirections, so heredocs / file
++	 opens / fd dups all work. We only take this path when there are no pipes
++	 alongside redirections (rare combo deferred to make_child). command==0 (not
++	 found) also falls through so command_not_found_handle still runs. */
++      if (command && (redirects == 0 || (pipe_in == NO_PIPE && pipe_out == NO_PIPE)))
++	{
++	  REDIRECT *cm_undo = (REDIRECT *)NULL, *cm_exec_undo = (REDIRECT *)NULL;
++	  char **sargs;
++
++	  if (redirects)
++	    {
++	      if (do_redirections (redirects, RX_ACTIVE|RX_UNDOABLE) != 0)
++		{
++		  undo_partial_redirects ();
++		  result = last_command_exit_value = EXECUTION_FAILURE;
++		  goto parent_return;
++		}
++	      cm_undo = redirection_undo_list;
++	      redirection_undo_list = (REDIRECT *)NULL;
++	      cm_exec_undo = exec_redirection_undo_list;
++	      exec_redirection_undo_list = (REDIRECT *)NULL;
++	    }
++
++	  /* alloc=0: the vector ALIASES words' strings (no copy), so free only the
++	     array — the elements are owned by `words` and freed by the caller. */
++	  sargs = strvec_from_word_list (words, 0, 0, (int *)NULL);
++	  pid = make_child_posix_spawn (savestring (command_line), command, sargs, export_env,
++					pipe_in, pipe_out, fds_to_close, fork_flags);
++	  free (sargs);
++
++	  /* Restore the parent's file descriptors (does not affect the child). */
++	  if (cm_undo)
++	    cleanup_redirects (cm_undo);
++	  if (cm_exec_undo)
++	    dispose_redirects (cm_exec_undo);
++
++	  result = (pid < 0) ? EXECUTION_FAILURE : EXECUTION_SUCCESS;
++	  if (pid < 0)
++	    last_command_exit_value = EX_NOEXEC;
++	  goto parent_return;
++	}
++#endif
+       pid = make_child (p = savestring (command_line), fork_flags);
+     }
+ 
+diff --git a/jobs.c b/jobs.c
+index 528c90f..799d3c4 100644
+--- a/jobs.c
++++ b/jobs.c
+@@ -27,6 +27,11 @@
+ #include "trap.h"
+ #include <stdio.h>
+ #include <signal.h>
++#if defined (CHIBIL_REEXEC)
++#  include <spawn.h>
++#  include <fcntl.h>
++extern char **environ;
++#endif
+ #include <errno.h>
+ 
+ #if defined (HAVE_UNISTD_H)
+@@ -2501,6 +2506,339 @@ make_child (char *command, int flags)
+   return (pid);
+ }
+ 
++#if defined (CHIBIL_REEXEC)
++/* To re-exec bash for a subshell/comsub on CoreCLR we must relaunch the actual
++   process that runs us — typically `dotnet bash.dll` — not bash.dll alone (a
++   managed dll is not directly executable). Reconstruct the launcher prefix from
++   /proc/self/cmdline: every argv entry up to and including the first that ends in
++   ".dll" (i.e. `dotnet /path/bash.dll`); if none, the process is a native apphost
++   so the prefix is just argv[0]. Cached after first use. The .dll path is made
++   absolute so a comsub that changes directory before a nested comsub still finds
++   it. Returns a NULL-terminated argv prefix, or NULL on failure. */
++static char **chibil_launcher = (char **)NULL;
++static int chibil_launcher_n = 0;
++
++static char **
++chibil_reexec_prefix (int *np)
++{
++  int fd, total, r, n, i, prefix, l;
++  char buf[8192], **args, *abspath, rp[4096];
++
++  if (chibil_launcher)
++    {
++      if (np) *np = chibil_launcher_n;
++      return (chibil_launcher);
++    }
++
++  fd = open ("/proc/self/cmdline", O_RDONLY);
++  if (fd < 0)
++    return ((char **)NULL);
++  total = 0;
++  while (total < (int)sizeof (buf) - 1 && (r = read (fd, buf + total, sizeof (buf) - 1 - total)) > 0)
++    total += r;
++  close (fd);
++  if (total <= 0)
++    return ((char **)NULL);
++  buf[total] = '\0';
++
++  /* Split the NUL-separated argv. */
++  args = (char **)NULL;
++  n = 0;
++  for (i = 0; i < total; )
++    {
++      char *s = buf + i;
++      args = (char **)xrealloc (args, (n + 2) * sizeof (char *));
++      args[n++] = s;			/* into buf; copied below */
++      i += strlen (s) + 1;
++    }
++
++  /* Find the launcher prefix length. */
++  prefix = 1;
++  for (i = 0; i < n; i++)
++    {
++      l = strlen (args[i]);
++      if (l >= 4 && strcmp (args[i] + l - 4, ".dll") == 0)
++	{ prefix = i + 1; break; }
++    }
++
++  chibil_launcher = (char **)xmalloc ((prefix + 1) * sizeof (char *));
++  for (i = 0; i < prefix; i++)
++    {
++      l = strlen (args[i]);
++      if (l >= 4 && strcmp (args[i] + l - 4, ".dll") == 0 &&
++	  (abspath = realpath (args[i], rp)) != 0)
++	chibil_launcher[i] = savestring (abspath);
++      else
++	chibil_launcher[i] = savestring (args[i]);
++    }
++  chibil_launcher[prefix] = (char *)NULL;
++  chibil_launcher_n = prefix;
++  free (args);
++
++  if (np) *np = chibil_launcher_n;
++  return (chibil_launcher);
++}
++
++/* Parent-side job bookkeeping shared by the posix_spawn paths — identical to
++   make_child's parent branch. Caller has already blocked SIGCHLD/SIGINT/SIGTERM
++   into oset; this restores the mask. */
++static void
++chibil_register_spawned (char *command, pid_t pid, int flags, int async_p, sigset_t *oset)
++{
++  PROCESS *child;
++
++  if (job_control)
++    {
++      if (pipeline_pgrp == 0)
++	pipeline_pgrp = pid;
++      if ((flags & FORK_NOJOB) == 0)
++	setpgid (pid, pipeline_pgrp);
++    }
++  else if (pipeline_pgrp == 0)
++    pipeline_pgrp = shell_pgrp;
++
++  child = add_process (command, pid);
++  if (flags & FORK_PROCSUB)
++    child->flags |= PROC_PROCSUB;
++  if (flags & FORK_COMSUB)
++    child->flags |= PROC_COMSUB;
++
++  if (async_p)
++    last_asynchronous_pid = pid;
++
++  delete_old_job (pid);
++  bgp_delete (pid);
++  last_made_pid = pid;
++  js.c_totforked++;
++  js.c_living++;
++
++  sigprocmask (SIG_SETMASK, oset, (sigset_t *)NULL);
++}
++
++/* Spawn a fresh bash to run STRING as a command substitution, with its stdout
++   wired to the comsub pipe (fildes[1]); the parent reads fildes[0] and waits for
++   the returned pid exactly as it does for a forked comsub child. envp is bash's
++   export environment (exported vars). Non-exported vars/functions are not yet
++   transferred (M-fork-2b). Returns the child pid, or -1 on failure. */
++pid_t
++chibil_spawn_comsub (char *string, int *fildes, char **envp, int flags)
++{
++  sigset_t set, oset;
++  pid_t pid;
++  posix_spawnattr_t attr;
++  posix_spawn_file_actions_t fa;
++  char **prefix, **argv, *chibil_dump, *chibil_body;
++  int np, i, r, async_p;
++
++  prefix = chibil_reexec_prefix (&np);
++  if (prefix == 0)
++    {
++      sys_error ("%s", "command substitution: cannot find launcher (/proc/self/cmdline)");
++      return (-1);
++    }
++
++  /* Prepend the parent's functions + non-exported scalar vars (as re-executable
++     shell code) to the body, so the comsub child can call functions and read
++     non-exported vars. Exported vars still arrive via the environment. */
++  chibil_dump = chibil_state_dump ();
++  if (chibil_dump && *chibil_dump)
++    {
++      size_t dl = strlen (chibil_dump), sl = strlen (string);
++      chibil_body = (char *)xmalloc (dl + 1 + sl + 1);
++      memcpy (chibil_body, chibil_dump, dl);
++      chibil_body[dl] = '\n';
++      memcpy (chibil_body + dl + 1, string, sl + 1);
++    }
++  else
++    chibil_body = string;
++
++  /* argv = [launcher...] --norc --noprofile -c BODY NULL. A command substitution
++     is a clean non-interactive subshell: it must not source rc / profile files
++     (which would also be slow and could recurse into more comsubs). */
++  argv = (char **)xmalloc ((np + 5) * sizeof (char *));
++  for (i = 0; i < np; i++)
++    argv[i] = prefix[i];
++  argv[np] = "--norc";
++  argv[np + 1] = "--noprofile";
++  argv[np + 2] = "-c";
++  argv[np + 3] = chibil_body;
++  argv[np + 4] = (char *)NULL;
++
++  sigemptyset (&set);
++  sigaddset (&set, SIGCHLD);
++  sigaddset (&set, SIGINT);
++  sigaddset (&set, SIGTERM);
++  sigemptyset (&oset);
++  sigprocmask (SIG_BLOCK, &set, &oset);
++
++  making_children ();
++  async_p = (flags & FORK_ASYNC);
++
++  posix_spawnattr_init (&attr);
++  {
++    short f = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
++    sigset_t empty, dfl;
++    sigemptyset (&empty);
++    posix_spawnattr_setsigmask (&attr, &empty);
++    sigemptyset (&dfl);
++    sigaddset (&dfl, SIGINT);
++    sigaddset (&dfl, SIGQUIT);
++    sigaddset (&dfl, SIGTERM);
++    posix_spawnattr_setsigdefault (&attr, &dfl);
++    if (job_control && (flags & FORK_NOJOB) == 0)
++      {
++	posix_spawnattr_setpgroup (&attr, pipeline_pgrp);
++	f |= POSIX_SPAWN_SETPGROUP;
++      }
++    posix_spawnattr_setflags (&attr, f);
++  }
++
++  /* Child: stdout -> pipe write end, then close both pipe fds. */
++  posix_spawn_file_actions_init (&fa);
++  posix_spawn_file_actions_adddup2 (&fa, fildes[1], 1);
++  if (fildes[1] != 1)
++    posix_spawn_file_actions_addclose (&fa, fildes[1]);
++  posix_spawn_file_actions_addclose (&fa, fildes[0]);
++
++  /* posix_spawnP: the launcher (e.g. "dotnet") is usually a bare name found via
++     PATH, not an absolute path; posix_spawn would not search PATH. envp is
++     bash's export environment (exported vars); non-exported vars + functions
++     reach the child through the prepended state dump instead. */
++  r = posix_spawnp (&pid, argv[0], &fa, &attr, argv, envp ? envp : environ);
++
++  posix_spawn_file_actions_destroy (&fa);
++  posix_spawnattr_destroy (&attr);
++  free (argv);				/* elements owned by prefix/caller */
++  if (chibil_body != string)
++    free (chibil_body);
++  if (chibil_dump)
++    free (chibil_dump);
++
++  if (r != 0)
++    {
++      errno = r;
++      sys_error ("posix_spawn: %s", prefix[0]);
++      sigprocmask (SIG_SETMASK, &oset, (sigset_t *)NULL);
++      return (-1);
++    }
++
++  chibil_register_spawned ((char *)NULL, pid, flags, async_p, &oset);
++  return (pid);
++}
++
++/* CoreCLR has no usable fork(): a real fork() clones the process but the CLR's
++   GC/JIT/finalizer threads do not survive, leaving locks held and the heap
++   inconsistent — and this corrupts even the PARENT, which then faults
++   non-deterministically in the job/reaping layer. So instead of forking and
++   running bash's child setup in-process, we spawn a real OS process with
++   posix_spawn (which clones only enough to exec, never the CLR) and do the SAME
++   parent-side job bookkeeping make_child does. Used for the simple external
++   command case (no in-process child body, no pipes/redirections — the caller
++   prepares argv/envp/path). */
++pid_t
++make_child_posix_spawn (char *command, char *path, char **argv, char **envp,
++			int pipe_in, int pipe_out, struct fd_bitmap *fds_to_close,
++			int flags)
++{
++  sigset_t set, oset;
++  pid_t pid;
++  int r, async_p, have_fa, i;
++  posix_spawnattr_t attr;
++  posix_spawn_file_actions_t fa;
++
++  /* Block the same signals make_child blocks across child creation. */
++  sigemptyset (&set);
++  sigaddset (&set, SIGCHLD);
++  sigaddset (&set, SIGINT);
++  sigaddset (&set, SIGTERM);
++  sigemptyset (&oset);
++  sigprocmask (SIG_BLOCK, &set, &oset);
++
++  making_children ();
++  async_p = (flags & FORK_ASYNC);
++
++  if (default_buffered_input != -1 && (!async_p || default_buffered_input > 0))
++    sync_buffered_stream (default_buffered_input);
++
++  /* Configure the child: restore a default signal mask + default dispositions
++     for the signals make_child's child resets, and (under job control) place it
++     in the pipeline process group. posix_spawn applies these in the child
++     before exec, so the spawned program starts in the same state a forked +
++     exec'd bash child would. */
++  posix_spawnattr_init (&attr);
++  {
++    short f = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
++    sigset_t empty, dfl;
++
++    sigemptyset (&empty);
++    posix_spawnattr_setsigmask (&attr, &empty);
++
++    sigemptyset (&dfl);
++    sigaddset (&dfl, SIGINT);
++    sigaddset (&dfl, SIGQUIT);
++    sigaddset (&dfl, SIGTERM);
++    sigaddset (&dfl, SIGCHLD);
++    posix_spawnattr_setsigdefault (&attr, &dfl);
++
++    if (job_control && (flags & FORK_NOJOB) == 0)
++      {
++	posix_spawnattr_setpgroup (&attr, pipeline_pgrp);  /* 0 => new pgrp = child */
++	f |= POSIX_SPAWN_SETPGROUP;
++      }
++    posix_spawnattr_setflags (&attr, f);
++  }
++
++  /* Translate the in-child fd setup (close_fd_bitmap + do_piping) into
++     posix_spawn file actions, applied in the child before exec. Order matches
++     bash: close the inherited pipe fds of other stages first, then wire this
++     stage's pipe_in->0 / pipe_out->1 (or 1->2 for REDIRECT_BOTH). */
++  posix_spawn_file_actions_init (&fa);
++  have_fa = 0;
++
++  if (fds_to_close)
++    for (i = 0; i < fds_to_close->size; i++)
++      if (fds_to_close->bitmap[i])
++	{ posix_spawn_file_actions_addclose (&fa, i); have_fa = 1; }
++
++  if (pipe_in != NO_PIPE)
++    {
++      posix_spawn_file_actions_adddup2 (&fa, pipe_in, 0);
++      if (pipe_in > 0)
++	posix_spawn_file_actions_addclose (&fa, pipe_in);
++      have_fa = 1;
++    }
++  if (pipe_out != NO_PIPE)
++    {
++      if (pipe_out != REDIRECT_BOTH)
++	{
++	  posix_spawn_file_actions_adddup2 (&fa, pipe_out, 1);
++	  if (pipe_out == 0 || pipe_out > 1)
++	    posix_spawn_file_actions_addclose (&fa, pipe_out);
++	}
++      else
++	posix_spawn_file_actions_adddup2 (&fa, 1, 2);
++      have_fa = 1;
++    }
++
++  r = posix_spawn (&pid, path, have_fa ? &fa : (posix_spawn_file_actions_t *)NULL,
++		   &attr, argv, envp ? envp : environ);
++  posix_spawn_file_actions_destroy (&fa);
++  posix_spawnattr_destroy (&attr);
++
++  if (r != 0)
++    {
++      errno = r;
++      sys_error ("posix_spawn: %s", path);
++      sigprocmask (SIG_SETMASK, &oset, (sigset_t *)NULL);
++      return (-1);
++    }
++
++  /* Parent-side bookkeeping — identical to make_child's parent branch. */
++  chibil_register_spawned (command, pid, flags, async_p, &oset);
++  return (pid);
++}
++#endif /* CHIBIL_REEXEC */
++
+ /* These two functions are called only in child processes. */
+ void
+ ignore_tty_job_signals (void)
+diff --git a/jobs.h b/jobs.h
+index 64509e2..291b8b7 100644
+--- a/jobs.h
++++ b/jobs.h
+@@ -295,6 +295,17 @@ extern void list_stopped_jobs (int);
+ extern void list_running_jobs (int);
+ 
+ extern pid_t make_child (char *, int);
++#if defined (CHIBIL_REEXEC)
++/* CoreCLR cannot fork the CLR (it corrupts even the parent). Spawn a real
++   process via posix_spawn with the same parent-side job bookkeeping make_child
++   does, but no in-process child body. path/argv/envp are the resolved command,
++   its argv, and the environment; command is the job's display string (owned by
++   the job table on success). Returns the child pid, or -1 on spawn failure. */
++extern pid_t make_child_posix_spawn (char *command, char *path, char **argv, char **envp, int pipe_in, int pipe_out, struct fd_bitmap *fds_to_close, int flags);
++/* Re-exec a fresh bash to run STRING as a command substitution, stdout wired to
++   the comsub pipe fildes[1]. Parent reads fildes[0]/waits for the pid as usual. */
++extern pid_t chibil_spawn_comsub (char *string, int *fildes, char **envp, int flags);
++#endif
+ 
+ extern int get_tty_state (void);
+ extern int set_tty_state (void);
+diff --git a/subst.c b/subst.c
+index e9d3e75..db16c35 100644
+--- a/subst.c
++++ b/subst.c
+@@ -7248,7 +7248,26 @@ command_substitute (char *string, int quoted, int flags)
+ 
+   old_async_pid = last_asynchronous_pid;
+   fork_flags = (subshell_environment&SUBSHELL_ASYNC) ? FORK_ASYNC : 0;
++#if defined (CHIBIL_REEXEC)
++  /* No fork() on CoreCLR: run the comsub body in a fresh re-exec'd bash whose
++     stdout is the pipe, rather than forking the CLR and running
++     parse_and_execute in the child. The if (pid == 0) child bodies below are
++     skipped (posix_spawn returns in the parent only). We strip the internal
++     quoting markers first, exactly as the forked child does before
++     parse_and_execute (subst.c child path). Exported vars pass via export_env;
++     non-exported vars/functions/options are not yet transferred (M-fork-2b). */
++  {
++    char *cstr = savestring (string);
++    remove_quoted_escapes (cstr);
++    /* Make sure vars exported in THIS shell (not just inherited ones) are in
++       export_env before it becomes the child's environment. */
++    maybe_make_export_env ();
++    pid = chibil_spawn_comsub (cstr, fildes, export_env, fork_flags|FORK_NOTERM|FORK_COMSUB);
++    free (cstr);
++  }
++#else
+   pid = make_child ((char *)NULL, fork_flags|FORK_NOTERM|FORK_COMSUB);
++#endif
+   last_asynchronous_pid = old_async_pid;
+ 
+   if (pid == 0)
+diff --git a/variables.c b/variables.c
+index 4e6f93b..46a6b38 100644
+--- a/variables.c
++++ b/variables.c
+@@ -4954,6 +4954,154 @@ make_func_export_array (void)
+   return (list);
+ }
+ 
++#if defined (CHIBIL_REEXEC)
++/* Build a NULL-terminated environment array carrying ALL shell variables
++   (exported or not) and ALL shell functions, so the full shell state can be
++   handed to a re-exec'd command-substitution / subshell child through its
++   environment. Non-exported scalars become (exported) vars in the child;
++   functions are BASH_FUNC_-encoded and auto-imported at child startup. Arrays
++   cannot pass through the environment and are skipped. Caller frees with
++   strvec_dispose.
++
++   NOTE (M-fork-2b, blocked): the array this builds is correct (verified: valid
++   name=value entries incl. non-exported vars), but a `dotnet bash.dll` child
++   spawned via posix_spawnp with a CUSTOM envp does not receive it — the child's
++   environment comes up empty (whereas passing `environ` works). Until that
++   dotnet/host env-delivery quirk is understood, chibil_spawn_comsub keeps
++   passing export_env/environ (M-fork-2a), so session-exported / non-exported
++   vars do not reach comsub children yet. */
++char **
++chibil_make_full_env (void)
++{
++  SHELL_VAR **vars, **funcs;
++  char **venv, **fenv, **full;
++  int nv, nf, i, k;
++
++  vars = all_shell_variables ();
++  venv = vars ? make_env_array_from_var_list (vars) : (char **)NULL;
++  if (vars)
++    free (vars);
++
++  funcs = all_shell_functions ();
++  fenv = funcs ? make_env_array_from_var_list (funcs) : (char **)NULL;
++  if (funcs)
++    free (funcs);
++
++  nv = venv ? strvec_len (venv) : 0;
++  nf = fenv ? strvec_len (fenv) : 0;
++  full = strvec_create (nv + nf + 1);
++  k = 0;
++  for (i = 0; i < nv; i++)
++    full[k++] = venv[i];	/* move ownership of the strings into `full` */
++  for (i = 0; i < nf; i++)
++    full[k++] = fenv[i];
++  full[k] = (char *)NULL;
++  if (venv)
++    free (venv);		/* free the containers, not the moved strings */
++  if (fenv)
++    free (fenv);
++  return full;
++}
++#endif /* CHIBIL_REEXEC */
++
++#if defined (CHIBIL_REEXEC)
++/* Serialize shell state a command-substitution / subshell child needs into a
++   chunk of re-executable shell code: every defined function (re-readable
++   `name () { ... }`), then every NON-exported scalar variable as `name='value'`
++   (exported vars already reach the child through the environment; readonly,
++   dynamic, array and function vars are skipped). Prepended to the child's `-c`
++   body so the child defines them before running the body — this sidesteps the
++   environment entirely (a custom posix_spawn envp does not survive to a
++   dotnet-launched child). Caller frees the returned string; NULL if nothing. */
++char *
++chibil_state_dump (void)
++{
++  SHELL_VAR **vars, **funcs;
++  char *out, *piece, *q, *val;
++  size_t len, cap, plen;
++  int i;
++
++  out = (char *)NULL; len = 0; cap = 0;
++
++#define CHIBIL_APPEND(s, slen) \
++  do { \
++      size_t _n = (slen); \
++      if (len + _n + 1 > cap) { cap = (len + _n + 1) * 2 + 128; out = (char *)xrealloc (out, cap); } \
++      memcpy (out + len, (s), _n); len += _n; out[len] = '\0'; \
++  } while (0)
++
++  funcs = all_shell_functions ();
++  if (funcs)
++    {
++      for (i = 0; funcs[i]; i++)
++	{
++	  if (invisible_p (funcs[i]))
++	    continue;
++	  /* static buffer — copy immediately, do not free. */
++	  piece = named_function_string (funcs[i]->name, function_cell (funcs[i]),
++					 FUNC_MULTILINE|FUNC_EXTERNAL);
++	  if (piece == 0)
++	    continue;
++	  plen = strlen (piece);
++	  CHIBIL_APPEND (piece, plen);
++	  CHIBIL_APPEND ("\n", 1);
++	}
++      free (funcs);
++    }
++
++  vars = all_shell_variables ();
++  if (vars)
++    {
++      for (i = 0; vars[i]; i++)
++	{
++	  SHELL_VAR *v = vars[i];
++
++	  if (invisible_p (v) || exported_p (v) || readonly_p (v) || function_p (v))
++	    continue;
++	  if (array_p (v) || assoc_p (v))
++	    continue;
++	  if (v->dynamic_value)			/* RANDOM, SECONDS, LINENO, … */
++	    continue;
++	  val = value_cell (v);
++	  if (val == 0)
++	    continue;
++	  q = sh_single_quote (val);
++	  CHIBIL_APPEND (v->name, strlen (v->name));
++	  CHIBIL_APPEND ("=", 1);
++	  CHIBIL_APPEND (q, strlen (q));
++	  CHIBIL_APPEND ("\n", 1);
++	  free (q);
++	}
++      free (vars);
++    }
++
++  /* Positional parameters ($1, $2, …): a comsub body inside a function or script
++     frequently references them (e.g. `$(f $(($1-1)))`), and the re-exec'd child
++     otherwise has none. Emit `set -- 'a' 'b' …`. */
++  {
++    WORD_LIST *pp, *l;
++
++    pp = list_rest_of_args ();
++    if (pp)
++      {
++	CHIBIL_APPEND ("set --", 6);
++	for (l = pp; l; l = l->next)
++	  {
++	    q = sh_single_quote (l->word->word);
++	    CHIBIL_APPEND (" ", 1);
++	    CHIBIL_APPEND (q, strlen (q));
++	    free (q);
++	  }
++	CHIBIL_APPEND ("\n", 1);
++	dispose_words (pp);
++      }
++  }
++#undef CHIBIL_APPEND
++
++  return out;
++}
++#endif /* CHIBIL_REEXEC */
++
+ /* Add ENVSTR to the end of the exported environment, EXPORT_ENV. */
+ #define add_to_export_env(envstr,do_alloc) \
+ do \
+diff --git a/variables.h b/variables.h
+index e939e59..69a348a 100644
+--- a/variables.h
++++ b/variables.h
+@@ -256,6 +256,10 @@ extern HASH_TABLE *temporary_env;
+ extern int variable_context;
+ extern char *dollar_vars[];
+ extern char **export_env;
++#if defined (CHIBIL_REEXEC)
++extern char **chibil_make_full_env (void);
++extern char *chibil_state_dump (void);
++#endif
+ 
+ extern int tempenv_assign_error;
+ extern int array_needs_making;
