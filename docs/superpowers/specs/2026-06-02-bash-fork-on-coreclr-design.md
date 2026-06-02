@@ -200,8 +200,22 @@ Comprehensive `bash -c` test, **53/57 features pass** (`targets/bash-5.3/bigtest
   forking path, would need do_piping-in-parent for builtins), subshells `( )`, and
   background/job control (M-fork-4). Sole bigtest failure now: recursive function
   via comsub (M-fork-2b function transfer, blocked).
-- **M-fork-3 (subshells + builtin pipeline stages):** subshells `( )` (deparse) +
-  builtin stages. NOTE (investigation): pipeline stages do **not** fork in
+- **M-fork-3 — builtin pipeline stages (DONE, in targets/):** `echo foo | tr a-z A-Z`
+  → HELLO etc. now work. `chibil_stage_can_run_unforked` also admits a whitelist of
+  side-effect-free output builtins (`echo`/`printf`/`pwd`/`true`/`false`/`:`) — not
+  `read`/`cd`/`exit`/`set` (which would leak/corrupt the parent), and not functions.
+  When such a builtin is a pipeline stage and wasn't forked, execute_simple_command
+  wires the pipe to fd 0/1 in the parent (`fcntl F_DUPFD_CLOEXEC` save →
+  `do_piping` → run the builtin via `execute_builtin_or_function` → restore the
+  saved fds at `return_result`). Verified 18/18: `echo|tr` (real transform),
+  `printf|rev`, `pwd|cat`, `echo "$x"|cat`, comsub-feeding-builtin-pipe
+  (`echo $(...)|tr`), 3-stage `echo hi|cat|tr`→HI, and isolation
+  (`echo a|cat; echo PARENT_OK`→PARENT_OK; exit codes propagate; parent intact).
+  bigtest still **56/57**, no regressions. Remaining: function pipeline stages and
+  unsafe-builtin stages (read/cd/...) keep the forking path; subshells `( )`;
+  background/job control (M-fork-4).
+- **M-fork-3 (subshells + function/unsafe-builtin pipeline stages):** subshells
+  `( )` (deparse). NOTE (investigation): pipeline stages do **not** fork in
   `execute_disk_command` —
   `execute_simple_command` forks *early* at execute_cmd.c:4550 (`dofork = pipe_in
   || pipe_out || async`) **before** word expansion, then runs expansion + the
