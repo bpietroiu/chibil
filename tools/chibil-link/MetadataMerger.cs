@@ -273,6 +273,8 @@ public sealed class MetadataMerger
         foreach (var of in _objs)
             CopyTypeRefs(of);
 
+        _usesSetjmp = DetectSetjmpUsage();
+
         // ── Value-type TypeDefs + HasFieldRVA fields (string literals / globals)
         //    Predicted here so field/IL signatures referencing them remap, and
         //    field-data RVAs can be assigned by the writer. Must run BEFORE the
@@ -303,6 +305,9 @@ public sealed class MetadataMerger
         // record it for load-time initialization from the library. Pure MSIL cannot
         // import native data directly, so the value is copied at module load.
         SynthesizeDataImports();
+
+        // setjmp/longjmp carrier globals (zero-init; field order must still be open).
+        if (_usesSetjmp) ReserveSetjmpCarrierFields();
 
         // Append read-only source fields (rows N+1..M) for each Mutable (.data)
         // global, so the .cctor can cpblk their bytes into the writable target.
@@ -371,6 +376,10 @@ public sealed class MetadataMerger
                     ExportedMethods.Add((of, m));
             }
         }
+
+        // setjmp/longjmp helpers: after the C-function rows (use the carrier field
+        // tokens reserved above), before SymbolResolver maps the call sites.
+        if (_usesSetjmp) ReserveSetjmpHelpers();
     }
 
     /// <summary>Number of parameters in a method's signature (raw count, incl. any
@@ -463,6 +472,153 @@ public sealed class MetadataMerger
         _osIsWindowsToken = ReserveSynthRow(synth);
         return _osIsWindowsToken;
     }
+
+    // ── setjmp/longjmp runtime (MUSL-3) ──────────────────────────────────────
+    // setjmp is lowered (in chibil) to a try/filter/handler wrap; longjmp throws a
+    // stock System.Exception after stashing (buf,val,active) in three carrier
+    // globals synthesized here. The setjmp filter matches on active && buf==&jb, so
+    // a real exception is never mistaken for a longjmp and nested setjmps resolve.
+    private bool _usesSetjmp;
+    private int _ljBufRow, _ljValRow, _ljActiveRow;
+    private readonly Dictionary<string, int> _setjmpHelperTokens = new(StringComparer.Ordinal);
+
+    /// <summary>True if any object references a setjmp/longjmp runtime helper —
+    /// chibil emits a call to a <c>__chibil_longjmp*</c> helper for every longjmp
+    /// (set+throw) and every setjmp (the filter calls __chibil_longjmp_match).</summary>
+    private bool DetectSetjmpUsage()
+    {
+        foreach (var of in _objs)
+        {
+            var md = of.Md;
+            int n = md.GetTableRowCount(TableIndex.MemberRef);
+            for (int r = 1; r <= n; r++)
+            {
+                var mr = md.GetMemberReference(MetadataTokens.MemberReferenceHandle(r));
+                if (md.GetString(mr.Name).StartsWith("__chibil_longjmp", StringComparison.Ordinal))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Reserve the 3 zero-init carrier globals. Must run while field-row
+    /// order is still open (before ReserveMutableSourceFields).</summary>
+    private void ReserveSetjmpCarrierFields()
+    {
+        BlobHandle FieldSig(bool ptr)
+        {
+            var b = new BlobBuilder();
+            var t = new BlobEncoder(b).FieldSignature();
+            if (ptr) t.IntPtr(); else t.Int32();
+            return Builder.GetOrAddBlob(b);
+        }
+        int AddF(string name, bool ptr, int size)
+        {
+            _outFieldRow++;
+            CopiedFields.Add(new CopiedField
+            {
+                Attributes = FieldAttributes.Assembly | FieldAttributes.Static | FieldAttributes.HasFieldRVA,
+                Name = name,
+                SignatureBlob = FieldSig(ptr),
+                Data = new byte[size],            // zero-initialized
+                Alignment = size,
+                PredictedRow = _outFieldRow,
+                Kind = CopiedField.FieldKind.Bss,
+                SourceObj = _objs[0],             // no relocations (Section 0): never matched by the relocator
+                SourceSection = 0,
+                SourceOffset = 0,
+                Size = size,
+            });
+            return _outFieldRow;
+        }
+        _ljBufRow = AddF("__chibil_lj_buf", ptr: true, size: 8);
+        _ljValRow = AddF("__chibil_lj_val", ptr: false, size: 4);
+        _ljActiveRow = AddF("__chibil_lj_active", ptr: false, size: 4);
+    }
+
+    /// <summary>Reserve the setjmp/longjmp helper methods (after the carrier fields
+    /// and the C-function rows, before SymbolResolver maps the call sites).</summary>
+    private void ReserveSetjmpHelpers()
+    {
+        int tokBuf = 0x04000000 | _ljBufRow;
+        int tokVal = 0x04000000 | _ljValRow;
+        int tokAct = 0x04000000 | _ljActiveRow;
+
+        var ctorSig = new BlobBuilder();
+        new BlobEncoder(ctorSig).MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: true)
+            .Parameters(0, ret => ret.Void(), _ => { });
+        int excCtor = MetadataTokens.GetToken(Builder.AddMemberReference(
+            GetOrAddCoreTypeRef("System", "Exception"),
+            Builder.GetOrAddString(".ctor"), Builder.GetOrAddBlob(ctorSig)));
+
+        void Ldsflda(BlobBuilder il, int tok) { il.WriteByte(0x7F); il.WriteInt32(tok); } // ldsflda (0x7F); 0x7C is ldflda
+        BlobHandle MSig(int np, Action<ReturnTypeEncoder> ret, Action<ParametersEncoder> ps)
+        {
+            var b = new BlobBuilder();
+            new BlobEncoder(b).MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: false)
+                .Parameters(np, ret, ps);
+            return Builder.GetOrAddBlob(b);
+        }
+        int Helper(string name, BlobHandle sig, byte[] il, int maxStack)
+        {
+            int tok = ReserveSynthRow(new SynthMethod
+            {
+                Name = name,
+                SignatureBlob = sig,
+                Il = il,
+                MaxStack = maxStack,
+                Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig,
+            });
+            _setjmpHelperTokens[name] = tok;
+            return tok;
+        }
+
+        // void __chibil_longjmp(native int buf, int val):
+        //   lj_val = val + (val==0); lj_buf = buf; lj_active = 1; throw new Exception()
+        {
+            var il = new BlobBuilder();
+            Ldsflda(il, tokVal); il.WriteByte(0x03); il.WriteByte(0x03); il.WriteByte(0x16);
+            il.WriteByte(0xFE); il.WriteByte(0x01); il.WriteByte(0x58); il.WriteByte(0x54); // ceq;add;stind.i4
+            Ldsflda(il, tokBuf); il.WriteByte(0x02); il.WriteByte(0xDF);                      // ldarg.0;stind.i
+            Ldsflda(il, tokAct); il.WriteByte(0x17); il.WriteByte(0x54);                      // ldc.i4.1;stind.i4
+            il.WriteByte(0x73); il.WriteInt32(excCtor); il.WriteByte(0x7A);                   // newobj;throw
+            Helper("__chibil_longjmp",
+                MSig(2, r => r.Void(), p => { p.AddParameter().Type().IntPtr(); p.AddParameter().Type().Int32(); }),
+                il.ToArray(), maxStack: 4);
+        }
+        // int __chibil_longjmp_match(native int buf): (active!=0) & (lj_buf==buf)
+        {
+            var il = new BlobBuilder();
+            Ldsflda(il, tokAct); il.WriteByte(0x4A); il.WriteByte(0x16); il.WriteByte(0xFE); il.WriteByte(0x03); // ldind.i4;ldc.i4.0;cgt.un
+            Ldsflda(il, tokBuf); il.WriteByte(0x4D); il.WriteByte(0x02); il.WriteByte(0xFE); il.WriteByte(0x01); // ldind.i;ldarg.0;ceq
+            il.WriteByte(0x5F); il.WriteByte(0x2A);                                                              // and;ret
+            Helper("__chibil_longjmp_match",
+                MSig(1, r => r.Type().Int32(), p => p.AddParameter().Type().IntPtr()), il.ToArray(), maxStack: 3);
+        }
+        // native int __chibil_longjmp_buf(void): return lj_buf
+        {
+            var il = new BlobBuilder();
+            Ldsflda(il, tokBuf); il.WriteByte(0x4D); il.WriteByte(0x2A);
+            Helper("__chibil_longjmp_buf", MSig(0, r => r.Type().IntPtr(), _ => { }), il.ToArray(), maxStack: 1);
+        }
+        // int __chibil_longjmp_val(void): return lj_val
+        {
+            var il = new BlobBuilder();
+            Ldsflda(il, tokVal); il.WriteByte(0x4A); il.WriteByte(0x2A);
+            Helper("__chibil_longjmp_val", MSig(0, r => r.Type().Int32(), _ => { }), il.ToArray(), maxStack: 1);
+        }
+        // void __chibil_longjmp_clear(void): lj_active = 0
+        {
+            var il = new BlobBuilder();
+            Ldsflda(il, tokAct); il.WriteByte(0x16); il.WriteByte(0x54); il.WriteByte(0x2A);
+            Helper("__chibil_longjmp_clear", MSig(0, r => r.Void(), _ => { }), il.ToArray(), maxStack: 2);
+        }
+    }
+
+    /// <summary>Map a <c>__chibil_longjmp*</c> call site to its synthesized helper
+    /// (or 0 if the runtime was not reserved). Used by SymbolResolver.</summary>
+    public int ResolveSetjmpHelper(string name) =>
+        _setjmpHelperTokens.TryGetValue(name, out int tok) ? tok : 0;
 
     private int _argcToken;
     private int _makeArgvToken;

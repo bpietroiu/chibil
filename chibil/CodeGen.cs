@@ -120,6 +120,18 @@ public class CodeGen
     // Scratch __va_list_tag* holders for va_start / va_copy (see VaStart).
     private int _vaStartStructLocal = -1;
     private int _vaCopyStructLocal = -1;
+    // ── setjmp/longjmp wrap state (MUSL-3) ────────────────────────────────
+    // A function containing setjmp is wrapped in `Lhead: .try { body } filter/handler`
+    // so a longjmp (which throws via __chibil_longjmp) resumes it: the handler stores
+    // the longjmp value into the matching setjmp's result local and `leave`s to Lhead,
+    // re-entering the try (IL forbids branching INTO a try). Returns inside the try
+    // become store-retval + `leave` to the epilogue. See EmitSetjmpWrappedBody.
+    private bool _setjmpWrap;
+    private LabelHandle _setjmpEpiLabel, _setjmpLhead;
+    private int _setjmpRetvalLocal = -1;
+    private int _setjmpBufLocal = -1;
+    private List<(Node Jb, int Sjval)> _setjmpSites;
+    private readonly Dictionary<string, MemberReferenceHandle> _runtimeHelperRefs = new();
     private int _maxStack, _stackDepth;
     private Dictionary<string, LabelHandle> _labels;
     private int _labelCount;
@@ -1495,6 +1507,10 @@ public class CodeGen
         _vaArgPApLocal = -1;
         _vaStartStructLocal = -1;
         _vaCopyStructLocal = -1;
+        _setjmpWrap = false;
+        _setjmpRetvalLocal = -1;
+        _setjmpBufLocal = -1;
+        _setjmpSites = null;
         _vaArgApLocal = -1;
         _maxStack = 0;
         _stackDepth = 0;
@@ -1518,18 +1534,27 @@ public class CodeGen
         }
         _scratchLocalBase = localIdx;
 
-        // Emit function body
-        GenStmt(fn.Body);
-
-        // Epilogue — fallthrough return
-        if (_labels.TryGetValue($".L.return.{fn.Name}", out var retLabel))
-            _enc.MarkLabel(retLabel);
-
-        if (fn.Ty.ReturnTy.Kind != TypeKind.Void)
+        // Emit function body. A function that calls setjmp is wrapped in a
+        // try/filter/handler so a longjmp targeting it resumes (see the field block).
+        _setjmpWrap = NodeContainsSetjmp(fn.Body);
+        if (_setjmpWrap)
         {
-            EmitDefaultValue(fn.Ty.ReturnTy);
+            EmitSetjmpWrappedBody(fn);
         }
-        _enc.OpCode(ILOpCode.Ret);
+        else
+        {
+            GenStmt(fn.Body);
+
+            // Epilogue — fallthrough return
+            if (_labels.TryGetValue($".L.return.{fn.Name}", out var retLabel))
+                _enc.MarkLabel(retLabel);
+
+            if (fn.Ty.ReturnTy.Kind != TypeKind.Void)
+            {
+                EmitDefaultValue(fn.Ty.ReturnTy);
+            }
+            _enc.OpCode(ILOpCode.Ret);
+        }
 
         // Build locals signature
         int totalLocals = _scratchLocalBase + _scratchLocals.Count;
@@ -1652,6 +1677,144 @@ public class CodeGen
         int newSlot = _scratchLocalBase + _scratchLocals.Count;
         _scratchLocals.Add((ty, newSlot));
         return newSlot;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  setjmp / longjmp (MUSL-3) — managed-exception resumption
+    // ═══════════════════════════════════════════════════════════════
+
+    private static bool IsSetjmpName(string n) =>
+        n is "setjmp" or "_setjmp" or "__setjmp" or "sigsetjmp" or "__sigsetjmp";
+
+    /// <summary>True if the statement/expression tree calls setjmp anywhere — that
+    /// function must be wrapped so a longjmp can resume it.</summary>
+    private static bool NodeContainsSetjmp(Node n)
+    {
+        for (; n != null; n = n.Next)
+        {
+            if (n.Kind == NodeKind.FunCall && n.Lhs != null && n.Lhs.Kind == NodeKind.Var
+                && n.Lhs.Var != null && n.Lhs.Var.IsFunction && IsSetjmpName(n.Lhs.Var.Name))
+                return true;
+            if (NodeContainsSetjmp(n.Lhs) || NodeContainsSetjmp(n.Rhs) || NodeContainsSetjmp(n.Cond)
+                || NodeContainsSetjmp(n.Then) || NodeContainsSetjmp(n.Els) || NodeContainsSetjmp(n.Init)
+                || NodeContainsSetjmp(n.Inc) || NodeContainsSetjmp(n.Body) || NodeContainsSetjmp(n.Args))
+                return true;
+        }
+        return false;
+    }
+
+    // Default-convention MemberRef signatures for the linker-synthesized helpers.
+    private static readonly byte[] RtLongjmp = { 0x00, 0x02, 0x01, 0x18, 0x08 }; // void(native int, int32)
+    private static readonly byte[] RtMatch   = { 0x00, 0x01, 0x08, 0x18 };       // int32(native int)
+    private static readonly byte[] RtBuf     = { 0x00, 0x00, 0x18 };             // native int()
+    private static readonly byte[] RtVal     = { 0x00, 0x00, 0x08 };             // int32()
+    private static readonly byte[] RtClear   = { 0x00, 0x00, 0x01 };             // void()
+
+    private MemberReferenceHandle RuntimeHelperRef(string name, byte[] sig)
+    {
+        if (!_runtimeHelperRefs.TryGetValue(name, out var mr))
+        {
+            mr = _md.AddMemberReference(_moduleTypeDef, _md.GetOrAddString(name), _md.GetOrAddBlob(sig));
+            _runtimeHelperRefs[name] = mr;
+        }
+        return mr;
+    }
+
+    private void EmitRuntimeCall(string name, byte[] sig, int nArgs, bool hasRet)
+    {
+        _enc.Call(RuntimeHelperRef(name, sig));
+        if (nArgs > 0) Pop(nArgs);
+        if (hasRet) Push();
+    }
+
+    /// <summary>Emit `Lhead: .try { body } filter { ours? } handler { resume }` plus
+    /// the epilogue outside the try. Body returns funnel through `leave` (see GenStmt
+    /// Return). Site list is populated by setjmp lowering DURING GenStmt.</summary>
+    private void EmitSetjmpWrappedBody(Obj fn)
+    {
+        _setjmpSites = new List<(Node, int)>();
+        _setjmpRetvalLocal = fn.Ty.ReturnTy.Kind != TypeKind.Void ? AddFreshScratchLocal(fn.Ty.ReturnTy) : -1;
+        _setjmpBufLocal = AddFreshScratchLocal(_types.TyVaList);   // native-int sized
+
+        _setjmpEpiLabel = _enc.DefineLabel();
+        _setjmpLhead = _enc.DefineLabel();
+        var tryStart = _enc.DefineLabel();
+        var tryEnd = _enc.DefineLabel();
+        var filterStart = _enc.DefineLabel();
+        var handlerStart = _enc.DefineLabel();
+        var handlerEnd = _enc.DefineLabel();
+
+        // Lhead must sit OUTSIDE the try: the handler `leave Lhead`s to resume, and
+        // leaving INTO a try is illegal. A nop separates Lhead from tryStart so the
+        // leave lands before the try and falls into it.
+        _enc.MarkLabel(_setjmpLhead);
+        _enc.OpCode(ILOpCode.Nop);
+        _enc.MarkLabel(tryStart);
+        GenStmt(fn.Body);
+        // Normal fall-through end of the try -> leave to the epilogue.
+        _enc.Branch(ILOpCode.Leave, _setjmpEpiLabel);
+        _enc.MarkLabel(tryEnd);
+
+        _enc.MarkLabel(filterStart);
+        EmitSetjmpFilter();
+        _enc.MarkLabel(handlerStart);
+        EmitSetjmpHandler();
+        _enc.MarkLabel(handlerEnd);
+        _enc.ControlFlowBuilder.AddFilterRegion(tryStart, tryEnd, handlerStart, handlerEnd, filterStart);
+
+        // Epilogue (outside the try): return the value funnelled into the retval local.
+        _enc.MarkLabel(_setjmpEpiLabel);
+        _stackDepth = 0;
+        if (_setjmpRetvalLocal >= 0) { _enc.LoadLocal(_setjmpRetvalLocal); Push(); }
+        _enc.OpCode(ILOpCode.Ret);
+        if (_setjmpRetvalLocal >= 0) Pop();
+        _setjmpWrap = false;
+    }
+
+    // filter: runtime pushes the exception. Return 1 iff an active longjmp targets one
+    // of this function's setjmp buffers (so a real exception / outer-target longjmp is
+    // not caught here).
+    private void EmitSetjmpFilter()
+    {
+        _stackDepth = 1; if (_stackDepth > _maxStack) _maxStack = _stackDepth;
+        _enc.OpCode(ILOpCode.Pop); Pop();                 // discard the exception object
+        var Lyes = _enc.DefineLabel();
+        var Lend = _enc.DefineLabel();
+        foreach (var (jb, _) in _setjmpSites)
+        {
+            GenExpr(jb);                                  // &jb (decayed pointer)
+            EmitRuntimeCall("__chibil_longjmp_match", RtMatch, nArgs: 1, hasRet: true);
+            _enc.Branch(ILOpCode.Brtrue, Lyes); Pop();
+        }
+        EmitConstI4(0);
+        _enc.Branch(ILOpCode.Br, Lend);
+        _enc.MarkLabel(Lyes);
+        EmitConstI4(1);
+        _enc.MarkLabel(Lend);
+        _enc.OpCode(ILOpCode.Endfilter); Pop();
+    }
+
+    // handler: dispatch the longjmp value into the matching setjmp's result local and
+    // re-enter the try at Lhead (setjmp then re-reads that local, returning the value).
+    private void EmitSetjmpHandler()
+    {
+        _stackDepth = 1; if (_stackDepth > _maxStack) _maxStack = _stackDepth;
+        _enc.OpCode(ILOpCode.Pop); Pop();                 // discard the exception object
+        EmitRuntimeCall("__chibil_longjmp_buf", RtBuf, nArgs: 0, hasRet: true);
+        _enc.StoreLocal(_setjmpBufLocal); Pop();
+        foreach (var (jb, sjval) in _setjmpSites)
+        {
+            var Lnext = _enc.DefineLabel();
+            _enc.LoadLocal(_setjmpBufLocal); Push();
+            GenExpr(jb);
+            _enc.Branch(ILOpCode.Bne_un, Lnext); Pop(2);
+            EmitRuntimeCall("__chibil_longjmp_val", RtVal, nArgs: 0, hasRet: true);
+            _enc.StoreLocal(sjval); Pop();
+            EmitRuntimeCall("__chibil_longjmp_clear", RtClear, nArgs: 0, hasRet: false);
+            _enc.Branch(ILOpCode.Leave, _setjmpLhead);
+            _enc.MarkLabel(Lnext);
+        }
+        _enc.OpCode(ILOpCode.Rethrow);                    // unreachable: the filter matched a site
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2535,17 +2698,24 @@ public class CodeGen
         if (!isIndirect)
         {
             string fn = node.Lhs.Var.Name;
-            if (fn is "setjmp" or "_setjmp" or "__setjmp" or "sigsetjmp" or "__sigsetjmp")
+            if (IsSetjmpName(fn))
             {
-                EmitConstI4(0);   // direct setjmp() returns 0; jmp_buf arg not evaluated
+                // The containing function is wrapped (EmitSetjmpWrappedBody). Record
+                // this site's jmp_buf + a fresh result local; setjmp's value IS that
+                // local — 0 on the direct call (zero-init), the longjmp value on resume
+                // (the wrap's handler stores it then re-enters the try).
+                int sjval = AddFreshScratchLocal(_types.TyInt);
+                _setjmpSites.Add((node.Args, sjval));
+                _enc.LoadLocal(sjval); Push();
                 return;
             }
             if (fn is "longjmp" or "_longjmp" or "siglongjmp")
             {
-                // TODO(MUSL-3): throw a ChibilLongjmp carrying the value, caught at the
-                // setjmp site to resume. For now it aborts (cannot resume).
-                _enc.OpCode(ILOpCode.Ldnull); Push();
-                _enc.OpCode(ILOpCode.Throw); Pop();
+                // __chibil_longjmp(&jb, val): stash the carrier (buf,val,active) and
+                // throw a stock Exception, unwinding to the matching setjmp's filter.
+                GenExpr(node.Args);            // &jb (decayed pointer)
+                GenExpr(node.Args.Next);       // val
+                EmitRuntimeCall("__chibil_longjmp", RtLongjmp, nArgs: 2, hasRet: false);
                 return;
             }
         }
@@ -3162,6 +3332,14 @@ public class CodeGen
                 return;
 
             case NodeKind.Return:
+                if (_setjmpWrap)
+                {
+                    // Inside the setjmp try: `ret` is illegal — funnel the value into
+                    // the retval local and `leave` to the epilogue (which rets).
+                    if (node.Lhs != null) { GenExpr(node.Lhs); _enc.StoreLocal(_setjmpRetvalLocal); Pop(); }
+                    _enc.Branch(ILOpCode.Leave, _setjmpEpiLabel);
+                    return;
+                }
                 if (node.Lhs != null)
                 {
                     GenExpr(node.Lhs);

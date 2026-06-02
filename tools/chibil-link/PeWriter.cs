@@ -190,7 +190,11 @@ public sealed class PeWriter
                 initLocals = slot.Method.InitLocals;
             }
 
-            int offset = AddBody(bodyEncoder, il, maxStack, localSig, initLocals);
+            // Real methods may carry EH clauses (setjmp/longjmp filter regions);
+            // synth/entry never do.
+            int offset = (slot.Method != null)
+                ? AddBody(bodyEncoder, il, maxStack, localSig, initLocals, slot.Method.ExceptionRegions, slot.Obj, merger)
+                : AddBody(bodyEncoder, il, maxStack, localSig, initLocals);
             bodyOffsets[i] = offset;
         }
 
@@ -431,21 +435,51 @@ public sealed class PeWriter
         byte[] il,
         int maxStack,
         StandaloneSignatureHandle localSig,
-        bool initLocals)
+        bool initLocals,
+        System.Collections.Immutable.ImmutableArray<System.Reflection.Metadata.ExceptionRegion> ehRegions = default,
+        ObjectFile of = null,
+        MetadataMerger merger = null)
     {
+        int ehCount = ehRegions.IsDefaultOrEmpty ? 0 : ehRegions.Length;
+
         // attributeInstructions == false: we have no branch/exception fixups to
         // apply; the IL is already final. AddMethodBody reserves the blob and
         // returns its offset + a writable Instructions blob to copy IL into.
         var body = encoder.AddMethodBody(
             codeSize: il.Length,
             maxStack: maxStack,
-            exceptionRegionCount: 0,
-            hasSmallExceptionRegions: true,
+            exceptionRegionCount: ehCount,
+            hasSmallExceptionRegions: false,   // fat format: always valid
             localVariablesSignature: localSig,
             attributes: initLocals ? MethodBodyAttributes.InitLocals : MethodBodyAttributes.None);
 
         var writer = new BlobWriter(body.Instructions);
         writer.WriteBytes(il);
+
+        // Re-emit each EH clause (the linker dropped these before setjmp/longjmp).
+        // Offsets are IL-relative and unchanged by RelocationFixer; a Catch clause's
+        // type token is remapped into the merged image.
+        for (int r = 0; r < ehCount; r++)
+        {
+            var reg = ehRegions[r];
+            switch (reg.Kind)
+            {
+                case System.Reflection.Metadata.ExceptionRegionKind.Filter:
+                    body.ExceptionRegions.AddFilter(reg.TryOffset, reg.TryLength, reg.HandlerOffset, reg.HandlerLength, reg.FilterOffset);
+                    break;
+                case System.Reflection.Metadata.ExceptionRegionKind.Finally:
+                    body.ExceptionRegions.AddFinally(reg.TryOffset, reg.TryLength, reg.HandlerOffset, reg.HandlerLength);
+                    break;
+                case System.Reflection.Metadata.ExceptionRegionKind.Fault:
+                    body.ExceptionRegions.AddFault(reg.TryOffset, reg.TryLength, reg.HandlerOffset, reg.HandlerLength);
+                    break;
+                case System.Reflection.Metadata.ExceptionRegionKind.Catch:
+                    // chibil emits only setjmp/longjmp filters; a typed catch would
+                    // need its CatchType token remapped into the merged image.
+                    throw new LinkException(
+                        $"{of?.Path}: typed catch EH clauses are not supported (only setjmp filters).");
+            }
+        }
         return body.Offset;
     }
 

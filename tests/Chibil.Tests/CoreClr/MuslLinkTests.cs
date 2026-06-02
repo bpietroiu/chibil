@@ -127,6 +127,41 @@ int main(void){
     }
 
     [Fact]
+    public void Runtimeconfig_forces_invariant_globalization()
+    {
+        // A chibil single-file image lacks the culture/resource infrastructure, so
+        // the BCL formatting ANY exception message recurses to a fatal StackOverflow
+        // (SR.GetResourceString -> CultureInfo -> resource grovel -> re-fault -> ...).
+        // The emitted runtimeconfig must disable that path or every benign managed
+        // exception crashes the process. Observed in bash: `echo a; echo b` (a
+        // longjmp-driven NRE during reaping) fatally overflowed until invariant mode
+        // was set. Pin both knobs so neither regresses.
+        Assert.Contains("\"System.Globalization.Invariant\": true", RuntimeConfigText.Json);
+        Assert.Contains("\"System.Resources.UseSystemResourceKeys\": true", RuntimeConfigText.Json);
+    }
+
+    [Fact]
+    public void Setjmp_longjmp_resumes_across_frames()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // setjmp/longjmp lowered to managed exceptions: the setjmp function is wrapped
+        // in `Lhead: .try { body } filter { ours? } handler { resume }`; longjmp throws
+        // via a synthesized __chibil_longjmp helper that stashes (buf,val) and throws.
+        // A cross-frame longjmp unwinds to the matching setjmp's filter, whose handler
+        // resumes execution at the setjmp returning the value. No libc — the carrier +
+        // throw are all managed. Regression for bash's test/[ builtin (test_exit).
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +                       // concrete layout (&jb must decay)
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "jmp_buf jb;\n" +
+            "static void deep(int n){ if (n == 0) longjmp(jb, 42); deep(n - 1); }\n" +
+            "int main(void){ int v = setjmp(jb); if (v) return v; deep(5); return 1; }\n",
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (resumed), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Array_global_decays_to_pointer_when_passed()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
