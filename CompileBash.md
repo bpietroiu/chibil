@@ -112,6 +112,10 @@ build also needs (the yacc parser `y.tab.c`, `syntax.c`, `builtins/*.c` and
 bundled `sbrk` allocator fights the .NET heap — route `malloc`/`free` to host libc)
 and **`HAVE_ARC4RANDOM`** (absent here; bash falls back to `getrandom`).
 
+> The patch is verified to `git apply --check` cleanly against **both** the
+> `bash-5.3` git tag and the release tarball — they share identical source for the
+> six touched files.
+
 ---
 
 ## 5. The chibil build harness
@@ -230,3 +234,33 @@ dotnet bash.dll --norc --noprofile -c \
 | ~4 GB allocation / `xreallocarray` abort | missing `-mlp64` (LP64 data model) |
 | `command not found` for generated builtins | run `make -f Makefile.chibil gen` (needs host `gcc`) |
 | Runs on Windows fail | the image is Linux-only — run under WSL with the Linux `dotnet` |
+| `git apply` rejects the patch | the patch must stay LF — `targets/build/.gitattributes` enforces this; re-clone or `git checkout` the patch if it got CRLF-mangled |
+
+---
+
+## 8. Maintaining the patch (contributors)
+
+The bash port is tracked as a patch + harness in
+[`targets/build/`](targets/build/), **not** as a vendored source tree (see
+[`targets/build/README.md`](targets/build/README.md)). The upstream `bash-5.3/`
+and `musl-1.2.6/` trees are git-ignored.
+
+When you edit one of the six chibil-touched bash files (`jobs.c`, `jobs.h`,
+`execute_cmd.c`, `subst.c`, `variables.c`, `variables.h`), regenerate the patch so
+the change is captured:
+
+```bash
+cd /mnt/d/sandbox/chibil/targets/build
+./regen-patch.sh                 # diffs ../bash-5.3 vs a pristine bash-5.3 -> chibil-bash-5.3.patch
+git add chibil-bash-5.3.patch && git commit -m "bash: <what changed>"
+```
+
+If you change the **build** (flags, source list), edit `Makefile.chibil` /
+`chibil-sources.list` in `targets/build/` and copy them back into your bash tree
+(the build runs from the bash source root). To add a **new** bash source file to
+the patch, extend the `FILES` list in `regen-patch.sh`.
+
+When the port stabilizes into its own project, the natural next step is promoting
+the modified bash to a dedicated fork (`<you>/bash`, branch `chibil`) and
+referencing it as a git submodule — at the cost of a two-step update on every bash
+edit, which is why a patch is preferred during active development.

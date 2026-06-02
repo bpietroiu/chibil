@@ -10,6 +10,7 @@ full walkthrough in [`../../CompileBash.md`](../../CompileBash.md).
 | `Makefile.chibil` | compiles the 223 TUs to IL (`--target=coreclr -nostdinc -mlp64 -DCHIBIL_REEXEC=1`) and links `bash.dll`. Copy into the bash source root. |
 | `chibil-sources.list` | the 223 translation units to compile. Copy into the bash source root. |
 | `config-tweaks.sh` | disables `USING_BASH_MALLOC` / `HAVE_ARC4RANDOM` in the generated `config.h` (run after `./configure`). |
+| `regen-patch.sh` | regenerate `chibil-bash-5.3.patch` after editing the bash sources (diffs `../bash-5.3` against a pristine bash 5.3). |
 
 ## Quick apply
 
