@@ -138,23 +138,27 @@ transparently with re-exec. We intercept the ~5 **semantic callers**, where the
   pipelines *inside* a comsub still crash (the child's pipeline forks via
   make_child → M-fork-3). (4) non-exported vars / functions / options not
   transferred (M-fork-2b).
-- **M-fork-2b (ATTEMPTED, blocked — reverted to 2a):** tried full-state transfer
-  to the comsub child via an augmented environment (`chibil_make_full_env()` in
-  variables.c builds `name=value` for ALL vars incl. non-exported + `BASH_FUNC_…%%`
-  for functions, reusing `make_env_array_from_var_list`). The array builds
-  correctly (verified: valid entries, injected `CHIBIL_MARK=yes` and non-exported
-  `E`/`y` present), but **a `dotnet bash.dll` child spawned via `posix_spawnp` with
-  a CUSTOM envp comes up with an empty environment** — it sees neither the custom
-  vars nor inherited ones (passing the real `environ` works and the child inherits
-  it). Related 2a symptom: `$(printenv HOME)` works (raw environ) yet
-  `$(/bin/echo $HOME)` is empty — the re-exec'd child's env→shell-variable *import*
-  doesn't run. Same root cause: how a chibil/CoreCLR process under `dotnet`
-  obtains/presents its environment vs. what `posix_spawn`'s envp delivers. NEEDS
-  INVESTIGATION; alternative is Option B (`--fork-child <fd>` + serialized
-  `declare -p`/`-f` the child sources, bypassing the environment).
-  `chibil_make_full_env` kept (unused) for when fixed. Combined with the per-comsub
-  CLR cost, the recommended real comsub direction is the **in-process fast path**
-  (③), not deeper re-exec.
+- **M-fork-2b (DONE, in targets/) — full comsub state transfer → bigtest 57/57.**
+  First attempt (env-based, `chibil_make_full_env`) was blocked: a `dotnet bash.dll`
+  child spawned via `posix_spawnp` with a CUSTOM envp comes up with an empty
+  environment (passing the real `environ` works and the child inherits it) — an
+  unresolved chibil/CoreCLR-under-`dotnet` env-delivery quirk. So I switched to a
+  **prepended state dump that bypasses the environment**: `chibil_state_dump()`
+  (variables.c) emits re-executable shell code — every function
+  (`named_function_string`, a static buffer → copy don't free), every non-exported
+  scalar var as `name='<sh_single_quote>'` (exported vars still arrive via the env;
+  readonly/dynamic/array/function skipped), and the positional parameters via
+  `set -- 'a' 'b' …` from `list_rest_of_args()`. `chibil_spawn_comsub` prepends
+  `dump + "\n" + body` as the child's `-c` string. The positional-param transfer is
+  essential: comsub bodies like `$(f $(($1-1)))` reference the enclosing function's
+  `$1`, so without it recursion breaks at depth 2 (`cnt 3` → `L3-BASE` instead of
+  `L3-L2-L1-BASE`). Verified 13/13 incl. non-exported vars, functions, func+var
+  together, and recursion (`fact 5`→120). **bigtest.sh → 57/57, zero failures.**
+  Limits: arrays/assoc vars not transferred, `$0` not set, var attributes
+  (integer/…) not preserved, and the dump (all functions + non-exported vars) is
+  regenerated and prepended per comsub (size/perf cost). `chibil_make_full_env` is
+  now superseded/unused. The per-comsub full-CLR-startup cost remains the main perf
+  concern (in-process fast path ③ or AOT would address it).
 
 ## Feature coverage snapshot (2026-06-02, after M-fork-2a)
 
