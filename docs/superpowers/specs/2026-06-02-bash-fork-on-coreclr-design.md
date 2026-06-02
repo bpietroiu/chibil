@@ -171,10 +171,18 @@ Comprehensive `bash -c` test, **53/57 features pass** (`targets/bash-5.3/bigtest
   here-string `<<<` on an **external** — external+redirect has `redirects != 0` so
   `execute_disk_command` falls through to `make_child` and forks the CLR → crash;
   (3) pipelines `a | b` (M-fork-3).
-- **Refined priority:** **external command + redirection** (`ls > f`, `cat < f`,
-  `cmd 2>&1`, heredocs) is the most valuable next gap — it needs
-  `do_redirections` → `posix_spawn` file_actions in the `execute_disk_command`
-  path (builtins already handle redirs in-process, which is why `echo > f` works).
+- **External + redirection (DONE, in targets/):** `execute_disk_command`'s
+  interception now also handles `redirects != 0` (no-pipes case) by applying the
+  redirections in the PARENT undoably (`do_redirections(redirects,
+  RX_ACTIVE|RX_UNDOABLE)` — saved fds are close-on-exec so the child doesn't leak
+  them), spawning (child inherits the redirected fds), then restoring
+  (`cleanup_redirects`/`dispose_redirects`) — the same way bash runs a builtin
+  under redirection. Reuses `do_redirections`, so heredocs / file opens / fd dups
+  work with no file_actions translation. Verified: `ls > f`, `cat < f`, `>>`,
+  `2>file`, `2>&1`, `>&2`, `>/dev/null`, heredoc `<<EOF` (incl. `$var`),
+  here-string `<<<`. **bigtest.sh → 54/57** (heredoc + here-string fixed, no
+  regressions). Remaining 3 failures: pipelines (×2, M-fork-3) and recursive-
+  function-via-comsub (M-fork-2b).
 - **M-fork-3:** subshells `( )` (deparse) + pipelines (pipe wiring). NOTE
   (investigation): pipeline stages do **not** fork in `execute_disk_command` —
   `execute_simple_command` forks *early* at execute_cmd.c:4550 (`dofork = pipe_in
