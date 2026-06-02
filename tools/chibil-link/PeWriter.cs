@@ -417,17 +417,76 @@ public sealed class PeWriter
         // in ManagedPEBuilder's standard mappedFieldData section, which the builder
         // places and addresses itself — no custom writable .sdata section and no
         // FieldRVA rebase post-pass needed.
+        // Embed a Portable PDB so the assembly is debuggable in VS with no sidecar:
+        // transcode each TU's .chidbg line points to sequence points, placed at the
+        // FINAL MethodDef RIDs via the merger's token map.
+        var debugDir = BuildEmbeddedPdb(merger, _objs, mdBuilder, entryHandle);
+
         var peBuilder = new ManagedPEBuilder(
             peHeader,
             rootBuilder,
             ilBuilder,
             mappedFieldData: mappedFieldData,
             entryPoint: entryHandle,
+            debugDirectoryBuilder: debugDir,
             flags: CorFlags.ILOnly);
 
         var peBlob = new BlobBuilder();
         peBuilder.Serialize(peBlob);
         return peBlob.ToArray();
+    }
+
+    /// <summary>
+    /// Build an embedded Portable PDB from the per-TU <c>.chidbg</c> side-streams.
+    /// Each object's local MethodDef RID is mapped to its final RID; line points
+    /// become sequence points (line-level — chibil has no column info). Returns null
+    /// if no object carried debug info.
+    /// </summary>
+    private static DebugDirectoryBuilder BuildEmbeddedPdb(
+        MetadataMerger merger, IReadOnlyList<ObjectFile> objs,
+        MetadataBuilder mdBuilder, MethodDefinitionHandle entryHandle)
+    {
+        var byRid = new Dictionary<int, PortablePdbWriter.MethodDebug>();
+        foreach (var of in objs)
+        {
+            if (of.Debug == null)
+                continue;
+            foreach (var kv in of.Debug.MethodPoints)
+            {
+                int finalRid = merger.MapToken(of, 0x06000000 | kv.Key) & 0x00FFFFFF;
+                if (finalRid == 0)
+                    continue;
+                var m = new PortablePdbWriter.MethodDebug
+                {
+                    DocumentName = of.Debug.SourceFile,
+                    Hash = of.Debug.SourceHash,
+                };
+                foreach (var (il, line) in kv.Value)
+                    m.SequencePoints.Add(new PortablePdbWriter.SeqPoint
+                    {
+                        IlOffset = il,
+                        StartLine = line, EndLine = line,
+                        StartColumn = 1, EndColumn = 2,   // line-level span (non-empty => not hidden)
+                    });
+                byRid[finalRid] = m;
+            }
+        }
+        if (byRid.Count == 0)
+            return null;
+
+        var rowCounts = mdBuilder.GetRowCounts();
+        int methodCount = rowCounts[(int)TableIndex.MethodDef];
+        int entryRid = entryHandle.IsNil ? 0 : MetadataTokens.GetRowNumber(entryHandle);
+
+        var (pdbBytes, pdbId) = PortablePdbWriter.Build(methodCount, byRid, rowCounts, entryRid);
+
+        var pdbBlob = new BlobBuilder();
+        pdbBlob.WriteBytes(pdbBytes);
+
+        var dir = new DebugDirectoryBuilder();
+        dir.AddCodeViewEntry("chibil.pdb", pdbId, portablePdbVersion: 0x0100);
+        dir.AddEmbeddedPortablePdbEntry(pdbBlob, portablePdbVersion: 0x0100);
+        return dir;
     }
 
     private static int AddBody(
