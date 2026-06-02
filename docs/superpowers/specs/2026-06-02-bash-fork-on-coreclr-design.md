@@ -137,7 +137,44 @@ transparently with re-exec. We intercept the ~5 **semantic callers**, where the
   exports work: HOME/PATH; vars `export`ed during the session do not). (3)
   pipelines *inside* a comsub still crash (the child's pipeline forks via
   make_child → M-fork-3). (4) non-exported vars / functions / options not
-  transferred (M-fork-2b: declare -p/-f over an inherited fd).
+  transferred (M-fork-2b).
+- **M-fork-2b (ATTEMPTED, blocked — reverted to 2a):** tried full-state transfer
+  to the comsub child via an augmented environment (`chibil_make_full_env()` in
+  variables.c builds `name=value` for ALL vars incl. non-exported + `BASH_FUNC_…%%`
+  for functions, reusing `make_env_array_from_var_list`). The array builds
+  correctly (verified: valid entries, injected `CHIBIL_MARK=yes` and non-exported
+  `E`/`y` present), but **a `dotnet bash.dll` child spawned via `posix_spawnp` with
+  a CUSTOM envp comes up with an empty environment** — it sees neither the custom
+  vars nor inherited ones (passing the real `environ` works and the child inherits
+  it). Related 2a symptom: `$(printenv HOME)` works (raw environ) yet
+  `$(/bin/echo $HOME)` is empty — the re-exec'd child's env→shell-variable *import*
+  doesn't run. Same root cause: how a chibil/CoreCLR process under `dotnet`
+  obtains/presents its environment vs. what `posix_spawn`'s envp delivers. NEEDS
+  INVESTIGATION; alternative is Option B (`--fork-child <fd>` + serialized
+  `declare -p`/`-f` the child sources, bypassing the environment).
+  `chibil_make_full_env` kept (unused) for when fixed. Combined with the per-comsub
+  CLR cost, the recommended real comsub direction is the **in-process fast path**
+  (③), not deeper re-exec.
+
+## Feature coverage snapshot (2026-06-02, after M-fork-2a)
+
+Comprehensive `bash -c` test, **53/57 features pass** (`targets/bash-5.3/bigtest.sh`):
+- **Working:** echo/printf, `;`/`&&`/`||`, exit codes, `!`; all parameter expansion
+  (`${x:-}` `${x:+}` `${#x}` `${x:i:j}` `${x/a/b}` `${x//}` `${x%}` `${x#}` `${x^^}`
+  `${!ind}`); all arithmetic (`$(( ))`, `let`, C-style `for ((;;))`, `((i++))`, hex/
+  binary bases); conditionals (`if`/`[ ]`/`[[ ]]`/`=~`/`case`); loops (`for`/`while`/
+  `until`/`break`/`continue`); functions (def/`return`/`local`); arrays
+  (`${a[i]}`/`${a[@]}`/`${#a[@]}`); brace expansion `{a,b}`/`{1..5}`; command sub
+  `$()` incl. nested; external commands + args; `>`/`<` redirection **on builtins**.
+- **Failing (all on known-unimplemented fork paths):** (1) recursive function via
+  comsub — function not transferred to child (M-fork-2b); (2) heredoc `<<EOF` /
+  here-string `<<<` on an **external** — external+redirect has `redirects != 0` so
+  `execute_disk_command` falls through to `make_child` and forks the CLR → crash;
+  (3) pipelines `a | b` (M-fork-3).
+- **Refined priority:** **external command + redirection** (`ls > f`, `cat < f`,
+  `cmd 2>&1`, heredocs) is the most valuable next gap — it needs
+  `do_redirections` → `posix_spawn` file_actions in the `execute_disk_command`
+  path (builtins already handle redirs in-process, which is why `echo > f` works).
 - **M-fork-3:** subshells `( )` (deparse) + pipelines (pipe wiring). NOTE
   (investigation): pipeline stages do **not** fork in `execute_disk_command` —
   `execute_simple_command` forks *early* at execute_cmd.c:4550 (`dofork = pipe_in
