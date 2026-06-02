@@ -116,7 +116,28 @@ transparently with re-exec. We intercept the ~5 **semantic callers**, where the
   file_actions, but real pipelines fork earlier (see M-fork-3 note) so that path
   is not yet exercised. Redirects (`redirects != 0`) still fall through to
   make_child (crashes — deferred).
-- **M-fork-2:** `$(...)` via re-exec (already has text) — unblocks `$(echo nested)`.
+- **M-fork-2a (DONE, in targets/ — untracked):** `$(...)` via re-exec. In jobs.c:
+  `chibil_reexec_prefix()` reconstructs the launcher (`dotnet /abs/bash.dll`) from
+  /proc/self/cmdline (entries up to & incl. the first ending in ".dll"; abspath'd
+  via realpath); `chibil_spawn_comsub(string, fildes, envp, flags)` re-execs
+  `[launcher] --norc --noprofile -c <string>` via **posix_spawnp** (PATH-searches
+  the bare `dotnet`) with stdout dup'd to the comsub pipe (fildes[1]). In subst.c
+  `command_substitute`, the `make_child` is replaced by `chibil_spawn_comsub` (the
+  `if (pid==0)` child bodies go dead — posix_spawn returns parent-only); the
+  existing parent path (`read_comsub`+`wait_for`) is untouched. `remove_quoted_escapes`
+  is applied to the body first (as the forked child did). VERIFIED: `x=$(/bin/echo
+  hi)`→got=hi, nested `$(echo $(echo deep))`→deep, embedded `a$(...)c`→abc, quoted,
+  `$((n+1))`→6, `$(ls ...)`. Shared registration extracted to
+  `chibil_register_spawned()`.
+  LIMITATIONS (follow-ups): (1) **perf/flakiness** — each `$(...)` spawns a full
+  `dotnet bash.dll` (CLR cold start ~1–2s), so comsub-heavy scripts are slow and
+  occasionally time out under load; the design's in-process fast path (③) or AOT
+  is the real fix. (2) **session-exported vars** — `export_env` is built lazily and
+  is often NULL here, so the child falls back to `environ` (startup-inherited
+  exports work: HOME/PATH; vars `export`ed during the session do not). (3)
+  pipelines *inside* a comsub still crash (the child's pipeline forks via
+  make_child → M-fork-3). (4) non-exported vars / functions / options not
+  transferred (M-fork-2b: declare -p/-f over an inherited fd).
 - **M-fork-3:** subshells `( )` (deparse) + pipelines (pipe wiring). NOTE
   (investigation): pipeline stages do **not** fork in `execute_disk_command` —
   `execute_simple_command` forks *early* at execute_cmd.c:4550 (`dofork = pipe_in
