@@ -183,8 +183,26 @@ Comprehensive `bash -c` test, **53/57 features pass** (`targets/bash-5.3/bigtest
   here-string `<<<`. **bigtest.sh → 54/57** (heredoc + here-string fixed, no
   regressions). Remaining 3 failures: pipelines (×2, M-fork-3) and recursive-
   function-via-comsub (M-fork-2b).
-- **M-fork-3:** subshells `( )` (deparse) + pipelines (pipe wiring). NOTE
-  (investigation): pipeline stages do **not** fork in `execute_disk_command` —
+- **M-fork-3 — external pipelines (DONE, in targets/):** `a | b` works for
+  external stages. `execute_simple_command` gained `chibil_stage_is_plain_external`
+  (conservative: literal command word, not assignment/expansion/function/builtin)
+  and at the early-fork decision (execute_cmd.c:4528) suppresses the fork
+  (`dofork = 0`) when a stage would fork *only* for a pipe (not async) and is a
+  plain external — so it flows to `execute_disk_command`, which posix_spawns it
+  with the pipe set up as file actions (no do_piping-in-parent needed).
+  Builtins/functions/uncertain stages keep the CLR-forking path (running a builtin
+  in the parent would bypass the pipe and silently corrupt output — hence the
+  conservative check). Verified 17/17: `echo|cat`, `seq|wc -l`, `echo|tr` (real
+  transform → HELLO), 3-stage `seq|head|tail`, `seq|grep|wc`, **pipelines inside
+  comsub** `n=$(seq 1 5|wc -l)`→5 (the comsub child inherits the same suppression),
+  `for x in $(seq|tac)`. **bigtest.sh → 56/57**, no regressions. Remaining gaps:
+  builtin-first pipeline stages (`echo foo|tr` where echo is the builtin — keeps
+  forking path, would need do_piping-in-parent for builtins), subshells `( )`, and
+  background/job control (M-fork-4). Sole bigtest failure now: recursive function
+  via comsub (M-fork-2b function transfer, blocked).
+- **M-fork-3 (subshells + builtin pipeline stages):** subshells `( )` (deparse) +
+  builtin stages. NOTE (investigation): pipeline stages do **not** fork in
+  `execute_disk_command` —
   `execute_simple_command` forks *early* at execute_cmd.c:4550 (`dofork = pipe_in
   || pipe_out || async`) **before** word expansion, then runs expansion + the
   command in the forked child. So pipelines need parent-side word expansion or
