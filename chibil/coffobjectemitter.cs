@@ -27,22 +27,25 @@ namespace System.Reflection.PortableExecutable
             public readonly CodeViewFileHandle File { get; }
             public readonly int CodeOffset { get; }
             public readonly int LineNumber { get; }
+            public readonly int StartCol { get; }   // 1-based source column, 0 = unknown
+            public readonly int EndCol { get; }
 
-            public LineNumberEntry(CodeViewFileHandle file, int codeOffset, int lineNumber)
-                => (File, CodeOffset, LineNumber) = (file, codeOffset, lineNumber);
+            public LineNumberEntry(CodeViewFileHandle file, int codeOffset, int lineNumber, int startCol, int endCol)
+                => (File, CodeOffset, LineNumber, StartCol, EndCol) = (file, codeOffset, lineNumber, startCol, endCol);
         }
 
-        public void AddLineNumber(CodeViewFileHandle file, int codeOffset, int lineNumber)
+        public void AddLineNumber(CodeViewFileHandle file, int codeOffset, int lineNumber, int startCol = 0, int endCol = 0)
         {
-            _entries.Add(new LineNumberEntry(file, codeOffset, lineNumber));
+            _entries.Add(new LineNumberEntry(file, codeOffset, lineNumber, startCol, endCol));
         }
 
-        /// <summary>(fileIndex, IL offset, line) for each marked point — used to build
-        /// the .chibildbg side-stream that becomes the Portable PDB sequence points.</summary>
-        public IEnumerable<(int FileIndex, int Offset, int Line)> Entries()
+        /// <summary>(fileIndex, IL offset, line, startColumn, endColumn) for each marked
+        /// point — used to build the .chidbg side-stream that becomes the Portable PDB
+        /// sequence points. Columns are 1-based (0 = unknown).</summary>
+        public IEnumerable<(int FileIndex, int Offset, int Line, int StartCol, int EndCol)> Entries()
         {
             foreach (var e in _entries)
-                yield return (e.File._index, e.CodeOffset, e.LineNumber);
+                yield return (e.File._index, e.CodeOffset, e.LineNumber, e.StartCol, e.EndCol);
         }
 
         public void Reset()
@@ -1544,9 +1547,9 @@ namespace System.Reflection.PortableExecutable
             GetBranchBuilder().MarkLabel(Offset, label);
         }
 
-        public void MarkLineNumber(CodeViewFileHandle fileId, int lineNumber)
+        public void MarkLineNumber(CodeViewFileHandle fileId, int lineNumber, int startCol = 0, int endCol = 0)
         {
-            GetLineNumberBuilder().AddLineNumber(fileId, CodeBuilder.Count, lineNumber);
+            GetLineNumberBuilder().AddLineNumber(fileId, CodeBuilder.Count, lineNumber, startCol, endCol);
         }
         private RelocatableControlFlowBuilder GetBranchBuilder()
         {

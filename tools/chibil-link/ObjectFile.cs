@@ -49,7 +49,7 @@ public sealed unsafe class ObjectFile
     public sealed class MethodDbg
     {
         public int IlSize;
-        public List<(int Il, int Line)> Points = new();
+        public List<(int Il, int Line, int StartCol, int EndCol)> Points = new();
         public List<(int Slot, string Name)> Locals = new();
     }
 
@@ -145,15 +145,15 @@ public sealed unsafe class ObjectFile
     }
 
     // Parse the .chidbg side-stream emitted by chibil (see CodeGen.BuildChibilDebugBlob):
-    // magic 'CDBG', version 2, source path + SHA-256, then per-method (RID, IL size,
-    // line points, named locals).
+    // magic 'CDBG', version 3, source path + SHA-256, then per-method (RID, IL size,
+    // line points with columns, named locals).
     private static ChibilDebug ParseChibilDebug(byte[] data)
     {
         using var br = new System.IO.BinaryReader(new System.IO.MemoryStream(data));
         if (br.ReadByte() != 'C' || br.ReadByte() != 'D' || br.ReadByte() != 'B' || br.ReadByte() != 'G')
             return null;
         int version = br.ReadByte();
-        if (version != 2)
+        if (version != 3)
             return null;
 
         var dbg = new ChibilDebug();
@@ -173,7 +173,9 @@ public sealed unsafe class ObjectFile
             {
                 int il = br.ReadInt32();
                 int line = br.ReadInt32();
-                info.Points.Add((il, line));
+                int sc = br.ReadInt32();
+                int ec = br.ReadInt32();
+                info.Points.Add((il, line, sc, ec));
             }
 
             int locCount = br.ReadInt32();

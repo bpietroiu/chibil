@@ -472,12 +472,16 @@ public sealed class PeWriter
                     Hash = of.Debug.SourceHash,
                     IlSize = info.IlSize,
                 };
-                foreach (var (il, line) in info.Points)
+                foreach (var (il, line, sc, ec) in info.Points)
                     m.SequencePoints.Add(new PortablePdbWriter.SeqPoint
                     {
                         IlOffset = il,
                         StartLine = line, EndLine = line,
-                        StartColumn = 1, EndColumn = 2,   // line-level span (non-empty => not hidden)
+                        // Real source columns from chibil (1-based). Fall back to a
+                        // line-level 1..2 span when unknown so the point stays
+                        // non-empty (an empty span would mark it hidden).
+                        StartColumn = sc > 0 ? sc : 1,
+                        EndColumn = ec > sc ? ec : (sc > 0 ? sc + 1 : 2),
                     });
                 foreach (var (slot, name) in info.Locals)
                     m.Locals.Add(new PortablePdbWriter.LocalVar { Slot = slot, Name = name });

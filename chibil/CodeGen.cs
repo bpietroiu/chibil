@@ -33,7 +33,7 @@ public class CodeGen
     // document per TU suffices.
     private string _dbgSourceFile;
     private byte[] _dbgSourceHash;
-    private readonly List<(int Rid, int IlSize, List<(int Il, int Line)> Pts, List<(int Slot, string Name)> Locals)> _dbgMethods = new();
+    private readonly List<(int Rid, int IlSize, List<(int Il, int Line, int StartCol, int EndCol)> Pts, List<(int Slot, string Name)> Locals)> _dbgMethods = new();
 
     private BlobBuilder _ilStreamBuilder, _ilRelocBuilder;
     private BlobBuilder _dataStream, _dataRelocs;
@@ -1613,9 +1613,9 @@ public class CodeGen
 
         // Collect line points + named locals for the managed-PDB side-stream
         // (chibil-link dedupes/sorts and builds the Portable PDB).
-        var pts = new List<(int Il, int Line)>();
-        foreach (var (_, off, line) in _enc.LineNumberBuilder.Entries())
-            pts.Add((off, line));
+        var pts = new List<(int Il, int Line, int StartCol, int EndCol)>();
+        foreach (var (_, off, line, sc, ec) in _enc.LineNumberBuilder.Entries())
+            pts.Add((off, line, sc, ec));
         var dbgLocals = new List<(int Slot, string Name)>();
         foreach (var s in localSlotList)
             dbgLocals.Add((s.Slot, s.Name));
@@ -2197,11 +2197,27 @@ public class CodeGen
     //  Expression code generation (GenExpr)
     // ═══════════════════════════════════════════════════════════════
 
+    // 1-based (startColumn, endColumn) of a token within its source line, derived
+    // from the byte offset back to the previous newline. Gives Portable PDB sequence
+    // points sub-line precision so the three clauses of for(init; cond; incr) — all on
+    // one line but at different columns — are distinguishable in the debugger.
+    private static (int Start, int End) ColumnSpan(Token t)
+    {
+        if (t?.Buf == null) return (0, 0);
+        int i = t.Loc, col = 1;
+        while (i > 0 && i <= t.Buf.Length && t.Buf[i - 1] != (byte)'\n') { i--; col++; }
+        int len = t.Len > 0 ? t.Len : 1;
+        return (col, col + len);
+    }
+
     private void GenExpr(Node node)
     {
         // Mark line number for debug info
         if (node.Tok?.File != null)
-            _enc.MarkLineNumber(_cvFile, node.Tok.LineNo);
+        {
+            var (sc, ec) = ColumnSpan(node.Tok);
+            _enc.MarkLineNumber(_cvFile, node.Tok.LineNo, sc, ec);
+        }
 
         switch (node.Kind)
         {
@@ -3204,7 +3220,10 @@ public class CodeGen
     private void GenStmt(Node node)
     {
         if (node.Tok?.File != null)
-            _enc.MarkLineNumber(_cvFile, node.Tok.LineNo);
+        {
+            var (sc, ec) = ColumnSpan(node.Tok);
+            _enc.MarkLineNumber(_cvFile, node.Tok.LineNo, sc, ec);
+        }
 
         switch (node.Kind)
         {
@@ -3847,9 +3866,10 @@ public class CodeGen
         return output.ToArray();
     }
 
-    // Serialize the .chibildbg side-stream: magic 'CDBG', version 2, the primary
-    // source file + SHA-256, then per-method (RID, IL size, [(IL offset, line)],
-    // [(local slot, name)]). chibil-link transcodes this to the Portable PDB.
+    // Serialize the .chidbg side-stream: magic 'CDBG', version 3, the primary
+    // source file + SHA-256, then per-method (RID, IL size,
+    // [(IL offset, line, startCol, endCol)], [(local slot, name)]). chibil-link
+    // transcodes this to the Portable PDB.
     private BlobBuilder BuildChibilDebugBlob()
     {
         if (_dbgMethods.Count == 0 || _dbgSourceFile == null)
@@ -3857,7 +3877,7 @@ public class CodeGen
 
         var b = new BlobBuilder();
         b.WriteByte((byte)'C'); b.WriteByte((byte)'D'); b.WriteByte((byte)'B'); b.WriteByte((byte)'G');
-        b.WriteByte(2);                                         // version
+        b.WriteByte(3);                                         // version
 
         byte[] path = System.Text.Encoding.UTF8.GetBytes(_dbgSourceFile);
         b.WriteUInt16((ushort)path.Length); b.WriteBytes(path);
@@ -3870,10 +3890,12 @@ public class CodeGen
             b.WriteInt32(rid);
             b.WriteInt32(ilSize);
             b.WriteInt32(pts.Count);
-            foreach (var (il, line) in pts)
+            foreach (var (il, line, sc, ec) in pts)
             {
                 b.WriteInt32(il);
                 b.WriteInt32(line);
+                b.WriteInt32(sc);
+                b.WriteInt32(ec);
             }
             b.WriteInt32(locals.Count);
             foreach (var (slot, name) in locals)
