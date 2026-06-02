@@ -21,6 +21,10 @@ public sealed class ObjMethod
     public bool InitLocals;
     public StandaloneSignatureHandle LocalSig;
     public MethodDefinitionHandle Handle;
+    // Exception-handling clauses (setjmp/longjmp filter regions). IL-relative
+    // offsets — preserved verbatim because RelocationFixer only rewrites operand
+    // tokens, never resizing the IL. Catch clauses carry a type token to remap.
+    public System.Collections.Immutable.ImmutableArray<System.Reflection.Metadata.ExceptionRegion> ExceptionRegions;
 }
 
 public sealed unsafe class ObjectFile
@@ -111,6 +115,7 @@ public sealed unsafe class ObjectFile
                 InitLocals = body.LocalVariablesInitialized,
                 LocalSig = body.LocalSignature,
                 Handle = mh,
+                ExceptionRegions = body.ExceptionRegions,
             });
         }
         return of;

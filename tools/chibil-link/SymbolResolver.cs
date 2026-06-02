@@ -85,6 +85,13 @@ public static class SymbolResolver
                     continue;
                 }
 
+                // setjmp/longjmp runtime helpers (synthesized in MergeAndPredict).
+                if (name.StartsWith("__chibil_longjmp", StringComparison.Ordinal))
+                {
+                    int htok = merger.ResolveSetjmpHelper(name);
+                    if (htok != 0) { map.RecordExternal(originalToken, htok); continue; }
+                }
+
                 if (table.DefinedMethodToken.TryGetValue(name, out int definedToken))
                 {
                     // Cross-TU call to a chibil-defined Layer-1 variadic: the call site
