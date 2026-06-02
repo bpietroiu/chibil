@@ -32,7 +32,8 @@ namespace ChibilLink;
 public static class SymbolResolver
 {
     public static void Resolve(MetadataMerger merger, IReadOnlyList<ObjectFile> objs,
-        List<string> libs, IReadOnlyDictionary<string, string> pinvokeMap)
+        List<string> libs, IReadOnlyDictionary<string, string> pinvokeMap,
+        IReadOnlyList<string> libSearchPaths = null)
     {
         var table = new LinkSymbolTable();
         foreach (var of in objs)
@@ -59,7 +60,7 @@ public static class SymbolResolver
         // export table) so each symbol binds to the library that actually exports
         // it — e.g. tgetent → libtinfo.so.6, printf → libc.so.6 — rather than
         // every symbol going to the first -l. Built once; caches load + lookups.
-        var probe = new LibraryProbe();
+        var probe = new LibraryProbe(libSearchPaths);
 
         // Synthesized Layer-1-variadic adapters, deduped by (name, call-site sig). A
         // cross-TU call to a chibil-defined variadic (e.g. builtin_error) arrives as a
@@ -212,6 +213,10 @@ internal sealed class LibraryProbe
 {
     private readonly Dictionary<string, IntPtr> _handles = new();      // mapped lib name -> handle (Zero = unloadable)
     private readonly Dictionary<(string, string), bool> _exports = new();
+    private readonly IReadOnlyList<string> _searchPaths;              // -L dirs, tried before default loader paths
+
+    public LibraryProbe(IReadOnlyList<string> searchPaths = null)
+        => _searchPaths = searchPaths ?? Array.Empty<string>();
 
     /// <summary>The mapped name of the first lib in <paramref name="libs"/> that
     /// exports <paramref name="symbol"/>, or null if none (or none loadable).</summary>
@@ -241,14 +246,17 @@ internal sealed class LibraryProbe
     {
         if (_handles.TryGetValue(mappedLib, out var h))
             return h;
-        try
+        h = IntPtr.Zero;
+        // -L search dirs first, then the bare name via the default loader paths.
+        foreach (var dir in _searchPaths)
         {
-            if (!NativeLibrary.TryLoad(mappedLib, out h))
-                h = IntPtr.Zero;
+            try { if (NativeLibrary.TryLoad(System.IO.Path.Combine(dir, mappedLib), out h)) break; }
+            catch { h = IntPtr.Zero; }
         }
-        catch
+        if (h == IntPtr.Zero)
         {
-            h = IntPtr.Zero;   // bad name / unsupported — treat as no exports
+            try { if (!NativeLibrary.TryLoad(mappedLib, out h)) h = IntPtr.Zero; }
+            catch { h = IntPtr.Zero; }   // bad name / unsupported — treat as no exports
         }
         _handles[mappedLib] = h;
         return h;

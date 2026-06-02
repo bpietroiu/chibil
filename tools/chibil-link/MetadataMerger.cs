@@ -112,9 +112,9 @@ public sealed class MetadataMerger
     /// Shared by the method-prediction loop (which builds <see cref="ExportedMethods"/>)
     /// and <see cref="ReserveExportOpaqueTypeDefs"/> (which runs BEFORE that loop, so it
     /// cannot consume the list) to keep the filter from drifting between the two.</summary>
-    private static bool IsExportForwarder(ObjectFile of, ObjMethod m)
+    private bool IsExportForwarder(ObjectFile of, ObjMethod m)
     {
-        if (m.Name == "main") return false;
+        if (m.Name == _entrySymbol) return false;   // the executable entry isn't an export
         var mdef = of.Md.GetMethodDefinition(m.Handle);
         return (mdef.Attributes & UnmanagedExportFlag) != 0;
     }
@@ -193,13 +193,15 @@ public sealed class MetadataMerger
     private readonly HashSet<int> _exportOpaqueTypeRows = new();
 
     private readonly IReadOnlyList<string> _libs;
+    private readonly string _entrySymbol;
 
     public MetadataMerger(IReadOnlyList<ObjectFile> objs, string exportClass = null,
-        IReadOnlyList<string> libs = null)
+        IReadOnlyList<string> libs = null, string entrySymbol = "main")
     {
         _objs = objs;
         _exportClass = exportClass;
         _libs = libs;
+        _entrySymbol = string.IsNullOrEmpty(entrySymbol) ? "main" : entrySymbol;
     }
 
     /// <summary>A synthesized native DATA import: storage allocated for an unresolved

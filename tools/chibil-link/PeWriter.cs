@@ -15,11 +15,14 @@ namespace ChibilLink;
 public static class LinkPipeline
 {
     public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs,
-        string exportClass = null, Dictionary<string, string> pinvokeMap = null, bool debuggable = false)
+        string exportClass = null, Dictionary<string, string> pinvokeMap = null, bool debuggable = false,
+        bool shared = false, string assemblyName = "a", string entrySymbol = "main",
+        List<string> libSearchPaths = null)
     {
         if (objs == null || objs.Count == 0)
             throw new LinkException("no input objects.");
-        return new PeWriter(objs, libs ?? new List<string>(), exportClass, pinvokeMap, debuggable).Write();
+        return new PeWriter(objs, libs ?? new List<string>(), exportClass, pinvokeMap, debuggable,
+            shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>()).Write();
     }
 }
 
@@ -42,16 +45,26 @@ public sealed class PeWriter
     private readonly string _exportClass;
     private readonly Dictionary<string, string> _pinvokeMap;
     private readonly bool _debuggable;   // -g: emit DebuggableAttribute (JIT optimizer disabled)
+    private readonly bool _shared;       // -shared: library with no entry point (no 'main' needed)
+    private readonly string _assemblyName;   // assembly identity (from -o base name)
+    private readonly string _entrySymbol;    // C entry symbol for an executable (-e, default 'main')
+    private readonly List<string> _libSearchPaths;   // -L native-library probe dirs
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
     public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null,
-        Dictionary<string, string> pinvokeMap = null, bool debuggable = false)
+        Dictionary<string, string> pinvokeMap = null, bool debuggable = false,
+        bool shared = false, string assemblyName = "a", string entrySymbol = "main",
+        List<string> libSearchPaths = null)
     {
         _objs = objs;
         _libs = libs;
         _exportClass = ValidateExportClass(exportClass);
         _pinvokeMap = pinvokeMap ?? new Dictionary<string, string>();
         _debuggable = debuggable;
+        _shared = shared;
+        _assemblyName = string.IsNullOrEmpty(assemblyName) ? "a" : assemblyName;
+        _entrySymbol = string.IsNullOrEmpty(entrySymbol) ? "main" : entrySymbol;
+        _libSearchPaths = libSearchPaths ?? new List<string>();
     }
 
     private static string ValidateExportClass(string name)
@@ -66,14 +79,14 @@ public sealed class PeWriter
 
     public byte[] Write()
     {
-        var merger = new MetadataMerger(_objs, _exportClass, _libs);
+        var merger = new MetadataMerger(_objs, _exportClass, _libs, _entrySymbol);
         merger.MergeAndPredict();
 
         // Resolve cross-object references and synthesize native P/Invoke stubs.
         // Runs after defined-method prediction (so the export table is complete)
         // and before the entry row, reserving any P/Invoke MethodDef rows in the
         // plan so the row-prediction assertions below still hold.
-        SymbolResolver.Resolve(merger, _objs, _libs, _pinvokeMap);
+        SymbolResolver.Resolve(merger, _objs, _libs, _pinvokeMap, _libSearchPaths);
 
         // Collect FieldRVA pointer relocations (function/data pointers baked into
         // initialized globals) and, if any exist, synthesize a <Module> .cctor
@@ -123,12 +136,17 @@ public sealed class PeWriter
             merger.ReserveSynthRow(cctorSynth);
         }
 
-        // Reserve the entry method's row (last in the plan) so its token is known.
-        var (_, entryHandle) = merger.ReserveEntryRow();
-
-        // Synthesize the entry IL (main's final token already baked). The entry
-        // signature uses ELEMENT_TYPE_STRING/SZARRAY primitives — no TypeRef.
-        var entry = EntrySynthesizer.Synthesize(merger);
+        // Reserve the entry method's row (last in the plan) so its token is known,
+        // and synthesize the entry IL (entry symbol's final token already baked).
+        // A -shared library has NO entry point — skip both; the resulting PE is a
+        // DLL the CLR never invokes directly (referenced from C#, run via a host).
+        MethodDefinitionHandle entryHandle = default;
+        EntrySynthesizer.Result entry = null;
+        if (!_shared)
+        {
+            (_, entryHandle) = merger.ReserveEntryRow();
+            entry = EntrySynthesizer.Synthesize(merger, _entrySymbol);
+        }
 
         // Reserve forwarder rows AFTER the entry so they form the contiguous tail
         // owned by the export class. Built here (post-prediction) because each
@@ -395,14 +413,16 @@ public sealed class PeWriter
         }
 
         // ── Step 5b: Assembly + Module rows ───────────────────────────────────
+        // Identity follows the output base name (like `gcc -o foo`), so a C#
+        // <Reference> resolves to the right assembly at runtime.
         mdBuilder.AddModule(
             0,
-            mdBuilder.GetOrAddString("a.dll"),
+            mdBuilder.GetOrAddString(_assemblyName + ".dll"),
             mdBuilder.GetOrAddGuid(Guid.NewGuid()),
             default, default);
 
         var asmHandle = mdBuilder.AddAssembly(
-            mdBuilder.GetOrAddString("a"),
+            mdBuilder.GetOrAddString(_assemblyName),
             new Version(0, 0, 0, 0),
             default,
             default,
@@ -419,7 +439,13 @@ public sealed class PeWriter
         // ── Step 5c: serialize a pure-MSIL executable PE ──────────────────────
         var rootBuilder = new MetadataRootBuilder(mdBuilder);
 
-        var peHeader = PEHeaderBuilder.CreateExecutableHeader();
+        // A -shared library gets the DLL characteristic and no entry point; an
+        // executable gets the standard executable header (and a CLR entry below).
+        var peHeader = _shared
+            ? new PEHeaderBuilder(imageCharacteristics:
+                System.Reflection.PortableExecutable.Characteristics.ExecutableImage |
+                System.Reflection.PortableExecutable.Characteristics.Dll)
+            : PEHeaderBuilder.CreateExecutableHeader();
 
         // All FieldRVA data is read-only now (string literals + `$init` cpblk
         // sources; mutable C globals are plain CLR static fields), so it can ride

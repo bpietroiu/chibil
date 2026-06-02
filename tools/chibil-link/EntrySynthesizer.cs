@@ -29,15 +29,15 @@ public static class EntrySynthesizer
     /// The returned IL has main's FINAL token written in; the caller reserves the
     /// entry's own MethodDef row separately.
     /// </summary>
-    public static Result Synthesize(MetadataMerger merger)
+    public static Result Synthesize(MetadataMerger merger, string entrySymbol = "main")
     {
-        // Find main.
+        // Find the entry function (default `main`).
         ObjectFile mainObj = null;
         ObjMethod mainMethod = null;
         foreach (var slot in merger.Plan)
         {
             if (slot.Method == null) continue; // entry placeholder
-            if (slot.Method.Name == "main")
+            if (slot.Method.Name == entrySymbol)
             {
                 mainObj = slot.Obj;
                 mainMethod = slot.Method;
@@ -45,7 +45,7 @@ public static class EntrySynthesizer
             }
         }
         if (mainMethod == null)
-            throw new LinkException("no 'main' function found in input objects.");
+            throw new LinkException($"no '{entrySymbol}' function found in input objects.");
 
         int mainFinalToken = merger.MapToken(mainObj, mainMethod.OriginalToken);
 
