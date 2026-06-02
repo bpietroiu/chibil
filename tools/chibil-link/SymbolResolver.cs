@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using System.Runtime.InteropServices;
 using Asm2Obj;
 
 namespace ChibilLink;
@@ -53,6 +54,12 @@ public static class SymbolResolver
         // (the rewrite is a deterministic per-object token remap), so identical
         // (name, sig) reuse one stub while distinct signatures fork.
         var pinvokeByNameSig = new Dictionary<(string Name, string Sig), int>();
+
+        // Probes the -l libraries (like a real linker scanning each library's
+        // export table) so each symbol binds to the library that actually exports
+        // it — e.g. tgetent → libtinfo.so.6, printf → libc.so.6 — rather than
+        // every symbol going to the first -l. Built once; caches load + lookups.
+        var probe = new LibraryProbe();
 
         // Synthesized Layer-1-variadic adapters, deduped by (name, call-site sig). A
         // cross-TU call to a chibil-defined variadic (e.g. builtin_error) arrives as a
@@ -123,7 +130,7 @@ public static class SymbolResolver
                 if (!pinvokeByNameSig.TryGetValue(key, out int pinvokeToken))
                 {
                     var sigReader = md.GetBlobReader(mr.Signature);
-                    pinvokeToken = SynthesizePInvoke(merger, of, name, sigReader, libs, pinvokeMap);
+                    pinvokeToken = SynthesizePInvoke(merger, of, name, sigReader, libs, pinvokeMap, probe);
                     pinvokeByNameSig[key] = pinvokeToken;
                 }
                 map.RecordExternal(originalToken, pinvokeToken);
@@ -133,20 +140,31 @@ public static class SymbolResolver
 
     private static int SynthesizePInvoke(
         MetadataMerger merger, ObjectFile of, string name, BlobReader signatureBlobReader,
-        List<string> libs, IReadOnlyDictionary<string, string> pinvokeMap)
+        List<string> libs, IReadOnlyDictionary<string, string> pinvokeMap, LibraryProbe probe)
     {
         string lib;
         if (pinvokeMap.TryGetValue(name, out string libTok))
         {
-            lib = MapLib(libTok);                    // explicit per-symbol routing
+            lib = MapLib(libTok);                    // explicit per-symbol routing (override)
         }
-        else if (libs.Count > 0)
+        else if (libs.Count == 1)
         {
-            lib = MapLib(libs[0]);
-            if (libs.Count > 1)
+            lib = MapLib(libs[0]);                   // only one choice — no probing needed
+        }
+        else if (libs.Count > 1)
+        {
+            // Like ld: bind to the -l library that actually EXPORTS the symbol.
+            // Fall back to the first -l if none can be probed (e.g. the libraries
+            // aren't loadable on this host) — a genuinely missing symbol then
+            // surfaces as a runtime EntryPointNotFound, as it did before.
+            lib = probe.FindExporting(libs, name);
+            if (lib == null)
+            {
+                lib = MapLib(libs[0]);
                 Console.Error.WriteLine(
-                    $"chibil-link: warning: '{name}' bound to '{lib}' (first -l library); " +
-                    $"add it to --pinvoke for explicit routing.");
+                    $"chibil-link: warning: '{name}' not found in any -l library; " +
+                    $"bound to '{lib}' (may fail at runtime). Use --pinvoke to override.");
+            }
         }
         else
         {
@@ -176,7 +194,63 @@ public static class SymbolResolver
     {
         "c" => "libc.so.6",
         "m" => "libm.so.6",
+        "tinfo" => "libtinfo.so.6",   // termcap/terminfo (ncurses): tgetent, tputs, …
         "kernel32" => "kernel32.dll",
         _ => l.Contains('.') ? l : $"lib{l}.so",   // e.g. "msvcrt.dll" -> used as-is
     };
+}
+
+/// <summary>
+/// Determines which <c>-l</c> library exports a given symbol, the way a real
+/// linker scans each library's export table. Loads each library once (via the
+/// OS loader, like <c>dlopen</c>) and probes it with <c>dlsym</c>-equivalent
+/// <see cref="NativeLibrary.TryGetExport"/>. Results are cached. If a library
+/// cannot be loaded on this host (e.g. a Linux .so while linking on Windows for
+/// tests), it simply contributes no exports and the caller falls back.
+/// </summary>
+internal sealed class LibraryProbe
+{
+    private readonly Dictionary<string, IntPtr> _handles = new();      // mapped lib name -> handle (Zero = unloadable)
+    private readonly Dictionary<(string, string), bool> _exports = new();
+
+    /// <summary>The mapped name of the first lib in <paramref name="libs"/> that
+    /// exports <paramref name="symbol"/>, or null if none (or none loadable).</summary>
+    public string FindExporting(List<string> libs, string symbol)
+    {
+        foreach (var l in libs)
+        {
+            string mapped = SymbolResolver.MapLib(l);
+            if (Exports(mapped, symbol))
+                return mapped;
+        }
+        return null;
+    }
+
+    private bool Exports(string mappedLib, string symbol)
+    {
+        var key = (mappedLib, symbol);
+        if (_exports.TryGetValue(key, out bool cached))
+            return cached;
+        IntPtr h = HandleFor(mappedLib);
+        bool ok = h != IntPtr.Zero && NativeLibrary.TryGetExport(h, symbol, out _);
+        _exports[key] = ok;
+        return ok;
+    }
+
+    private IntPtr HandleFor(string mappedLib)
+    {
+        if (_handles.TryGetValue(mappedLib, out var h))
+            return h;
+        try
+        {
+            if (!NativeLibrary.TryLoad(mappedLib, out h))
+                h = IntPtr.Zero;
+        }
+        catch
+        {
+            h = IntPtr.Zero;   // bad name / unsupported — treat as no exports
+        }
+        _handles[mappedLib] = h;
+        return h;
+    }
 }
