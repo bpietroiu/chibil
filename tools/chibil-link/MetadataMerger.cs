@@ -233,6 +233,32 @@ public sealed class MetadataMerger
     /// <summary>TypeRef to System.Object in the core library, for the export class's base.</summary>
     public EntityHandle GetOrAddCoreObjectRef() => GetOrAddCoreTypeRef("System", "Object");
 
+    /// <summary>Emit <c>[assembly: Debuggable(isJITTrackingEnabled: true,
+    /// isJITOptimizerDisabled: true)]</c>. Disabling the JIT optimizer is what lets
+    /// the embedded PDB's sequence points bind as breakpoints and keeps locals alive
+    /// for the Locals/Autos window; without it VS and netcoredbg report "no
+    /// executable code of the debugger's target code type is associated with this
+    /// line." Gated by chibil-link's <c>-g</c>.</summary>
+    public void AddDebuggableAttribute(AssemblyDefinitionHandle asm)
+    {
+        var dbgType = GetOrAddCoreTypeRef("System.Diagnostics", "DebuggableAttribute");
+        var sig = new BlobBuilder();
+        new BlobEncoder(sig)
+            .MethodSignature(SignatureCallingConvention.Default, 0, isInstanceMethod: true)
+            .Parameters(2, ret => ret.Void(),
+                p => { p.AddParameter().Type().Boolean(); p.AddParameter().Type().Boolean(); });
+        var ctor = Builder.AddMemberReference(dbgType, Builder.GetOrAddString(".ctor"), Builder.GetOrAddBlob(sig));
+
+        // CustomAttribute value blob: prolog 0x0001, two fixed bool args (both true),
+        // then 0 named arguments.
+        var ca = new BlobBuilder();
+        ca.WriteUInt16(0x0001);
+        ca.WriteByte(1);   // isJITTrackingEnabled = true
+        ca.WriteByte(1);   // isJITOptimizerDisabled = true
+        ca.WriteUInt16(0); // named-argument count
+        Builder.AddCustomAttribute(asm, ctor, Builder.GetOrAddBlob(ca));
+    }
+
     /// <summary>TypeRef to System.ValueType in the core library, for the base type
     /// of a synthesized opaque-handle value-type TypeDef.</summary>
     private EntityHandle GetOrAddCoreValueTypeRef() => GetOrAddCoreTypeRef("System", "ValueType");

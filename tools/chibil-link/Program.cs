@@ -30,6 +30,7 @@ public sealed class LinkOptions
     public string Output = "a.dll";
     public string ExportClass = null;   // --export-class=<Namespace.Name>; null = no export type
     public Dictionary<string, string> PinvokeMap = new();   // symbol -> library token
+    public bool Debug = false;          // -g: mark the assembly debuggable (JIT optimizer disabled)
 
     public static LinkOptions Parse(string[] args)
     {
@@ -38,6 +39,7 @@ public sealed class LinkOptions
         {
             string a = args[i];
             if (a == "-o") { o.Output = args[++i]; continue; }
+            if (a == "-g") { o.Debug = true; continue; }
             if (a.StartsWith("-l")) { o.Libraries.Add(a[2..]); continue; }
             if (a.StartsWith("--export-class=")) { o.ExportClass = a["--export-class=".Length..]; continue; }
             if (a.StartsWith("--pinvoke="))
@@ -76,7 +78,7 @@ public static class Linker
             objs.Add(ObjectFile.Load(bytes, path));
         }
 
-        byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries, opts.ExportClass, opts.PinvokeMap);
+        byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries, opts.ExportClass, opts.PinvokeMap, opts.Debug);
         File.WriteAllBytes(opts.Output, pe);
 
         WriteRuntimeConfig(opts.Output);

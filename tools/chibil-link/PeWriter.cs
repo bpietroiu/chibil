@@ -15,11 +15,11 @@ namespace ChibilLink;
 public static class LinkPipeline
 {
     public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs,
-        string exportClass = null, Dictionary<string, string> pinvokeMap = null)
+        string exportClass = null, Dictionary<string, string> pinvokeMap = null, bool debuggable = false)
     {
         if (objs == null || objs.Count == 0)
             throw new LinkException("no input objects.");
-        return new PeWriter(objs, libs ?? new List<string>(), exportClass, pinvokeMap).Write();
+        return new PeWriter(objs, libs ?? new List<string>(), exportClass, pinvokeMap, debuggable).Write();
     }
 }
 
@@ -41,15 +41,17 @@ public sealed class PeWriter
     private readonly List<string> _libs;
     private readonly string _exportClass;
     private readonly Dictionary<string, string> _pinvokeMap;
+    private readonly bool _debuggable;   // -g: emit DebuggableAttribute (JIT optimizer disabled)
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
     public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null,
-        Dictionary<string, string> pinvokeMap = null)
+        Dictionary<string, string> pinvokeMap = null, bool debuggable = false)
     {
         _objs = objs;
         _libs = libs;
         _exportClass = ValidateExportClass(exportClass);
         _pinvokeMap = pinvokeMap ?? new Dictionary<string, string>();
+        _debuggable = debuggable;
     }
 
     private static string ValidateExportClass(string name)
@@ -399,13 +401,20 @@ public sealed class PeWriter
             mdBuilder.GetOrAddGuid(Guid.NewGuid()),
             default, default);
 
-        mdBuilder.AddAssembly(
+        var asmHandle = mdBuilder.AddAssembly(
             mdBuilder.GetOrAddString("a"),
             new Version(0, 0, 0, 0),
             default,
             default,
             0,
             AssemblyHashAlgorithm.Sha1);
+
+        // -g: mark the assembly debuggable so the JIT leaves optimizations off and the
+        // embedded PDB's sequence points actually bind as breakpoints. Without this
+        // the JIT inlines/optimizes and VS reports "no executable code of the
+        // debugger's target code type is associated with this line."
+        if (_debuggable)
+            merger.AddDebuggableAttribute(asmHandle);
 
         // ── Step 5c: serialize a pure-MSIL executable PE ──────────────────────
         var rootBuilder = new MetadataRootBuilder(mdBuilder);
