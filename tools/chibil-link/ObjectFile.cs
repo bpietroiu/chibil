@@ -36,13 +36,21 @@ public sealed unsafe class ObjectFile
     public List<ObjMethod> Methods = new();
     public ChibilDebug Debug;       // managed-PDB side-stream (.chidbg), or null
 
-    /// <summary>Parsed .chidbg: the TU's source file + per-method line points,
-    /// keyed by the object's LOCAL MethodDef RID (remapped to final RIDs at link).</summary>
+    /// <summary>Parsed .chidbg: the TU's source file + per-method line points and
+    /// named locals, keyed by the object's LOCAL MethodDef RID (remapped to final
+    /// RIDs at link).</summary>
     public sealed class ChibilDebug
     {
         public string SourceFile;
         public byte[] SourceHash;
-        public Dictionary<int, List<(int Il, int Line)>> MethodPoints = new();
+        public Dictionary<int, MethodDbg> Methods = new();
+    }
+
+    public sealed class MethodDbg
+    {
+        public int IlSize;
+        public List<(int Il, int Line)> Points = new();
+        public List<(int Slot, string Name)> Locals = new();
     }
 
     private byte[] _metaBytes;      // backing store for Md (kept alive by this field)
@@ -137,14 +145,15 @@ public sealed unsafe class ObjectFile
     }
 
     // Parse the .chidbg side-stream emitted by chibil (see CodeGen.BuildChibilDebugBlob):
-    // magic 'CDBG', version, source path + SHA-256, then per-method (RID, line points).
+    // magic 'CDBG', version 2, source path + SHA-256, then per-method (RID, IL size,
+    // line points, named locals).
     private static ChibilDebug ParseChibilDebug(byte[] data)
     {
         using var br = new System.IO.BinaryReader(new System.IO.MemoryStream(data));
         if (br.ReadByte() != 'C' || br.ReadByte() != 'D' || br.ReadByte() != 'B' || br.ReadByte() != 'G')
             return null;
         int version = br.ReadByte();
-        if (version != 1)
+        if (version != 2)
             return null;
 
         var dbg = new ChibilDebug();
@@ -157,15 +166,26 @@ public sealed unsafe class ObjectFile
         for (int m = 0; m < methodCount; m++)
         {
             int rid = br.ReadInt32();
+            var info = new MethodDbg { IlSize = br.ReadInt32() };
+
             int ptCount = br.ReadInt32();
-            var pts = new List<(int, int)>(ptCount);
             for (int p = 0; p < ptCount; p++)
             {
                 int il = br.ReadInt32();
                 int line = br.ReadInt32();
-                pts.Add((il, line));
+                info.Points.Add((il, line));
             }
-            dbg.MethodPoints[rid] = pts;
+
+            int locCount = br.ReadInt32();
+            for (int l = 0; l < locCount; l++)
+            {
+                int slot = br.ReadInt32();
+                int nameLen = br.ReadUInt16();
+                string name = System.Text.Encoding.UTF8.GetString(br.ReadBytes(nameLen));
+                info.Locals.Add((slot, name));
+            }
+
+            dbg.Methods[rid] = info;
         }
         return dbg;
     }

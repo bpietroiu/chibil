@@ -28,11 +28,19 @@ public static class PortablePdbWriter
         public bool Hidden;     // synthesized code with no source (0xFEEFEE)
     }
 
+    public sealed class LocalVar
+    {
+        public int Slot;
+        public string Name;
+    }
+
     public sealed class MethodDebug
     {
         public string DocumentName;             // source file path
         public byte[] Hash;                     // SHA-256 of the source (or null)
         public List<SeqPoint> SequencePoints = new();
+        public List<LocalVar> Locals = new();   // named C locals (one method-wide scope)
+        public int IlSize;                      // method body IL byte length (scope length)
     }
 
     /// <param name="methodCount">total MethodDef rows in the PE (table is 1:1).</param>
@@ -64,20 +72,41 @@ public static class PortablePdbWriter
             return h;
         }
 
+        // A single empty root import scope shared by every local scope (C has no
+        // using-directives, but the format requires an ImportScope reference).
+        var rootScope = md.AddImportScope(default, md.GetOrAddBlob(new BlobBuilder()));
+
         // MethodDebugInformation is 1:1 with MethodDef — emit a row for every RID,
-        // in order, nil where there's no debug info.
+        // in order, nil where there's no debug info. Local scopes/variables are
+        // separate tables added in the same RID order.
         for (int rid = 1; rid <= methodCount; rid++)
         {
-            if (byRid.TryGetValue(rid, out var m) && m.SequencePoints.Count > 0)
+            byRid.TryGetValue(rid, out var m);
+
+            var clean = m != null ? CleanSequencePoints(m.SequencePoints) : new List<SeqPoint>();
+            if (clean.Count > 0)
+                md.AddMethodDebugInformation(DocFor(m), md.GetOrAddBlob(EncodeSequencePoints(clean)));
+            else
+                md.AddMethodDebugInformation(default, default);
+
+            if (m != null && m.Locals.Count > 0)
             {
-                var clean = CleanSequencePoints(m.SequencePoints);
-                if (clean.Count > 0)
+                LocalVariableHandle first = default;
+                for (int i = 0; i < m.Locals.Count; i++)
                 {
-                    md.AddMethodDebugInformation(DocFor(m), md.GetOrAddBlob(EncodeSequencePoints(clean)));
-                    continue;
+                    var lv = m.Locals[i];
+                    var h = md.AddLocalVariable(LocalVariableAttributes.None, lv.Slot,
+                        md.GetOrAddString(string.IsNullOrEmpty(lv.Name) ? ("V_" + lv.Slot) : lv.Name));
+                    if (i == 0) first = h;
                 }
+                md.AddLocalScope(
+                    MetadataTokens.MethodDefinitionHandle(rid),
+                    rootScope,
+                    first,
+                    MetadataTokens.LocalConstantHandle(1),    // no local constants
+                    startOffset: 0,
+                    length: m.IlSize > 0 ? m.IlSize : 1);
             }
-            md.AddMethodDebugInformation(default, default);     // nil row
         }
 
         var entryPoint = entryPointRid > 0

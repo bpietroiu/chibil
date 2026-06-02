@@ -451,23 +451,27 @@ public sealed class PeWriter
         {
             if (of.Debug == null)
                 continue;
-            foreach (var kv in of.Debug.MethodPoints)
+            foreach (var kv in of.Debug.Methods)
             {
                 int finalRid = merger.MapToken(of, 0x06000000 | kv.Key) & 0x00FFFFFF;
                 if (finalRid == 0)
                     continue;
+                var info = kv.Value;
                 var m = new PortablePdbWriter.MethodDebug
                 {
                     DocumentName = of.Debug.SourceFile,
                     Hash = of.Debug.SourceHash,
+                    IlSize = info.IlSize,
                 };
-                foreach (var (il, line) in kv.Value)
+                foreach (var (il, line) in info.Points)
                     m.SequencePoints.Add(new PortablePdbWriter.SeqPoint
                     {
                         IlOffset = il,
                         StartLine = line, EndLine = line,
                         StartColumn = 1, EndColumn = 2,   // line-level span (non-empty => not hidden)
                     });
+                foreach (var (slot, name) in info.Locals)
+                    m.Locals.Add(new PortablePdbWriter.LocalVar { Slot = slot, Name = name });
                 byRid[finalRid] = m;
             }
         }

@@ -54,5 +54,11 @@ public class EmbeddedPdbTests
         Assert.Contains(2, lines);   // int r = x * x;
         Assert.Contains(3, lines);   // return r;
         Assert.Contains(5, lines);   // main
+
+        // named locals are present — sq() declares `r`
+        var localNames = new HashSet<string>();
+        foreach (var lvh in pdb.LocalVariables)
+            localNames.Add(pdb.GetString(pdb.GetLocalVariable(lvh).Name));
+        Assert.Contains("r", localNames);
     }
 }

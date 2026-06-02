@@ -24,12 +24,11 @@ public class ChidbgTests
 
         Assert.NotNull(of.Debug);
         Assert.False(string.IsNullOrEmpty(of.Debug.SourceFile));
-        Assert.NotEmpty(of.Debug.MethodPoints);
+        Assert.NotEmpty(of.Debug.Methods);
 
-        // Every method's points must have strictly recognizable lines; across all
-        // methods we should see add's body (lines 2 and 3) and main (line 5).
-        var lines = of.Debug.MethodPoints.Values
-            .SelectMany(p => p)
+        // Across all methods we should see add's body (lines 2 and 3) and main (line 5).
+        var lines = of.Debug.Methods.Values
+            .SelectMany(m => m.Points)
             .Select(p => p.Line)
             .ToHashSet();
         Assert.Contains(2, lines);
@@ -37,6 +36,10 @@ public class ChidbgTests
         Assert.Contains(5, lines);
 
         // IL offsets within a method are non-negative.
-        Assert.All(of.Debug.MethodPoints.Values.SelectMany(p => p), pt => Assert.True(pt.Il >= 0));
+        Assert.All(of.Debug.Methods.Values.SelectMany(m => m.Points), pt => Assert.True(pt.Il >= 0));
+
+        // The named local `s` from add() is captured.
+        var localNames = of.Debug.Methods.Values.SelectMany(m => m.Locals).Select(l => l.Name).ToHashSet();
+        Assert.Contains("s", localNames);
     }
 }

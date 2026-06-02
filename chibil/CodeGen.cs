@@ -33,7 +33,7 @@ public class CodeGen
     // document per TU suffices.
     private string _dbgSourceFile;
     private byte[] _dbgSourceHash;
-    private readonly List<(int Rid, List<(int Il, int Line)> Pts)> _dbgMethods = new();
+    private readonly List<(int Rid, int IlSize, List<(int Il, int Line)> Pts, List<(int Slot, string Name)> Locals)> _dbgMethods = new();
 
     private BlobBuilder _ilStreamBuilder, _ilRelocBuilder;
     private BlobBuilder _dataStream, _dataRelocs;
@@ -1611,13 +1611,16 @@ public class CodeGen
             localSlots: localSlotList.Count > 0 ? localSlotList.ToArray() : null);
         _methodBodyOffsets[fn] = bodyOffset;
 
-        // Collect line points for the managed-PDB side-stream (deduped + sorted by
-        // chibil-link when it builds the Portable PDB).
+        // Collect line points + named locals for the managed-PDB side-stream
+        // (chibil-link dedupes/sorts and builds the Portable PDB).
         var pts = new List<(int Il, int Line)>();
         foreach (var (_, off, line) in _enc.LineNumberBuilder.Entries())
             pts.Add((off, line));
-        if (pts.Count > 0)
-            _dbgMethods.Add((MetadataTokens.GetRowNumber(methodDef), pts));
+        var dbgLocals = new List<(int Slot, string Name)>();
+        foreach (var s in localSlotList)
+            dbgLocals.Add((s.Slot, s.Name));
+        if (pts.Count > 0 || dbgLocals.Count > 0)
+            _dbgMethods.Add((MetadataTokens.GetRowNumber(methodDef), _enc.CodeBuilder.Count, pts, dbgLocals));
 
         _currentFn = null;
     }
@@ -3844,9 +3847,9 @@ public class CodeGen
         return output.ToArray();
     }
 
-    // Serialize the .chibildbg side-stream: magic 'CDBG', version, the primary
-    // source file + SHA-256, then per-method (RID, [(IL offset, line)]).
-    // chibil-link parses this to build the unified Portable PDB.
+    // Serialize the .chibildbg side-stream: magic 'CDBG', version 2, the primary
+    // source file + SHA-256, then per-method (RID, IL size, [(IL offset, line)],
+    // [(local slot, name)]). chibil-link transcodes this to the Portable PDB.
     private BlobBuilder BuildChibilDebugBlob()
     {
         if (_dbgMethods.Count == 0 || _dbgSourceFile == null)
@@ -3854,7 +3857,7 @@ public class CodeGen
 
         var b = new BlobBuilder();
         b.WriteByte((byte)'C'); b.WriteByte((byte)'D'); b.WriteByte((byte)'B'); b.WriteByte((byte)'G');
-        b.WriteByte(1);                                         // version
+        b.WriteByte(2);                                         // version
 
         byte[] path = System.Text.Encoding.UTF8.GetBytes(_dbgSourceFile);
         b.WriteUInt16((ushort)path.Length); b.WriteBytes(path);
@@ -3862,14 +3865,22 @@ public class CodeGen
         b.WriteByte((byte)hash.Length); b.WriteBytes(hash);
 
         b.WriteInt32(_dbgMethods.Count);
-        foreach (var (rid, pts) in _dbgMethods)
+        foreach (var (rid, ilSize, pts, locals) in _dbgMethods)
         {
             b.WriteInt32(rid);
+            b.WriteInt32(ilSize);
             b.WriteInt32(pts.Count);
             foreach (var (il, line) in pts)
             {
                 b.WriteInt32(il);
                 b.WriteInt32(line);
+            }
+            b.WriteInt32(locals.Count);
+            foreach (var (slot, name) in locals)
+            {
+                b.WriteInt32(slot);
+                byte[] nm = System.Text.Encoding.UTF8.GetBytes(name ?? "");
+                b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
             }
         }
         return b;
