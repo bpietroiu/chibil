@@ -105,12 +105,26 @@ transparently with re-exec. We intercept the ~5 **semantic callers**, where the
 - **M-fork-0 (DONE, #21):** invariant-globalization runtimeconfig. Prereq: without
   it, any BCL exception message fatally stack-overflows the single-file image. Now
   multi-command builtin lines run (`echo a; echo b`, `for`, `if [ ]`, `$(( ))`).
-- **M-fork-1:** spawn substrate + external `execute_disk_command` via `posix_spawn`
-  + synchronous reap + `find_pipeline`/`wait_for` made pid-based → `ls`,
-  `cmd; cmd`, exit status, `&&`/`||` chains of externals. **Validates the whole
-  thesis** (CLR never forked → parent stays sane).
+- **M-fork-1a (DONE, in targets/ — untracked):** spawn substrate
+  (`make_child_posix_spawn` in jobs.c) + external `execute_disk_command` via
+  `posix_spawn` for the no-redirect case → `ls`, `cmd; cmd`, exit status (X0/X1),
+  `&&`/`||` chains, `for` loops spawning externals. **Thesis validated:** CLR
+  never forked → `wait_for`/`find_pipeline`/`find_job` stop crashing (parent
+  stays sane). 15/15 regress.sh PASS. Double-free gotcha fixed:
+  `strvec_from_word_list(...,alloc=0,...)` aliases words' strings → `free(array)`,
+  not `strvec_dispose`. `make_child_posix_spawn` already builds pipe/fds_to_close
+  file_actions, but real pipelines fork earlier (see M-fork-3 note) so that path
+  is not yet exercised. Redirects (`redirects != 0`) still fall through to
+  make_child (crashes — deferred).
 - **M-fork-2:** `$(...)` via re-exec (already has text) — unblocks `$(echo nested)`.
-- **M-fork-3:** subshells `( )` (deparse) + pipelines (pipe wiring).
+- **M-fork-3:** subshells `( )` (deparse) + pipelines (pipe wiring). NOTE
+  (investigation): pipeline stages do **not** fork in `execute_disk_command` —
+  `execute_simple_command` forks *early* at execute_cmd.c:4550 (`dofork = pipe_in
+  || pipe_out || async`) **before** word expansion, then runs expansion + the
+  command in the forked child. So pipelines need parent-side word expansion or
+  re-exec, not just `posix_spawn` file_actions. `make_child_posix_spawn` already
+  builds the pipe/`fds_to_close` file_actions (ready), but the early-fork site is
+  the real interception point. This is why pipelines are M-fork-3, not M-fork-1.
 - **M-fork-4:** background `&`, `$!`, `wait`, job table, async SIGCHLD, pgroups +
   `tcsetpgrp` (interactive job control).
 - **M-fork-5:** process substitution `<()`.
