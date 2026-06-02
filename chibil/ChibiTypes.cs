@@ -194,6 +194,8 @@ public class Obj
     public bool IsTentative;
     public bool IsTls;
     public bool IsStringLiteral;
+    public bool IsAnonymous;
+    public Obj StaticLocalFn;
     public byte[] InitData;
     public Relocation Rel;
 
@@ -302,6 +304,7 @@ public class Node
 public class Scope
 {
     public Scope Next;
+    public int ScopeIndex;
     public Dictionary<string, VarScope> Vars = new();
     public Dictionary<string, CType> Tags = new();
 }
