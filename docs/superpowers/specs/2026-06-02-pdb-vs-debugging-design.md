@@ -21,6 +21,35 @@ over synthesized code, and source-embedded single-file artifacts.
 
 ---
 
+## 0. Implementation finding (2026-06-02): the front-end is already done
+
+Investigation of the codebase changed the plan materially:
+
+- **chibil already tracks and emits complete per-TU debug info** — as native
+  **CodeView**, *unconditionally* (not gated on `-g`). `coffobjectemitter.cs` has a
+  full CodeView system: `CodeViewLineNumberBuilder` (IL-offset → line),
+  `CodeViewManSlot` (named managed locals with type tokens), `CodeViewLocalScope`,
+  and SHA-256 file checksums. `CodeGen.GenExpr` calls `_enc.MarkLineNumber(_cvFile,
+  node.Tok.LineNo)` for every expression.
+- **chibil-link drops all of it.** It reads no `.debug$S`, emits no
+  debug-directory, and produces no PDB. (This is why the bash debugging this session
+  used perfmap + gdb — the native path — instead of source-level managed stepping.)
+
+**Consequence:** the design's "chibil emits a per-TU debug side-stream" front-end
+work is *already present* (as CodeView). The feature collapses to a **chibil-link
+responsibility**: consume the per-TU debug data, transcode it to a unified Portable
+PDB (placing each method at its final `MethodDef` RID via the existing token map),
+and emit the PDB + the PE debug-directory entry.
+
+**Intermediate choice (revised):** rather than parse CodeView bytes in the linker,
+chibil emits the same already-computed line/local/scope data into a small,
+purpose-built `.chibildbg` section (trivial for the linker to read), and chibil-link
+builds the Portable PDB centrally. This keeps both sides simple and avoids a
+CodeView round-trip. CodeView emission stays for native consumers; `.chibildbg` is
+the managed-PDB path.
+
+---
+
 ## 1. Why this is non-trivial here
 
 Two chibil-specific facts shape everything:

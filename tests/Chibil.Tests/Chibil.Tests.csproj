@@ -35,6 +35,7 @@
          harmless in this library test assembly). Needed by LinkOptionsParseTests. -->
     <Compile Include="..\..\tools\chibil-link\Program.cs" />
     <Compile Include="..\..\tools\chibil-link\RuntimeConfigText.cs" />
+    <Compile Include="..\..\tools\chibil-link\PortablePdbWriter.cs" />
   </ItemGroup>
 
   <ItemGroup>
