@@ -87,17 +87,6 @@ public static class Linker
         string dir = Path.GetDirectoryName(Path.GetFullPath(outputPath));
         string baseName = Path.GetFileNameWithoutExtension(outputPath);
         string cfgPath = Path.Combine(dir ?? ".", baseName + ".runtimeconfig.json");
-        const string cfg =
-            "{\n" +
-            "  \"runtimeOptions\": {\n" +
-            "    \"tfm\": \"net10.0\",\n" +
-            "    \"rollForward\": \"Major\",\n" +
-            "    \"framework\": {\n" +
-            "      \"name\": \"Microsoft.NETCore.App\",\n" +
-            "      \"version\": \"10.0.0\"\n" +
-            "    }\n" +
-            "  }\n" +
-            "}\n";
-        File.WriteAllText(cfgPath, cfg);
+        File.WriteAllText(cfgPath, RuntimeConfigText.Json);
     }
 }

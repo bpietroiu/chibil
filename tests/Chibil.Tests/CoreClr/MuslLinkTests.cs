@@ -127,6 +127,20 @@ int main(void){
     }
 
     [Fact]
+    public void Runtimeconfig_forces_invariant_globalization()
+    {
+        // A chibil single-file image lacks the culture/resource infrastructure, so
+        // the BCL formatting ANY exception message recurses to a fatal StackOverflow
+        // (SR.GetResourceString -> CultureInfo -> resource grovel -> re-fault -> ...).
+        // The emitted runtimeconfig must disable that path or every benign managed
+        // exception crashes the process. Observed in bash: `echo a; echo b` (a
+        // longjmp-driven NRE during reaping) fatally overflowed until invariant mode
+        // was set. Pin both knobs so neither regresses.
+        Assert.Contains("\"System.Globalization.Invariant\": true", RuntimeConfigText.Json);
+        Assert.Contains("\"System.Resources.UseSystemResourceKeys\": true", RuntimeConfigText.Json);
+    }
+
+    [Fact]
     public void Setjmp_longjmp_resumes_across_frames()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
