@@ -28,6 +28,16 @@ A chibil-linked PE is an ordinary managed assembly that carries:
 | --- | --- | --- |
 | `-g` | chibil-link | Mark the assembly debuggable (JIT optimizer off). **Required for breakpoints to bind.** |
 | `--export-class=<Ns.Type>` | chibil-link | Emit a `public static` façade class that forwards to each exported C function. **Required to call C from C#.** |
+| `-shared` | chibil-link | Emit a library with **no entry point** — no `main` required. |
+| `-e <sym>` / `--entry <sym>` | chibil-link | Use `<sym>` as the executable entry instead of `main`. |
+| `-o <file>` | chibil-link | Output path; the **assembly identity is the file's base name** (`-o foo.dll` → assembly `foo`), like `gcc -o`. |
+
+`chibil-link` follows GNU/`gcc` argument conventions: short options take attached
+or separated values (`-ofoo` or `-o foo`), long options take `--opt=val` or
+`--opt val`, `@file` response files are expanded, and `--` ends option parsing.
+Run `chibil-link --help` for the full list. Through the compiler driver, `-g` and
+`-shared` are forwarded to chibil-link automatically (`chibil --target=coreclr -g
+-shared …`).
 
 > The embedded PDB itself is **always** emitted. `-g` only controls the
 > `Debuggable` attribute. This mirrors `gcc`:
@@ -69,11 +79,13 @@ To debug in Visual Studio:
 
 ```powershell
 dotnet chibil.dll  -c --target=coreclr  mathlib.c  -o mathlib.obj
-dotnet chibil-link.dll  -g  -o mathlib.dll  --export-class=Acme.Native  mathlib.obj
+# -shared: no main needed; -o mathlib.dll: assembly identity = "mathlib"
+dotnet chibil-link.dll  -g -shared  -o mathlib.dll  --export-class=Acme.Native  mathlib.obj
 ```
 
 A C function `int sq(int x)` becomes `public static int Acme.Native.sq(int x)`.
-(External-linkage functions are exported; `static` C functions and `main` are not.)
+(External-linkage functions are exported; `static` C functions are not.) No `main`
+is required with `-shared`.
 
 ### 2. Reference it from C#
 
@@ -85,7 +97,7 @@ A C function `int sq(int x)` becomes `public static int Acme.Native.sq(int x)`.
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="a">               <!-- see "assembly name" gotcha below -->
+    <Reference Include="mathlib">          <!-- matches the -o base name -->
       <HintPath>..\mathlib.dll</HintPath>
       <Private>true</Private>             <!-- copy next to host.exe at build -->
     </Reference>
@@ -113,16 +125,10 @@ press **F5** in VS, and you step from C# straight into the C source.
   with this line."* That means the assembly was linked without `-g`, so the JIT
   optimized the method away. Re-link with `-g`.
 
-- **Assembly name is currently `a`.** chibil-link names every output assembly `a`
-  (like `a.out`), regardless of `-o`. So the C# `<Reference Include="...">` must
-  say `a`, and the file on disk that the runtime loads must be named to match the
-  identity (e.g. copy/rename to `a.dll`), or you'll get
-  `FileNotFoundException: Could not load file or assembly 'a'`. Tracked for a fix
-  (derive identity from `-o`, like `gcc -o`).
-
-- **chibil-link needs a `main`.** It always synthesizes an executable entry point,
-  so a pure library must include a `main` (it's ignored when used as a library).
-  A `-shared`/library mode is tracked.
+- **Match the C# `<Reference Include>` to the `-o` base name.** The assembly
+  identity now follows the output name (`-o mathlib.dll` → assembly `mathlib`), so
+  reference it as `mathlib`. A mismatch gives
+  `FileNotFoundException: Could not load file or assembly '<name>'`.
 
 - **Native dependencies are Linux.** chibil's libc calls are P/Invokes to
   `libc.so.6` etc. A function that calls into libc therefore only loads on Linux.

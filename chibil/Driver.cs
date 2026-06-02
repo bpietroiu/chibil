@@ -17,7 +17,7 @@ public class Driver
     private readonly List<string> OptInclude = new();
     private bool _optE, _optM, _optMD, _optMMD, _optMP, _optS, _optC, _optCc1, _optHashHashHash;
     private bool _optNoStdInc;
-    private bool _optStatic, _optShared;
+    private bool _optStatic, _optShared, _optG;
     private string _optMF, _optMT, _optO;
     private readonly List<string> LdExtraArgs = new();
     private readonly List<string> StdIncludePaths = new();
@@ -182,6 +182,9 @@ public class Driver
             if (arg == "-hashmap-test") { Console.WriteLine("OK"); Environment.Exit(0); }
             if (arg == "--target=coreclr") { Options.Target = TargetProfile.CoreClr; _targetExplicit = true; continue; }
             if (arg == "--target=ijw")     { Options.Target = TargetProfile.Ijw; _targetExplicit = true; continue; }
+            // -g enables debug info; forwarded to chibil-link (which emits the
+            // DebuggableAttribute so breakpoints bind). Other -g* levels are ignored.
+            if (arg == "-g") { _optG = true; continue; }
             // Ignored options
             if (arg.StartsWith("-O") || arg.StartsWith("-W") || arg.StartsWith("-g") || arg.StartsWith("-std=") ||
                 arg == "-ffreestanding" || arg == "-fno-builtin" || arg == "-fno-omit-frame-pointer" ||
@@ -396,6 +399,8 @@ public class Driver
     internal string[] BuildChibilLinkCommand(List<string> inputs, string output)
     {
         var arr = new List<string> { "chibil-link", "-o", output };
+        if (_optG) arr.Add("-g");           // forward debug info request
+        if (_optShared) arr.Add("-shared"); // forward library (no-entry) mode
         foreach (var lib in _coreClrLibs)   // the -l libs collected for the linker
             arr.Add($"-l{lib}");
         arr.AddRange(inputs);               // the .obj inputs
