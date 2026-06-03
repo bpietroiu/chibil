@@ -1,7 +1,8 @@
 # Chibil — fork additions
 
 This fork adds an in-house linker and a set of compiler improvements, and exercises
-them against SQLite, bash, and MicroPython.
+them against SQLite, bash, MicroPython, and QuickJS — the last of which runs at
+**zero-error test262 conformance** across ~29,400 tests (see below).
 
 ### chibil-link (in-house linker)
 
@@ -22,9 +23,14 @@ Emits a pure-MSIL (`ILOnly`) .NET assembly directly from chibil's COFF objects �
 - **Portable PDB debug info** — emitted as an embedded Portable PDB (sequence points
   with column spans, nested local scopes), so a real .NET debugger steps the C
   source, binds breakpoints (including inside `for(;;)` headers), and shows locals.
-- Prefix `__attribute__((...))` parsing.
-- Correct 64-bit bitfield stores (high-bit fields no longer truncated).
-- Flexible-array-member globals sized by their data extent.
+- Prefix `__attribute__((...))` parsing; forward-declared (incomplete) enums.
+- Correct bitfield codegen — 64-bit high-bit stores and small-storage (`u8`/`u16`)
+  reads both fixed.
+- Union compound-literal initializers copy the whole union (designated non-first
+  members no longer truncated).
+- Flexible-array-member globals, and Mutable initialized globals, sized by their data
+  extent; static-data function pointers to external (libc) functions bound via
+  load-time P/Invoke stubs.
 - Unused `extern` declarations emit no symbol (lazy field registration).
 - `setjmp`/`longjmp` lowered to managed-exception resumption that resumes at the
   `setjmp` call, including when it is inside a loop.
@@ -40,6 +46,33 @@ Emits a pure-MSIL (`ILOnly`) .NET assembly directly from chibil's COFF objects �
   single 3.4 MB assembly; boots to the REPL and evaluates Python (arithmetic, lists,
   comprehensions), catching exceptions and printing tracebacks. Open: an
   `InvalidProgramException` in `mp_iternext` (iterator dispatch).
+- **QuickJS** (`quickjs-2025-09-13`) — Bellard's JS engine; all 7 interpreter
+  translation units compile and link into a single `qjs.dll`, and it **runs JavaScript
+  at zero-error test262 conformance**: exceptions, classes, generators, destructuring,
+  `RegExp`, `Map`/`Set`, `BigInt`, `Proxy`, and the async/`Promise` job queue.
+
+### QuickJS test262 conformance
+
+`run-test262.c` compiles and links with chibil into `run-test262.dll`, run against a
+fresh `tc39/test262` clone:
+
+| Area | errors / tests |
+|---|---|
+| `language/types` | 0 / 113 |
+| `language/statements` | 0 / 9,113 |
+| `language/expressions` | 0 / 10,665 |
+| `built-ins/Array` | 0 / 2,900 |
+| `built-ins/String` | 0 / 1,198 |
+| `built-ins/Object` | 0 / 3,402 |
+| `built-ins/RegExp` (prototype, named-groups) | 0 / 511 |
+| `built-ins/Map` | 0 / 171 |
+| `built-ins/Promise` (async / job queue) | 0 / 640 |
+| **total** | **0 / ~29,400** |
+
+Zero chibil-caused failures across ~29,400 conformance tests. (The only failures
+anywhere are ~61 `RegExp/property-escapes` tests — a Unicode-data-version skew between
+QuickJS's bundled `libunicode` and the freshly-cloned suite, which fail on native
+QuickJS too.) See [CompileQuickJS.md](CompileQuickJS.md) for the full write-up.
 
 ---
 
