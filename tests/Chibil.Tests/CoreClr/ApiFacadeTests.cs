@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using ChibilLink;
 using Xunit;
@@ -410,5 +412,43 @@ public class ApiFacadeTests
             exportClass: null, pinvokeMap: null, debuggable: false, shared: true));
         Type outer = asm.GetType("mylib.MlOuter");
         Assert.NotNull(outer.GetField("inner", BindingFlags.Public | BindingFlags.Instance));
+    }
+
+    // Repro for the QuickJS-oracle finding. The data-import resolver (which runs only when
+    // LIBRARIES are linked) iterates every object field and treats unmapped ones as
+    // unresolved extern data. A public struct's named MEMBER fields are unmapped (they live
+    // on a struct TypeDef, not <Module>), so without a guard they get picked up and emitted
+    // as non-static <Module> globals → Assembly.Load throws "Non-Static Global Field".
+    // QuickJS (linked with -lc -lm) hit this; mylib/earlier tests linked with NO libs, so
+    // the resolver never ran and the bug stayed hidden. The fix: the resolver skips instance
+    // (non-static) fields — real data imports are static globals.
+    [Fact]
+    public void Public_struct_member_fields_not_mistaken_for_data_imports_when_linking_libs()
+    {
+        const string hdr =
+            "#ifndef MYLIB_H\n#define MYLIB_H\n" +
+            "struct MlBox { int a; int b; };\n" +
+            "int ml_box_sum(struct MlBox b);\n" +
+            "#endif\n";
+        const string src =
+            "#include \"mylib.h\"\n" +
+            "extern int chibil_extern_data;\n" +    // a real unresolved extern → runs the data-import resolver
+            "int ml_box_sum(struct MlBox b){ return b.a + b.b + chibil_extern_data; }\n";
+        byte[] obj = TestCompiler.CompileToObjWithApi(src, hdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        // Link WITH a library so the data-import resolver runs (the trigger). Inspect the PE
+        // metadata directly rather than Assembly.Load — the data-import .cctor (NativeLibrary
+        // binding) is not exercisable off-target, and the layout bug is visible in metadata.
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string> { "c" },
+            exportClass: null, pinvokeMap: null, debuggable: false, shared: true);
+        using var per = new System.Reflection.PortableExecutable.PEReader(
+            new System.IO.MemoryStream(pe));
+        var md = per.GetMetadataReader();
+        var moduleTd = md.GetTypeDefinition(System.Reflection.Metadata.Ecma335.MetadataTokens.TypeDefinitionHandle(1));
+        Assert.Equal("<Module>", md.GetString(moduleTd.Name));
+        int nonStatic = 0;
+        foreach (var fhh in moduleTd.GetFields())
+            if ((md.GetFieldDefinition(fhh).Attributes & FieldAttributes.Static) == 0) nonStatic++;
+        Assert.Equal(0, nonStatic);   // member fields (e.g. MlBox.a/b) must NOT leak into <Module>
     }
 }

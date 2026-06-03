@@ -1412,7 +1412,15 @@ public sealed class MetadataMerger
             {
                 var fh = MetadataTokens.FieldDefinitionHandle(r);
                 if (map.MapField(fh).RowId() != 0) continue;   // already resolved
-                string name = md.GetString(md.GetFieldDefinition(fh).Name);
+                var fd = md.GetFieldDefinition(fh);
+                // Skip INSTANCE fields: a data import is an extern global (static); an
+                // instance field is a public struct MEMBER field (emitted by the API
+                // facade's named-fields, owned by a struct TypeDef, never mapped here).
+                // Without this, member names like `u`/`tag` are mistaken for unresolved
+                // libc data symbols and emitted as non-static <Module> globals — which
+                // makes the assembly fail to load ("Non-Static Global Field").
+                if ((fd.Attributes & FieldAttributes.Static) == 0) continue;
+                string name = md.GetString(fd.Name);
                 // Skip compiler artifacts (padding members, string literals).
                 if (string.IsNullOrEmpty(name) || name.IndexOf(' ') >= 0 ||
                     name.StartsWith("?") || name.StartsWith("$")) continue;
