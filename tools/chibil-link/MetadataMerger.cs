@@ -138,6 +138,7 @@ public sealed class MetadataMerger
         public int LayoutPack;          // ClassLayout packing
         public int PredictedRow;        // 1-based output TypeDef row (>=2)
         public bool ExplicitLayout;                 // true → emit ExplicitLayout + per-field offsets
+        public bool IsEnum;                         // true → use AutoLayout (no layout flags); overrides ExplicitLayout/SequentialLayout
         public List<MemberField> Members = new();   // named member fields (may be empty)
         public int FirstFieldRow;                   // predicted output field row of Members[0], or 0
     }
@@ -146,7 +147,11 @@ public sealed class MetadataMerger
     {
         public string Name;
         public BlobHandle Signature;   // output-blob field signature (tokens already mapped)
-        public int Offset;             // FieldLayout offset
+        public int Offset;             // FieldLayout offset (used only when HasLayout)
+        public bool HasLayout = true;  // false for enum value__/literal fields (no FieldLayout row)
+        public System.Reflection.FieldAttributes Attributes = System.Reflection.FieldAttributes.Public;
+        public bool IsLiteral;         // emit an AddConstant row with LiteralValue
+        public int LiteralValue;
     }
 
     // A field with RVA-mapped initial data (string literal / initialized global).
@@ -218,8 +223,11 @@ public sealed class MetadataMerger
 
     private readonly HashSet<string> _apiTypeNames;  // null = no re-namespacing
     private readonly string _apiNamespace;
+    private readonly List<ApiEnum> _apiEnums;         // null = no enum synthesis
     // Output TypeDef rows of public-API types re-namespaced into the facade namespace.
     public readonly HashSet<int> ApiPublicTypeRows = new();
+    // Enum tag -> output TypeDef row (populated by SynthesizeApiEnums).
+    public readonly Dictionary<string, int> ApiEnumRow = new();
 
     private readonly IReadOnlyList<string> _libs;
     private readonly string _entrySymbol;
@@ -227,7 +235,8 @@ public sealed class MetadataMerger
     public MetadataMerger(IReadOnlyList<ObjectFile> objs, string exportClass = null,
         IReadOnlyList<string> libs = null, string entrySymbol = "main",
         HashSet<string> apiFunctionNames = null,
-        HashSet<string> apiTypeNames = null, string apiNamespace = null)
+        HashSet<string> apiTypeNames = null, string apiNamespace = null,
+        List<ApiEnum> apiEnums = null)
     {
         _objs = objs;
         _exportClass = exportClass;
@@ -236,6 +245,7 @@ public sealed class MetadataMerger
         _apiFunctionNames = apiFunctionNames;
         _apiTypeNames = apiTypeNames;
         _apiNamespace = apiNamespace;
+        _apiEnums = apiEnums;
     }
 
     // After the merge, move each public-API type's canonical TypeDef into the facade
@@ -313,6 +323,10 @@ public sealed class MetadataMerger
     /// <summary>TypeRef to System.ValueType in the core library, for the base type
     /// of a synthesized opaque-handle value-type TypeDef.</summary>
     private EntityHandle GetOrAddCoreValueTypeRef() => GetOrAddCoreTypeRef("System", "ValueType");
+
+    /// <summary>TypeRef to System.Enum in the core library, for the base type
+    /// of a synthesized CLR enum TypeDef.</summary>
+    private EntityHandle GetOrAddCoreEnumRef() => GetOrAddCoreTypeRef("System", "Enum");
 
     public TokenMap MapFor(ObjectFile of) => _maps[of];
 
@@ -432,6 +446,12 @@ public sealed class MetadataMerger
         //    real value-type TypeDefs are reserved (so we don't duplicate a name
         //    that has a real body) and is the LAST TypeDef-reserving pass.
         ReserveOpaqueTypeDefs();
+
+        // Synthesize CLR enum TypeDefs for each manifest-declared public enum.
+        // Must run AFTER ReserveOpaqueTypeDefs (last real-code TypeDef pass) and
+        // BEFORE ReserveMemberFields (so the synthesized value__/literal fields
+        // get consecutive field-row assignments with the rest of the member fields).
+        SynthesizeApiEnums();
 
         // Assign consecutive output field rows to named member fields of ExplicitLayout
         // public structs, AFTER all TypeDef-reserving passes (including
@@ -1896,6 +1916,81 @@ public sealed class MetadataMerger
         // and the pointee's TypeDef must still be copied/predicted or the rewritten
         // signature maps it to row 0 (decodes as malformed → CLR rejects <Module>).
         ScanSigTypeForTypeDefs(of, ref sigReader);
+    }
+
+    /// <summary>
+    /// Synthesize a real CLR enum TypeDef for each manifest-declared public enum.
+    /// Each enum gets: base=System.Enum, a <c>value__</c> instance field (RTSpecialName),
+    /// and one static literal field per enumerator (typed as the enum itself via a
+    /// VALUETYPE self-token in the signature), backed by an AddConstant row.
+    ///
+    /// Must be called AFTER <c>ReserveOpaqueTypeDefs</c> (the last TypeDef-adding pass
+    /// for real code) and BEFORE <c>ReserveMemberFields</c> (so the synthesized fields
+    /// get consecutive field-row assignments like all other struct member fields).
+    /// </summary>
+    private void SynthesizeApiEnums()
+    {
+        if (_apiEnums == null) return;
+        foreach (var e in _apiEnums)
+        {
+            _outTypeDefRow++;
+            var ct = new CopiedTypeDef
+            {
+                Name = e.Tag,
+                Namespace = _apiNamespace ?? "",
+                BaseType = GetOrAddCoreEnumRef(),
+                LayoutSize = -1,   // no ClassLayout; enums have none
+                LayoutPack = 0,
+                PredictedRow = _outTypeDefRow,
+                ExplicitLayout = false,
+                IsEnum = true,     // use AutoLayout (no layout flags) for real CLR enum validation
+            };
+
+            // value__ : instance field of the underlying primitive type.
+            // Signature: FIELD I4 (or U4 for unsigned). Flags: Public|SpecialName|RTSpecialName.
+            var vsig = new BlobBuilder();
+            vsig.WriteByte(0x06);  // FIELD calling convention
+            vsig.WriteByte(e.IsUnsigned ? (byte)0x09 /*U4*/ : (byte)0x08 /*I4*/);
+            ct.Members.Add(new MemberField
+            {
+                Name = "value__",
+                Signature = Builder.GetOrAddBlob(vsig),
+                HasLayout = false,
+                Attributes = System.Reflection.FieldAttributes.Public
+                    | System.Reflection.FieldAttributes.SpecialName
+                    | System.Reflection.FieldAttributes.RTSpecialName,
+            });
+
+            // Static literal field per enumerator, typed as the enum itself via a
+            // VALUETYPE self-reference. ECMA-335 §II.23.2.4: the TypeDefOrRefOrSpec
+            // coded index for a TypeDef is row << 2 | 0 (TypeDef tag = 0).
+            // BlobBuilder.WriteCompressedInteger encodes it as a compressed uint.
+            var selfTok = MetadataTokens.TypeDefinitionHandle(_outTypeDefRow);
+            int codedSelfToken = CodedIndex.TypeDefOrRefOrSpec(selfTok);
+            foreach (var (mn, mv) in e.Members)
+            {
+                var fsig = new BlobBuilder();
+                fsig.WriteByte(0x06);   // FIELD
+                fsig.WriteByte(0x11);   // ELEMENT_TYPE_VALUETYPE
+                fsig.WriteCompressedInteger(codedSelfToken);
+                ct.Members.Add(new MemberField
+                {
+                    Name = mn,
+                    Signature = Builder.GetOrAddBlob(fsig),
+                    HasLayout = false,
+                    IsLiteral = true,
+                    LiteralValue = mv,
+                    Attributes = System.Reflection.FieldAttributes.Public
+                        | System.Reflection.FieldAttributes.Static
+                        | System.Reflection.FieldAttributes.Literal
+                        | System.Reflection.FieldAttributes.HasDefault,
+                });
+            }
+
+            CopiedTypeDefs.Add(ct);
+            ApiEnumRow[e.Tag] = ct.PredictedRow;
+            ApiPublicTypeRows.Add(ct.PredictedRow);
+        }
     }
 
     /// <summary>For every function signature (defined methods AND external-call

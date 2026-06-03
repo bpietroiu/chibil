@@ -28,18 +28,24 @@ public static class LinkPipeline
         HashSet<string> apiFns = null;
         HashSet<string> apiTypes = null;
         string apiNs = null;
+        List<ApiEnum> apiEnums = null;
         string effectiveExportClass = exportClass;
         if (effectiveExportClass == null)
         {
             string group = null;
             var fns = new HashSet<string>();
             var tys = new HashSet<string>();
+            var seenEnumTags = new HashSet<string>();
+            var ens = new List<ApiEnum>();
             foreach (var o in objs)
                 if (o.Api != null)
                 {
                     group ??= o.Api.Group;
                     fns.UnionWith(o.Api.Functions);
                     tys.UnionWith(o.Api.Types);
+                    foreach (var e in o.Api.Enums)
+                        if (seenEnumTags.Add(e.Tag))
+                            ens.Add(e);
                 }
             if (group != null)
             {
@@ -47,12 +53,13 @@ public static class LinkPipeline
                 effectiveExportClass = apiNs + ".Api";
                 apiFns = fns;
                 apiTypes = tys;
+                if (ens.Count > 0) apiEnums = ens;
             }
         }
 
         return new PeWriter(objs, libs ?? new List<string>(), effectiveExportClass, pinvokeMap, debuggable,
             shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>(), apiFns,
-            apiTypes, apiNs).Write();
+            apiTypes, apiNs, apiEnums).Write();
     }
 
     // Turn a header base name into a valid namespace segment (letters/digits/underscore;
@@ -92,13 +99,15 @@ public sealed class PeWriter
     private readonly HashSet<string> _apiFunctionNames; // null = no manifest restriction
     private readonly HashSet<string> _apiTypeNames;     // null = no re-namespacing
     private readonly string _apiNamespace;
+    private readonly List<ApiEnum> _apiEnums;           // null = no enum synthesis
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
     public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null,
         Dictionary<string, string> pinvokeMap = null, bool debuggable = false,
         bool shared = false, string assemblyName = "a", string entrySymbol = "main",
         List<string> libSearchPaths = null, HashSet<string> apiFunctionNames = null,
-        HashSet<string> apiTypeNames = null, string apiNamespace = null)
+        HashSet<string> apiTypeNames = null, string apiNamespace = null,
+        List<ApiEnum> apiEnums = null)
     {
         _objs = objs;
         _libs = libs;
@@ -112,6 +121,7 @@ public sealed class PeWriter
         _apiFunctionNames = apiFunctionNames;
         _apiTypeNames = apiTypeNames;
         _apiNamespace = apiNamespace;
+        _apiEnums = apiEnums;
     }
 
     private static string ValidateExportClass(string name)
@@ -127,7 +137,7 @@ public sealed class PeWriter
     public byte[] Write()
     {
         var merger = new MetadataMerger(_objs, _exportClass, _libs, _entrySymbol, _apiFunctionNames,
-            _apiTypeNames, _apiNamespace);
+            _apiTypeNames, _apiNamespace, _apiEnums);
         merger.MergeAndPredict();
         merger.ApplyApiTypeNamespacing();
 
@@ -354,20 +364,23 @@ public sealed class PeWriter
         // These are appended AFTER all global/RVA fields so that <Module>'s field
         // range (rows 1..G) is unaffected.  Member fields are emitted in
         // CopiedTypeDef (PredictedRow) order so each struct's range is contiguous.
+        // Enum CopiedTypeDefs (synthesized by SynthesizeApiEnums) are also emitted
+        // here: value__ + static literal fields, using mf.Attributes/HasLayout/IsLiteral.
         foreach (var ct in merger.CopiedTypeDefs)
         {
             bool firstMember = true;
             foreach (var mf in ct.Members)
             {
                 var mfh = mdBuilder.AddFieldDefinition(
-                    System.Reflection.FieldAttributes.Public,
+                    mf.Attributes,
                     mdBuilder.GetOrAddString(mf.Name), mf.Signature);
                 if (firstMember)
                 {
                     AssertRow(ct.FirstFieldRow, MetadataTokens.GetRowNumber(mfh), $"member field '{ct.Name}.{mf.Name}'");
                     firstMember = false;
                 }
-                mdBuilder.AddFieldLayout(mfh, mf.Offset);
+                if (mf.HasLayout) mdBuilder.AddFieldLayout(mfh, mf.Offset);
+                if (mf.IsLiteral) mdBuilder.AddConstant(mfh, mf.LiteralValue);
             }
         }
 
@@ -405,9 +418,11 @@ public sealed class PeWriter
             }
 
             var tdH = mdBuilder.AddTypeDefinition(
-                (ct.ExplicitLayout
-                    ? System.Reflection.TypeAttributes.ExplicitLayout
-                    : System.Reflection.TypeAttributes.SequentialLayout)
+                (ct.IsEnum
+                    ? System.Reflection.TypeAttributes.AutoLayout     // enums use AutoLayout (0), NOT SequentialLayout
+                    : ct.ExplicitLayout
+                        ? System.Reflection.TypeAttributes.ExplicitLayout
+                        : System.Reflection.TypeAttributes.SequentialLayout)
                     | System.Reflection.TypeAttributes.Sealed
                     | System.Reflection.TypeAttributes.AnsiClass
                     | (promotedTypeDefRows.Contains(ct.PredictedRow)

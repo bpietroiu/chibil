@@ -248,6 +248,27 @@ public class ApiFacadeTests
         Assert.Contains(of.Api.EnumUsages, u => u.Function == "ml_color_code" && u.Position == 1 && u.EnumTag == "MlColor");
     }
 
+    static System.Reflection.Assembly LinkEnLib()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(EnSrc, EnHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        return System.Reflection.Assembly.Load(LinkPipeline.LinkToBytes(new[] { of }, new List<string>(),
+            exportClass: null, pinvokeMap: null, debuggable: false, shared: true));
+    }
+
+    [Fact]
+    public void Public_enum_is_synthesized_as_a_real_enum_type()
+    {
+        var asm = LinkEnLib();
+        Type t = asm.GetType("mylib.MlColor");
+        Assert.NotNull(t);
+        Assert.True(t.IsEnum, "must be a real CLR enum");
+        Assert.Equal(typeof(int), Enum.GetUnderlyingType(t));
+        Assert.Equal(5, (int)Enum.Parse(t, "ML_GREEN"));
+        Assert.Equal(6, (int)Enum.Parse(t, "ML_BLUE"));
+        Assert.True(t.IsPublic);
+    }
+
     [Fact]
     public void Fixture_struct_value_passes_through_forwarder()
     {
