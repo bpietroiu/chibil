@@ -2392,11 +2392,17 @@ namespace System.Reflection.PortableExecutable
         private const string NepSectionName = ".nep";
         private const string CodeViewSymbolsSectionName = ".debug$S";
         private const string ChibilDbgSectionName = ".chidbg";   // chibil managed-PDB side-stream (<=8 chars: inline COFF name)
+        private const string ChiapiSectionName = ".chiapi";    // chibil public-API manifest (<=8 chars: inline COFF name)
 
         private BlobBuilder _chibilDbg;
         /// <summary>Attach the serialized per-method line side-stream (consumed by
         /// chibil-link to build the Portable PDB). Null = no managed debug info.</summary>
         public void SetChibilDebug(BlobBuilder data) => _chibilDbg = data;
+
+        private BlobBuilder _chiapi;
+        /// <summary>Attach the serialized public-API manifest (consumed by chibil-link
+        /// to build the per-header Api facade). Null = no export-api headers.</summary>
+        public void SetChiapiData(BlobBuilder data) => _chiapi = data;
 
         private readonly CodeViewSymbolBuilder _codeViewSymbols;
         private readonly MetadataRootBuilder _metadataRootBuilder;
@@ -2556,6 +2562,10 @@ namespace System.Reflection.PortableExecutable
             {
                 builder.Add(new Section(ChibilDbgSectionName, SectionCharacteristics.ContainsInitializedData | SectionCharacteristics.MemDiscardable | SectionCharacteristics.MemRead | SectionCharacteristics.Align1Bytes));
             }
+            if (_chiapi != null && _chiapi.Count > 0)
+            {
+                builder.Add(new Section(ChiapiSectionName, SectionCharacteristics.ContainsInitializedData | SectionCharacteristics.MemDiscardable | SectionCharacteristics.MemRead | SectionCharacteristics.Align1Bytes));
+            }
 
             return builder.ToImmutable();
         }
@@ -2571,6 +2581,7 @@ namespace System.Reflection.PortableExecutable
                 IlFixupSectionName => _ilFixupStream,
                 NepSectionName => _nepStream,
                 ChibilDbgSectionName => _chibilDbg,
+                ChiapiSectionName => _chiapi,
                 _ => throw new ArgumentException(),
             };
 
