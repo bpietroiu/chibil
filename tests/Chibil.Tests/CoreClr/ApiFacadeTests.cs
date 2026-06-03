@@ -108,6 +108,17 @@ public class ApiFacadeTests
         Assert.DoesNotContain(asm.GetTypes(), t => t.IsPublic); // unchanged: no public facade
     }
 
+    [Fact]
+    public void Chiapi_v2_round_trips_public_types()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(TySrc, TyHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        Assert.NotNull(of.Api);
+        Assert.Contains("ml_sum", of.Api.Functions);
+        Assert.Contains("MlPoint", of.Api.Types);
+        Assert.Contains("MlCtx", of.Api.Types);
+    }
+
     static string FixtureDir([CallerFilePath] string here = "")
         => Path.Combine(Path.GetDirectoryName(here)!, "fixtures", "mylib");
 

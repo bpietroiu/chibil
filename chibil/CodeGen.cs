@@ -4098,18 +4098,19 @@ public class CodeGen
         return b;
     }
 
-    // Serialize the .chiapi manifest: magic 'CAPI', version 1, the facade group name
+    // Serialize the .chiapi manifest: magic 'CAPI', version 2, the facade group name
     // (the first --export-api header's base name, no extension), then the public
-    // function names. chibil-link consumes this to build the per-header Api facade.
-    // See ChibilApi.Parse.
+    // function names, then the public type names. chibil-link consumes this to build
+    // the per-header Api facade. See ChibilApi.Parse.
     private BlobBuilder BuildChiapiBlob()
     {
-        if (_options.ExportApiHeaders.Count == 0 || _options.PublicApiFunctions.Count == 0)
+        if (_options.ExportApiHeaders.Count == 0 ||
+            (_options.PublicApiFunctions.Count == 0 && _options.PublicApiTypes.Count == 0))
             return null;
         string group = System.IO.Path.GetFileNameWithoutExtension(_options.ExportApiHeaders[0]);
         var b = new BlobBuilder();
         b.WriteByte((byte)'C'); b.WriteByte((byte)'A'); b.WriteByte((byte)'P'); b.WriteByte((byte)'I');
-        b.WriteByte(1); // version
+        b.WriteByte(2); // version
         byte[] g = System.Text.Encoding.UTF8.GetBytes(group);
         b.WriteUInt16((ushort)g.Length); b.WriteBytes(g);
         var fns = new System.Collections.Generic.List<string>(_options.PublicApiFunctions);
@@ -4118,6 +4119,14 @@ public class CodeGen
         foreach (string fn in fns)
         {
             byte[] nm = System.Text.Encoding.UTF8.GetBytes(fn);
+            b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
+        }
+        var tys = new System.Collections.Generic.List<string>(_options.PublicApiTypes);
+        tys.Sort(System.StringComparer.Ordinal);
+        b.WriteInt32(tys.Count);
+        foreach (string t in tys)
+        {
+            byte[] nm = System.Text.Encoding.UTF8.GetBytes(t);
             b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
         }
         return b;
