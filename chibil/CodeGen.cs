@@ -145,6 +145,9 @@ public class CodeGen
     private int _setjmpRetvalLocal = -1;
     private int _setjmpBufLocal = -1;
     private List<(Node Jb, int Sjval)> _setjmpSites;
+    private bool _setjmpTryOpen;            // true once the try region has started (governs Return)
+    private bool _setjmpDeferStart;         // resume-at-site mode: single setjmp, not in a loop
+    private LabelHandle _setjmpTryStartLabel;
     private readonly Dictionary<string, MemberReferenceHandle> _runtimeHelperRefs = new();
     private int _maxStack, _stackDepth;
     private Dictionary<string, LabelHandle> _labels;
@@ -1536,6 +1539,8 @@ public class CodeGen
         _setjmpRetvalLocal = -1;
         _setjmpBufLocal = -1;
         _setjmpSites = null;
+        _setjmpTryOpen = false;
+        _setjmpDeferStart = false;
         _vaArgApLocal = -1;
         _maxStack = 0;
         _stackDepth = 0;
@@ -1757,6 +1762,34 @@ public class CodeGen
         return false;
     }
 
+    /// <summary>Count setjmp call sites in a tree and whether any is lexically inside
+    /// a loop (for/while/do). Gates the resume-at-site lowering: only a single setjmp
+    /// not under a loop can safely place the try-region boundary at the call (a loop
+    /// back-edge crossing that boundary would need an illegal plain branch out of the
+    /// try).</summary>
+    private static (int count, bool insideLoop) CountSetjmp(Node n, bool inLoop = false)
+    {
+        int count = 0;
+        bool loopHit = false;
+        for (; n != null; n = n.Next)
+        {
+            if (n.Kind == NodeKind.FunCall && n.Lhs != null && n.Lhs.Kind == NodeKind.Var
+                && n.Lhs.Var != null && n.Lhs.Var.IsFunction && IsSetjmpName(n.Lhs.Var.Name))
+            {
+                count++;
+                if (inLoop) loopHit = true;
+            }
+            bool childInLoop = inLoop || n.Kind == NodeKind.For || n.Kind == NodeKind.Do;
+            foreach (var c in new[] { n.Lhs, n.Rhs, n.Cond, n.Then, n.Els, n.Init, n.Inc, n.Body, n.Args })
+            {
+                var (cc, cl) = CountSetjmp(c, childInLoop);
+                count += cc;
+                loopHit |= cl;
+            }
+        }
+        return (count, loopHit);
+    }
+
     // Default-convention MemberRef signatures for the linker-synthesized helpers.
     private static readonly byte[] RtLongjmp = { 0x00, 0x02, 0x01, 0x18, 0x08 }; // void(native int, int32)
     private static readonly byte[] RtMatch   = { 0x00, 0x01, 0x08, 0x18 };       // int32(native int)
@@ -1792,18 +1825,31 @@ public class CodeGen
 
         _setjmpEpiLabel = _enc.DefineLabel();
         _setjmpLhead = _enc.DefineLabel();
-        var tryStart = _enc.DefineLabel();
+        _setjmpTryStartLabel = _enc.DefineLabel();
+        var tryStart = _setjmpTryStartLabel;
         var tryEnd = _enc.DefineLabel();
         var filterStart = _enc.DefineLabel();
         var handlerStart = _enc.DefineLabel();
         var handlerEnd = _enc.DefineLabel();
 
-        // Lhead must sit OUTSIDE the try: the handler `leave Lhead`s to resume, and
-        // leaving INTO a try is illegal. A nop separates Lhead from tryStart so the
-        // leave lands before the try and falls into it.
-        _enc.MarkLabel(_setjmpLhead);
-        _enc.OpCode(ILOpCode.Nop);
-        _enc.MarkLabel(tryStart);
+        // Resume-at-site mode: a single setjmp not inside a loop lets us start the try
+        // region AT the setjmp call, so code sequenced before it runs exactly once
+        // (outside the try) and a longjmp resumes after the call — correct setjmp
+        // semantics. Otherwise wrap the whole body (re-from-top), the prior behavior.
+        var (sjCount, sjInLoop) = CountSetjmp(fn.Body);
+        _setjmpDeferStart = sjCount == 1 && !sjInLoop;
+
+        if (!_setjmpDeferStart)
+        {
+            // Lhead must sit OUTSIDE the try: the handler `leave Lhead`s to resume, and
+            // leaving INTO a try is illegal. A nop separates Lhead from tryStart so the
+            // leave lands before the try and falls into it.
+            _enc.MarkLabel(_setjmpLhead);
+            _enc.OpCode(ILOpCode.Nop);
+            _enc.MarkLabel(tryStart);
+            _setjmpTryOpen = true;
+        }
+        // In defer mode, the (single) setjmp lowering marks Lhead/tryStart at its site.
         GenStmt(fn.Body);
         // Normal fall-through end of the try -> leave to the epilogue.
         _enc.Branch(ILOpCode.Leave, _setjmpEpiLabel);
@@ -2777,6 +2823,19 @@ public class CodeGen
                 // (the wrap's handler stores it then re-enters the try).
                 int sjval = AddFreshScratchLocal(_types.TyInt);
                 _setjmpSites.Add((node.Args, sjval));
+                // Resume-at-site: place the try-region boundary HERE so code sequenced
+                // before this setjmp call runs exactly once and is not re-executed on a
+                // longjmp resume. The eval stack is empty at a setjmp call in every
+                // supported idiom ((push_tail, setjmp), if(setjmp()==0), v=setjmp()).
+                if (_setjmpDeferStart && !_setjmpTryOpen)
+                {
+                    System.Diagnostics.Debug.Assert(_stackDepth == 0,
+                        "setjmp call site must have an empty eval stack for the try boundary");
+                    _enc.MarkLabel(_setjmpLhead);
+                    _enc.OpCode(ILOpCode.Nop);
+                    _enc.MarkLabel(_setjmpTryStartLabel);
+                    _setjmpTryOpen = true;
+                }
                 _enc.LoadLocal(sjval); Push();
                 return;
             }
@@ -3412,7 +3471,7 @@ public class CodeGen
                 return;
 
             case NodeKind.Return:
-                if (_setjmpWrap)
+                if (_setjmpWrap && _setjmpTryOpen)
                 {
                     // Inside the setjmp try: `ret` is illegal — funnel the value into
                     // the retval local and `leave` to the epilogue (which rets).
@@ -3420,6 +3479,8 @@ public class CodeGen
                     _enc.Branch(ILOpCode.Leave, _setjmpEpiLabel);
                     return;
                 }
+                // Pre-setjmp returns (defer mode, try not yet open) and non-setjmp
+                // functions: a normal ret (these are outside any protected region).
                 if (node.Lhs != null)
                 {
                     GenExpr(node.Lhs);
