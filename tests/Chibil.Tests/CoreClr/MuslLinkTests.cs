@@ -162,6 +162,54 @@ int main(void){
     }
 
     [Fact]
+    public void Setjmp_does_not_rerun_code_before_the_setjmp_call_on_resume()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // chibil resumes a longjmp by re-entering the function. Code sequenced BEFORE
+        // the setjmp call must run EXACTLY ONCE, else it re-executes on resume. Here
+        // `count++` runs once on the first pass; the longjmp resumes after setjmp, so
+        // count must still be 1. The old re-from-top model re-ran count++ -> 2.
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "jmp_buf jb;\n" +
+            "int count;\n" +
+            "int main(void){\n" +
+            "  count++;\n" +                            // pre-setjmp: must run once
+            "  int v = setjmp(jb);\n" +
+            "  if (v == 0) longjmp(jb, 1);\n" +
+            "  return count;\n" +                       // fixed: 1 ; bug: 2
+            "}\n",
+        }, out string o);
+        Assert.True(exit == 1, $"expected 1 (count++ ran once), got {exit}. {o}");
+    }
+
+    [Fact]
+    public void Setjmp_preserves_value_written_before_longjmp_on_resume()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // The exact MicroPython nlr shape: a slot is initialised before setjmp, then a
+        // value is stored into it right before longjmp. On resume the pre-setjmp init
+        // must NOT re-run and wipe that value (nlr.ret_val = NULL re-running clobbered
+        // the exception object -> NullReferenceException in parse_compile_execute).
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "jmp_buf jb;\n" +
+            "void *slot;\n" +
+            "int main(void){\n" +
+            "  slot = 0;\n" +                           // pre-setjmp init: must run once
+            "  int v = setjmp(jb);\n" +
+            "  if (v == 0) { slot = (void*)0x55; longjmp(jb, 1); }\n" +
+            "  return slot == (void*)0x55 ? 1 : 0;\n" + // fixed: 1 ; bug: 0
+            "}\n",
+        }, out string o);
+        Assert.True(exit == 1, $"expected 1 (slot preserved across resume), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Array_global_decays_to_pointer_when_passed()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
