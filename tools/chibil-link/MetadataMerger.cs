@@ -1449,25 +1449,43 @@ public sealed class MetadataMerger
                     $"field '{md.GetString(fd.Name)}' (row {r}, sigBlob 0x{MetadataTokens.GetHeapOffset(fd.Signature):X}) FieldRVA processing failed: {ex.Message}");
             }
 
-            int size = GetFieldDataSize(md, fd);
-            int align = GetFieldDataAlignment(md, fd, size);
-
+            int typeSize = GetFieldDataSize(md, fd);
             var sec = of.Coff.GetSection(loc.SectionNumber);
-            byte[] data = new byte[size];
+
             // A field living in an UNINITIALIZED-data (BSS) section — e.g. the
             // shim's 8 MB `g_heap[]` or SQLite's zero-initialized globals — has
             // no bytes in the file (PointerToRawData == 0). Its FieldRVA data is
-            // simply `size` zero bytes; reading the file would over-read. Only
-            // sections with real raw data are patched/copied.
+            // simply zero bytes; reading the file would over-read. Only sections
+            // with real raw data are patched/copied.
             const uint IMAGE_SCN_CNT_UNINITIALIZED_DATA = 0x00000080;
             bool isBss = sec.PointerToRawData == 0 ||
                          (sec.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) != 0;
+
+            // Size an INITIALIZED global by its data EXTENT — up to the next FieldRVA
+            // symbol in the section (or the section end) — not just the struct's fixed
+            // ClassLayout size. A struct with a flexible array member filled by the
+            // initializer (e.g. MicroPython's mp_rom_obj_tuple_t) has more data than
+            // sizeof(struct); the fixed size would truncate the FAM bytes and leave its
+            // pointer relocations "outside" the field. BSS keeps its type size.
+            int size = typeSize;
+            byte[] secData = isBss ? null : of.Coff.GetPatchedSectionData(sec);
             if (!isBss)
             {
-                byte[] secData = of.Coff.GetPatchedSectionData(sec);
+                int next = secData.Length;
+                foreach (var kv in dataLoc)
+                {
+                    var l2 = kv.Value;
+                    if (l2.SectionNumber == loc.SectionNumber && l2.Offset > loc.Offset && l2.Offset < next)
+                        next = l2.Offset;
+                }
+                size = Math.Max(typeSize, next - loc.Offset);
+            }
+            int align = GetFieldDataAlignment(md, fd, size);
+
+            byte[] data = new byte[size];
+            if (!isBss)
                 Array.Copy(secData, loc.Offset, data, 0,
                     Math.Max(0, Math.Min(size, secData.Length - loc.Offset)));
-            }
 
             var sigReader = md.GetBlobReader(fd.Signature);
             var sigB = new BlobBuilder();
