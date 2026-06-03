@@ -6,3 +6,4 @@ struct MlCtx *ml_ctx_new(void){ return (struct MlCtx*)0; }
 int ml_ctx_id(struct MlCtx *c){ return c ? 1 : 0; }
 int ml_color_code(enum MlColor c){ return (int)c + 100; }
 enum MlColor ml_default_color(void){ return ML_GREEN; }
+int ml_outer_sum(struct MlOuter o){ return o.inner.a + o.inner.b + o.tag; }

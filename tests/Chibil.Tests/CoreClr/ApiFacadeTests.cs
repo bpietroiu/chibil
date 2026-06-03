@@ -396,4 +396,19 @@ public class ApiFacadeTests
         MethodInfo sum = asm.GetType("mylib.Api").GetMethod("ml_outer_sum", BindingFlags.Public | BindingFlags.Static);
         Assert.NotNull(sum);
     }
+
+    [Fact]
+    public void Fixture_nested_aggregate_field_round_trips()
+    {
+        string lib = FixtureDir();
+        byte[] obj = TestCompiler.CompileToObjWithApi(
+            File.ReadAllText(Path.Combine(lib, "src", "mylib.c")),
+            File.ReadAllText(Path.Combine(lib, "include", "mylib.h")),
+            "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        Assembly asm = Assembly.Load(LinkPipeline.LinkToBytes(new[] { of }, new List<string>(),
+            exportClass: null, pinvokeMap: null, debuggable: false, shared: true));
+        Type outer = asm.GetType("mylib.MlOuter");
+        Assert.NotNull(outer.GetField("inner", BindingFlags.Public | BindingFlags.Instance));
+    }
 }
