@@ -17,7 +17,9 @@ or in chibil-side compat headers.
 ## 1. Recipe
 
 The `qjs` interpreter is `cutils.c dtoa.c libregexp.c libunicode.c quickjs.c
-quickjs-libc.c qjs.c`. Harness: `targets/build/quickjs-chibil.sh`.
+quickjs-libc.c qjs.c`, plus the generated `repl.c` (see §3). Harness:
+`targets/build/quickjs-chibil.sh`, which first invokes `qjs-gen-repl.sh` to bootstrap
+`repl.c`, then compiles every TU and links `qjs.dll`.
 
 Per TU:
 ```
@@ -49,6 +51,9 @@ constraints. It selects:
 | `<stdatomic.h>` — musl ships none | Stub header in `targets/build/qjs-compat/` (non-atomic; the EMSCRIPTEN build is single-threaded). |
 
 After these, **all 7 TUs compile**, **link** (`qjs.dll`, link exit 0), and **run JS**.
+With the bootstrapped `repl.c` linked in, the binary's only native imports are 140 libc/libm
+functions plus 4 genuine data globals (`environ`, `stdin`/`stdout`/`stderr`) — verifiable
+with `chibil-link --print-imports`.
 
 ## 3. Current state — runs JavaScript, broadly conformant
 
