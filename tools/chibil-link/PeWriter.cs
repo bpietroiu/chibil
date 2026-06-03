@@ -355,13 +355,21 @@ public sealed class PeWriter
         // range (rows 1..G) is unaffected.  Member fields are emitted in
         // CopiedTypeDef (PredictedRow) order so each struct's range is contiguous.
         foreach (var ct in merger.CopiedTypeDefs)
+        {
+            bool firstMember = true;
             foreach (var mf in ct.Members)
             {
                 var mfh = mdBuilder.AddFieldDefinition(
                     System.Reflection.FieldAttributes.Public,
                     mdBuilder.GetOrAddString(mf.Name), mf.Signature);
+                if (firstMember)
+                {
+                    AssertRow(ct.FirstFieldRow, MetadataTokens.GetRowNumber(mfh), $"member field '{ct.Name}.{mf.Name}'");
+                    firstMember = false;
+                }
                 mdBuilder.AddFieldLayout(mfh, mf.Offset);
             }
+        }
 
         // ── Step 5a1: value-type TypeDefs referenced by field signatures ──────
         // Each struct TypeDef's FieldList must be monotonically non-decreasing.
@@ -370,7 +378,6 @@ public sealed class PeWriter
         // value when prediction assigned them their rows); member-less TypeDefs
         // inherit the current cursor so the range stays non-decreasing.
         int totalGlobalFields = merger.TotalGlobalFieldRows;
-        int totalFields = merger.TotalFieldRows;
         int totalMethods = merger.Plan.Count;
         // fieldListCursor: the FieldList value for the next TypeDef that has no
         // members of its own (it points past the previous member block or past
