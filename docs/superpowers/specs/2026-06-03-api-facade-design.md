@@ -78,34 +78,37 @@ facade per header group:
 - **Functions** → `static class Api` of forwarder methods (`ldarg…; call <module fn>;
   ret`), reusing the real signature — the existing `ForwarderSynthesizer` path, grouped
   per header instead of one global class.
-- **Public types** → see Type canonicalization.
+- **Public types** → see Public types (re-namespace the already-canonical TypeDef).
 - **Enums** → synthesize `enum : <underlying>` TypeDefs; thread into signatures/fields.
 - **Namespace** → from the header path relative to the include root.
 
 Built only when `.chiapi` manifests are present; coexists with `--export-class`.
 Assemblies built without `--export-api` are byte-for-byte unchanged.
 
-## Type canonicalization (the central correctness point)
+## Public types — re-namespace the already-canonical TypeDef
 
-Each object that uses a struct carries its **own** copy of that struct's TypeDef, so a
-merged assembly has multiple structurally-identical `JSValue` types, and different
-`<Module>` methods reference different copies. Value types are **nominal** in IL — a
-forwarder that `call`s a module method returning object-A's `JSValue` cannot `ret` it
-as a different `mylib.JSValue` TypeDef (the JIT rejects it even with identical layout).
-So re-namespacing one copy is insufficient.
+The linker **already** canonicalizes value-type TypeDefs across TUs, so there is no
+dedup to build here. Every object that includes a header carries a complete copy of
+that header's structs, but `MetadataMerger` dedups them by `(namespace, name, size)`
+into **one** output TypeDef row, mapping every object's handle to that single row
+(`MetadataMerger.cs:185`; genuine get-or-add at `:2061-2064`). This is not new work —
+it is the pre-existing mechanism that lets multi-TU programs pass structs **by value**
+across TUs at all (it is exactly why QuickJS can return `JSValue` by value and thread a
+context struct from one TU to another without `InvalidProgramException`, despite value
+types being nominal in IL). So there is already exactly one canonical `JSValue`, and
+both `<Module>` methods and the `Api` forwarders reference it through the token map.
 
-**Fix — dedup public types by name.** During merge, for each public-type *name* (from
-the manifest) allocate **one canonical output TypeDef row**; map *every* object's
-same-named struct handle to that row and drop the duplicates. Because the linker's
-signature rewriting routes through the token map, both `<Module>` methods and the `Api`
-forwarders then reference the single canonical type automatically — no value-type
-mismatch. The canonical TypeDef gets the facade namespace + `public` visibility. Only
-**public** types are deduped (a small, header-named set); private structs keep today's
-per-object copies, so the change stays contained. Same-named public types with
-mismatched layout → warning, keep first.
+The facade's type work therefore reduces to a metadata edit on **one existing row**: for
+each public type name, take the canonical `CopiedTypeDef` and set its `Namespace` to the
+facade namespace and its visibility to `public` (a new `IsPublic` flag on
+`CopiedTypeDef` that `PeWriter` honors). References are by token and unchanged, so there
+is no value-type mismatch to avoid. The `(ns,name,size)` key already keeps genuinely
+different layouts apart, so a same-named/different-size type stays a distinct type and is
+surfaced as a warning rather than wrongly merged.
 
-Opaque handles (forward-declared, no definition found) → an empty `public` TypeDef in
-the namespace, as today's opaque-struct handling already produces.
+Opaque handles (forward-declared, no definition) → an empty `public` value-type TypeDef
+in the namespace — the linker already synthesizes empty opaque-handle TypeDefs for the
+export surface (`MetadataMerger.cs:383`), which this reuses.
 
 ## Enums
 
@@ -146,7 +149,7 @@ This interchangeability is the one novel IL claim and gets a dedicated keystone 
 | `.chiapi` emitter | chibil | Serialize the public-API records into a COFF section |
 | `.chiapi` parser | chibil-link (`ObjectFile`) | Read the manifest records from each object |
 | `ApiManifest` aggregator | chibil-link | Aggregate + dedup records across objects by (group, name); detect layout conflicts |
-| Public-type canonicalizer | chibil-link (`MetadataMerger`) | One canonical TypeDef per public type name; redirect all object maps to it; set namespace + public |
+| Public-type publicizer | chibil-link (`MetadataMerger`) | Re-namespace + mark `public` the already-canonical `CopiedTypeDef` for each public type name (cross-TU dedup is pre-existing) |
 | Enum synthesizer | chibil-link | Emit `enum : underlying` TypeDefs; substitute `int`→enum in public signatures/fields |
 | `ApiFacadeSynthesizer` | chibil-link | Build the `Api` class + forwarders per group (extends `ForwarderSynthesizer`) |
 | Wiring | chibil-link (`LinkPipeline`/`PeWriter`) | Reserve rows, emit the facade TypeDefs/methods, write namespaces |
@@ -180,8 +183,9 @@ implementation — it is the spec's executable definition and the TDD ratchet:
 Test layers over `mylib` (reusing `TestCompiler.CompileToObj` — extended with an
 overload that passes extra chibil args — and `LinkPipeline.LinkToBytes`):
 - **Manifest emission**: read the object's `.chiapi`, assert the expected records.
-- **Aggregation/dedup**: synthetic-manifest unit test — one canonical public type,
-  layout-conflict warning.
+- **Aggregation + re-namespace**: assert a public struct resolves to the one
+  pre-existing canonical TypeDef, now in the facade namespace and `public` (and that a
+  same-named/different-size type stays distinct).
 - **Metadata shape** (`System.Reflection.Metadata`): namespace, `Api` class + forwarder
   signatures, single canonical public structs, opaque handles, synthesized enums,
   enum-in-signature/field, **and absence** of private symbols.
@@ -217,9 +221,11 @@ the whole thing holds on a real library's public surface and produces correct re
 
 ## Open risks
 
-- **Public-type dedup correctness** is the load-bearing mechanism; the keystone +
-  QuickJS behavioral oracle are the guard. Layout mismatches across objects are warned,
-  not silently merged.
+- **Public-type sharing** relies on the linker's pre-existing TypeDef dedup
+  (`MetadataMerger.cs:185`), already proven correct by every multi-TU program (QuickJS
+  included); this feature only re-namespaces the canonical row, so it adds little risk
+  here. Genuine layout mismatches (different size) stay distinct via the dedup key and
+  are warned. The keystone + QuickJS behavioral oracle remain the end-to-end guard.
 - **Enum↔underlying interchangeability** in IL is asserted, not assumed — the
   micro-test fails loudly if any edge needs an explicit (no-op) `conv`.
 - **`.chiapi` format** is an internal contract between chibil and chibil-link; versioned
