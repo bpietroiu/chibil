@@ -429,6 +429,9 @@ public class CompilerOptions
     // Collected during parse: names of functions declared at top level inside an
     // ExportApiHeaders header. Consumed by CodeGen to emit the .chiapi manifest.
     public HashSet<string> PublicApiFunctions = new();
+    // Collected during parse: tag names of struct/union types declared in an
+    // ExportApiHeaders header. Consumed by CodeGen for the .chiapi manifest.
+    public HashSet<string> PublicApiTypes = new();
     public bool OptFpic;
     public bool OptFcommon = true;
     public string BaseFile;

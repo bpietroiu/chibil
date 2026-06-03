@@ -673,6 +673,10 @@ public class Parser
         tok = AttributeList(tok, ty);
         Token tag = null;
         if (tok.Kind == TokenKind.Ident) { tag = tok; tok = tok.Next; }
+        // Record public-API struct/union tags declared (or forward-declared) in an
+        // --export-api header. Fires for definitions and `struct Foo;` forward decls.
+        if (tag != null && IsFromExportApiHeader(tag))
+            _options.PublicApiTypes.Add(Util.GetTokenText(tag));
         if (tag != null && !Util.Equal(tok, "{"))
         {
             rest = tok;

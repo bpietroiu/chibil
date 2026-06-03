@@ -22,6 +22,28 @@ public class ApiFacadeTests
         "int ml_add(int a, int b);\n" +
         "#endif\n";
 
+    const string TyHdr =
+        "#ifndef MYLIB_H\n#define MYLIB_H\n" +
+        "struct MlPoint { int x; int y; };\n" +
+        "struct MlCtx;\n" +
+        "int ml_sum(struct MlPoint p);\n" +
+        "struct MlCtx *ml_ctx_new(void);\n" +
+        "int ml_ctx_id(struct MlCtx *c);\n" +
+        "#endif\n";
+    const string TySrc =
+        "#include \"mylib.h\"\n" +
+        "int ml_sum(struct MlPoint p){ return p.x + p.y; }\n" +
+        "struct MlCtx *ml_ctx_new(void){ return (struct MlCtx*)0; }\n" +
+        "int ml_ctx_id(struct MlCtx *c){ return c ? 1 : 0; }\n";
+
+    [Fact]
+    public void Public_struct_and_opaque_tag_are_recorded()
+    {
+        var opts = TestCompiler.CompileAndReturnOptions(TySrc, TyHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        Assert.Contains("MlPoint", opts.PublicApiTypes);  // defined in the header
+        Assert.Contains("MlCtx", opts.PublicApiTypes);    // forward-declared (opaque) in the header
+    }
+
     [Fact]
     public void CompileToObj_accepts_export_api_headers()
     {
