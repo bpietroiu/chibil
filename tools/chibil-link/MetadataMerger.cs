@@ -2279,9 +2279,10 @@ public sealed class MetadataMerger
         // Only manifest public-API types become ExplicitLayout-with-named-fields. Other
         // ExplicitLayout sources (e.g. unions in a non-export build) keep the linker's
         // default SequentialLayout emission, preserving the no-export opt-out byte-for-byte.
-        // Extract named member fields from ExplicitLayout public structs.
-        // Scalars and pointers have no type tokens in their field signatures, so
-        // RewriteFieldSignature is correct and future-proofs nested-struct members.
+        // Extract named member fields from ExplicitLayout public structs. A member
+        // field signature may reference a value-type TypeDef (e.g. `valuetype MlInner`
+        // for a nested-aggregate member); the per-field pre-scan below ensures that
+        // TypeDef is copied before RewriteFieldSignature remaps its token.
         if ((td.Attributes & System.Reflection.TypeAttributes.ExplicitLayout) != 0
             && _apiTypeNames != null && _apiTypeNames.Contains(name))
         {

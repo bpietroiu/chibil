@@ -1526,8 +1526,9 @@ public class CodeGen
                 _md.AddTypeLayout(handle, 0, (uint)type.Size);
 
                 // For public API structs, emit one named PUBLIC FieldDef per eligible member
-                // (scalar/pointer members; skip bitfields, arrays, and anonymous members).
-                // These fields are purely additive — chibil's IL accesses members by raw offset.
+                // (scalars/enums, pointers, and named struct/union members with a TypeDef;
+                // skip bitfields, arrays, anonymous members, and un-encodable nested aggregates
+                // — see CanEncodeFieldType). Purely additive: IL accesses members by raw offset.
                 if (isPublicApi)
                 {
                     for (Member m = type.Members; m != null; m = m.Next)
