@@ -43,17 +43,29 @@ QuickJS has hundreds and `mylib` has **zero**. With no such globals, `mylib`'s
 `TotalGlobalFieldRows` equals the real global count and the layout is consistent — which
 is why every `mylib` test (incl. `Assembly.Load`) passes.
 
-## What is NOT yet pinned
+## Root cause (RESOLVED)
 
-The exact reservation-vs-emission desync for the 380 common/mutable-source rows (they are
-counted into `_outFieldRow` but the member block ends up physically occupying their row
-range). The member-field `AssertRow` (`PeWriter.cs:385`) passes, which means the member
-*first-row* prediction matches its emission — so the inconsistency is in how the
-commons/`$init`-source rows are predicted vs emitted relative to the member block. A fix
-needs to make the **emitted** global-field count and `TotalGlobalFieldRows` agree (so the
-export class `FieldList` and `<Module>`'s range end exactly where members begin), OR set
-the export class `FieldList` / `<Module>` bound from the *first member field row* rather
-than `TotalGlobalFieldRows + 1`.
+The `<Module>` non-static fields are not a field-range arithmetic problem — they are
+**extra fields wrongly synthesized** by `MetadataMerger.SynthesizeDataImports`
+(`MetadataMerger.cs:1397`). That pass — gated on `-l` (libraries), which is why **only
+libc-linked programs hit it** — resolves still-unmapped data references to native imports
+(`stdout`, `errno`, …) by iterating *every* field of *every* object and treating any
+unmapped one as an unresolved extern global.
+
+A public struct's named **member fields** (emitted by the facade's named-fields work, owned
+by a struct TypeDef, not `<Module>`) are never mapped by that pass, so member names like
+`u`/`tag`/`name` were collected as "unresolved data" and emitted as **non-static `<Module>`
+Bss globals** — exactly the 167 the loader rejects.
+
+**Fix (one guard):** `SynthesizeDataImports` now skips **instance** fields — a real data
+import is always an extern *global* (static); an instance field is a struct member. (`<Module>`
+member-field leak gone; `TotalGlobalFieldRows` now equals the real global count.)
+
+**Why it hid:** `mylib` and the earlier unit tests linked with **no libraries**, so the
+`-l`-gated resolver never ran. The regression test
+`Public_struct_member_fields_not_mistaken_for_data_imports_when_linking_libs` links with
+`-lc` and a real `extern` and inspects the PE metadata directly (no `Assembly.Load`, which
+would run the data-import `.cctor` off-target).
 
 ## Repro
 
@@ -64,10 +76,9 @@ wsl bash -lc 'cd targets/quickjs-api-consumer && dotnet run'   # → TypeLoadExc
 The surface oracle (`targets/build/quickjs-api-surface.sh`) passes — only the behavioral
 consumer (which `Assembly.Load`s qjs.dll) trips the bug.
 
-## Status
+## Status: RESOLVED
 
-The behavioral-oracle harness (`targets/quickjs-api-consumer/`) is committed and correct;
-it will pass once this `<Module>`-field-range bug is fixed. Recommended follow-on: a
-focused plan to reconcile `TotalGlobalFieldRows` with the emitted global boundary (most
-likely: bound `<Module>` / the export class by the first member-field row, and ensure
-common/`$init`-source rows are emitted contiguously within the global block).
+Fixed (data-import resolver skips instance fields). The behavioral oracle now passes:
+`quickjs.Api.JS_Eval("40+2") == 42` (and `JSValue.u.int32 == 42` read directly). Full
+regression green (ApiFacade + ExportClass + MuslLink + AppHost), so libc-linked programs
+are unaffected.
