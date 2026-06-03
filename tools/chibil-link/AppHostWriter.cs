@@ -54,6 +54,7 @@ public static class AppHostWriter
         }
     }
 
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")] // only called on the !Windows branch above
     private static void MakeExecutable(string path)
     {
         File.SetUnixFileMode(path,
