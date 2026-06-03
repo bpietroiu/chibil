@@ -145,6 +145,45 @@ public class AppHostTests
     }
 
     [Fact]
+    public void Launcher_runs_the_program_without_dotnet_on_the_command_line()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return; // need an SDK for the template
+
+        const string src = "int main(void){ return 42; }\n";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "ah.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new System.Collections.Generic.List<string>());
+
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "chibil_ahrun_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            string dll = System.IO.Path.Combine(dir, "ah.dll");
+            System.IO.File.WriteAllBytes(dll, pe);
+            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "ah.runtimeconfig.json"),
+                RuntimeConfigText.Json);
+
+            AppHostWriter.TryEmit(dll);
+
+            string exe = System.Runtime.InteropServices.RuntimeInformation
+                .IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows) ? "ah.exe" : "ah";
+            string launcher = System.IO.Path.Combine(dir, exe);
+            Assert.True(System.IO.File.Exists(launcher),
+                "launcher was not produced (apphost template missing despite SDK present)");
+
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(launcher)
+            { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false })
+                ?? throw new Exception("could not start launcher process");
+            p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            if (!p.WaitForExit(30000)) { p.Kill(true); throw new Exception("launcher timed out"); }
+            Assert.Equal(42, p.ExitCode); // the apphost found hostfxr, read runtimeconfig, ran main()
+        }
+        finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
     public void Shared_target_emits_no_launcher_executable_does()
     {
         // Drives the real Linker.Run gate: -shared must not produce a launcher; a
