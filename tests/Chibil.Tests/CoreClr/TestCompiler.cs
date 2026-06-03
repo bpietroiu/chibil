@@ -39,6 +39,31 @@ static class TestCompiler
         return codegen.Generate(prog, Path.GetFileNameWithoutExtension(path) + ".obj", Path.GetFullPath(path));
     }
 
+    // Runs the in-process compile pipeline; caller has already set up opts (Target,
+    // BaseFile, IncludePaths, ExportApiHeaders) and written the source/header files into
+    // the temp dir. If generate is true returns the COFF object bytes; otherwise returns
+    // null after Parse (so callers can inspect the post-parse CompilerOptions).
+    private static byte[] RunPipeline(CompilerOptions opts, bool generate)
+    {
+        var types = new TypeSystem(opts.DataModel);
+        var tokenizer = new Tokenizer(opts, types);
+        var preprocessor = new Preprocessor(tokenizer, opts, types);
+        preprocessor.InitMacros();
+        var parser = new Parser(tokenizer, opts, types);
+        preprocessor.SetParser(parser);
+
+        Token tok = tokenizer.TokenizeFile(opts.BaseFile);
+        if (tok == null)
+            throw new InvalidOperationException($"Failed to tokenize {opts.BaseFile}");
+
+        tok = preprocessor.Preprocess(tok);
+        Obj prog = parser.Parse(tok);
+
+        if (!generate) return null;
+        var codegen = new CodeGen(opts, tokenizer, types);
+        return codegen.Generate(prog, "t.obj", Path.GetFullPath(opts.BaseFile));
+    }
+
     public static byte[] CompileToObj(string source, TargetProfile target, string name = "t.c")
     {
         // The tokenizer reads from a file, so materialize the source to a temp path.
@@ -50,22 +75,51 @@ static class TestCompiler
         try
         {
             var opts = new CompilerOptions { Target = target, BaseFile = srcPath };
-            var types = new TypeSystem(opts.DataModel);
-            var tokenizer = new Tokenizer(opts, types);
-            var preprocessor = new Preprocessor(tokenizer, opts, types);
-            preprocessor.InitMacros();
-            var parser = new Parser(tokenizer, opts, types);
-            preprocessor.SetParser(parser);
+            return RunPipeline(opts, generate: true);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
 
-            Token tok = tokenizer.TokenizeFile(srcPath);
-            if (tok == null)
-                throw new InvalidOperationException($"Failed to tokenize {srcPath}");
+    public static byte[] CompileToObjWithApi(string source, string header, string headerName,
+        TargetProfile target, string name = "t.c")
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "chibil-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string srcPath = Path.Combine(dir, name);
+        string hdrPath = Path.Combine(dir, headerName);
+        File.WriteAllText(srcPath, source);
+        File.WriteAllText(hdrPath, header);
+        try
+        {
+            var opts = new CompilerOptions { Target = target, BaseFile = srcPath };
+            opts.IncludePaths.Add(dir);          // so #include "mylib.h" resolves
+            opts.ExportApiHeaders.Add(hdrPath);  // the public header
+            return RunPipeline(opts, generate: true);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
 
-            tok = preprocessor.Preprocess(tok);
-            Obj prog = parser.Parse(tok);
-
-            var codegen = new CodeGen(opts, tokenizer, types);
-            return codegen.Generate(prog, "t.obj", Path.GetFullPath(srcPath));
+    public static CompilerOptions CompileAndReturnOptions(string source, string header,
+        string headerName, TargetProfile target, string name = "t.c")
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "chibil-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string srcPath = Path.Combine(dir, name);
+            File.WriteAllText(srcPath, source);
+            File.WriteAllText(Path.Combine(dir, headerName), header);
+            var opts = new CompilerOptions { Target = target, BaseFile = srcPath };
+            opts.IncludePaths.Add(dir);
+            opts.ExportApiHeaders.Add(Path.Combine(dir, headerName));
+            RunPipeline(opts, generate: false);
+            return opts;
         }
         finally
         {

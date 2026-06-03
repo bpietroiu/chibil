@@ -115,6 +115,7 @@ public sealed class MetadataMerger
     private bool IsExportForwarder(ObjectFile of, ObjMethod m)
     {
         if (m.Name == _entrySymbol) return false;   // the executable entry isn't an export
+        if (_apiFunctionNames != null && !_apiFunctionNames.Contains(m.Name)) return false; // manifest-restricted
         var mdef = of.Md.GetMethodDefinition(m.Handle);
         return (mdef.Attributes & UnmanagedExportFlag) != 0;
     }
@@ -197,6 +198,7 @@ public sealed class MetadataMerger
     private int _outFieldRow;
 
     private readonly string _exportClass;
+    private readonly HashSet<string> _apiFunctionNames; // null = no manifest restriction
     private int _exportTypeDefRow;   // 0 = no export type
 
     // Output TypeDef rows of synthesized empty opaque-handle value types (e.g.
@@ -208,12 +210,14 @@ public sealed class MetadataMerger
     private readonly string _entrySymbol;
 
     public MetadataMerger(IReadOnlyList<ObjectFile> objs, string exportClass = null,
-        IReadOnlyList<string> libs = null, string entrySymbol = "main")
+        IReadOnlyList<string> libs = null, string entrySymbol = "main",
+        HashSet<string> apiFunctionNames = null)
     {
         _objs = objs;
         _exportClass = exportClass;
         _libs = libs;
         _entrySymbol = string.IsNullOrEmpty(entrySymbol) ? "main" : entrySymbol;
+        _apiFunctionNames = apiFunctionNames;
     }
 
     /// <summary>A synthesized native DATA import: storage allocated for an unresolved

@@ -4040,6 +4040,10 @@ public class CodeGen
         if (dbg != null)
             coffBuilder.SetChibilDebug(dbg);
 
+        var api = BuildChiapiBlob();
+        if (api != null)
+            coffBuilder.SetChiapiData(api);
+
         var output = new BlobBuilder();
         coffBuilder.Serialize(output);
 
@@ -4090,6 +4094,31 @@ public class CodeGen
                     b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
                 }
             }
+        }
+        return b;
+    }
+
+    // Serialize the .chiapi manifest: magic 'CAPI', version 1, the facade group name
+    // (the first --export-api header's base name, no extension), then the public
+    // function names. chibil-link consumes this to build the per-header Api facade.
+    // See ChibilApi.Parse.
+    private BlobBuilder BuildChiapiBlob()
+    {
+        if (_options.ExportApiHeaders.Count == 0 || _options.PublicApiFunctions.Count == 0)
+            return null;
+        string group = System.IO.Path.GetFileNameWithoutExtension(_options.ExportApiHeaders[0]);
+        var b = new BlobBuilder();
+        b.WriteByte((byte)'C'); b.WriteByte((byte)'A'); b.WriteByte((byte)'P'); b.WriteByte((byte)'I');
+        b.WriteByte(1); // version
+        byte[] g = System.Text.Encoding.UTF8.GetBytes(group);
+        b.WriteUInt16((ushort)g.Length); b.WriteBytes(g);
+        var fns = new System.Collections.Generic.List<string>(_options.PublicApiFunctions);
+        fns.Sort(System.StringComparer.Ordinal); // deterministic output
+        b.WriteInt32(fns.Count);
+        foreach (string fn in fns)
+        {
+            byte[] nm = System.Text.Encoding.UTF8.GetBytes(fn);
+            b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
         }
         return b;
     }

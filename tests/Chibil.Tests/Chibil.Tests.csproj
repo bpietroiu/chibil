@@ -22,6 +22,7 @@
       cannot be compiled into a normal project directly.
     -->
     <Compile Include="..\..\tools\CoffObjModel.cs" />
+    <Compile Include="..\..\tools\chibil-link\ChibilApi.cs" />
     <Compile Include="..\..\tools\chibil-link\ObjectFile.cs" />
     <Compile Include="..\..\tools\chibil-link\MetadataMerger.cs" />
     <Compile Include="..\..\tools\chibil-link\RelocationFixer.cs" />
