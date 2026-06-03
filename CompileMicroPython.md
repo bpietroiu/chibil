@@ -192,12 +192,42 @@ re-from-top behavior. (`chibil/CodeGen.cs`: `CountSetjmp` gate, deferred
 
 **Result:** the nlr exception path now works — the REPL parses, compiles, executes,
 and **raises/catches/prints exceptions** correctly (no NullReference). The next
-blocker is a `MemoryError` on every REPL line: evaluating `print(2+3)` tries to
-allocate ≈ the entire heap. Bumping `MICROPY_HEAP_SIZE` 25 KB → 1 MB grows the failed
-request in lock-step (`23808` → `1038848` bytes), so this is **not** "heap too small"
-but a **size-computation bug** — something allocates a quantity derived from the total
-heap size. A distinct next blocker (likely a `size_t`/pointer-arithmetic miscompile in
-the GC or allocator), to debug separately.
+blocker presented as a `MemoryError` on every REPL line (the failed request scaled
+with the heap), which turned out to be a *symptom* — fixed in §5f.
+
+## 5f. Runtime blocker — FIXED (64-bit bitfield store)
+
+Every REPL line failed with a `MemoryError` whose requested size scaled with the
+heap (`23808` bytes at a 25 KB heap, `1038848` at 1 MB). A managed stack trace on the
+oversized `gc_alloc` pointed at `push_rule` (`py/parse.c`) growing the parser's
+`rule_stack`. Tracing the parse loop showed it spinning on `rule_id=0` forever, the
+stack growing until the heap was exhausted. A `push_rule` probe revealed the cause:
+storing `rs->rule_id = 56` read back `0`.
+
+`rule_stack_t` packs `size_t src_line : 56; size_t rule_id : 8;` — `rule_id` sits at
+**bit offset 56** of a 64-bit storage unit. chibil's bitfield **store**
+(`GenBitfieldAssign`) did the mask/shift/merge in **32-bit**: `value << 56` masked the
+IL shift count to `<< 24`, the scratch local truncated to 32 bits, and the 64-bit
+clear-mask was cut to 32 bits — so the high field always stored `0`. Every popped
+rule read `rule_id=0`, so the parser re-pushed rule 0 endlessly.
+
+**Fix (committed):** widen the value (`conv.i8`), emit 64-bit mask/clear-mask
+constants, and use a 64-bit scratch when the storage unit exceeds 32 bits.
+(`chibil/CodeGen.cs::GenBitfieldAssign`; red/green test
+`Wide_bitfield_at_high_offset_round_trips` in `MuslLinkTests`.)
+
+**Result:** MicroPython now **evaluates Python**:
+
+```
+>>> print(2+3)
+5
+>>> print([x*x for x in range(5)])
+[0, 1, 4, 9, 16]
+```
+
+Arithmetic, lists, comprehensions, `range`, and `print` all work. The next blocker
+is a `System.InvalidProgramException` in `mp_iternext` (the JIT rejecting chibil's IL
+for the iterator-dispatch path) when `sorted()` iterates — a distinct codegen issue.
 
 ## 6. Windows vs Linux
 
