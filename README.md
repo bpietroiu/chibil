@@ -1,3 +1,48 @@
+# Chibil — fork additions
+
+This fork adds an in-house linker and a set of compiler improvements, and exercises
+them against SQLite, bash, and MicroPython.
+
+### chibil-link (in-house linker)
+
+Emits a pure-MSIL (`ILOnly`) .NET assembly directly from chibil's COFF objects — no
+`link.exe`, no Windows required.
+
+- Merges COFF objects and predicts the output metadata rows.
+- Lays initialized globals into FieldRVA data; synthesizes a `<Module>` static
+  constructor that applies pointer relocations and initializes native data imports.
+- GNU-style argument parsing: `-shared`, `-e`/`--entry`, `-L`/`-l`, `@response`
+  files, attached or separated forms; assembly identity from `-o`.
+- `argv`/`envp` marshalling for `int main(int, char**, char**)`.
+- Synthesizes P/Invoke stubs to bind libc at run time.
+- `-g` emits `DebuggableAttribute` so a .NET debugger binds breakpoints and locals.
+
+### Compiler improvements
+
+- **Portable PDB debug info** — emitted as an embedded Portable PDB (sequence points
+  with column spans, nested local scopes), so a real .NET debugger steps the C
+  source, binds breakpoints (including inside `for(;;)` headers), and shows locals.
+- Prefix `__attribute__((...))` parsing.
+- Correct 64-bit bitfield stores (high-bit fields no longer truncated).
+- Flexible-array-member globals sized by their data extent.
+- Unused `extern` declarations emit no symbol (lazy field registration).
+- `setjmp`/`longjmp` lowered to managed-exception resumption that resumes at the
+  `setjmp` call, including when it is inside a loop.
+
+### Ports tested
+
+- **SQLite** — compiles and runs from the amalgamation (opaque handles, by-value
+  structs, function-pointer tables).
+- **bash 5.3** — compiles to MSIL, runs on CoreCLR; 57/57 feature tests pass
+  (externals, redirections, heredocs, pipelines, command substitution with full
+  state transfer; `fork` via `posix_spawn` re-exec). Open: subshells, background jobs.
+- **MicroPython** (minimal port) — all 138 translation units compile and link into a
+  single 3.4 MB assembly; boots to the REPL and evaluates Python (arithmetic, lists,
+  comprehensions), catching exceptions and printing tracebacks. Open: an
+  `InvalidProgramException` in `mp_iternext` (iterator dispatch).
+
+---
+
 # Chibil C compiler
 
 ## What is chibil
