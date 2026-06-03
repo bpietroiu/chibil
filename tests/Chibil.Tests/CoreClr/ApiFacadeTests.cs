@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using ChibilLink;
 using Xunit;
 
@@ -83,5 +84,22 @@ public class ApiFacadeTests
         Assembly asm = Assembly.Load(LinkPipeline.LinkToBytes(new[] { of }, new List<string>()));
         Assert.Null(asm.GetType("mylib.Api"));
         Assert.DoesNotContain(asm.GetTypes(), t => t.IsPublic); // unchanged: no public facade
+    }
+
+    static string FixtureDir([CallerFilePath] string here = "")
+        => Path.Combine(Path.GetDirectoryName(here)!, "fixtures", "mylib");
+
+    [Fact]
+    public void Fixture_mylib_links_and_exposes_Api()
+    {
+        string lib = FixtureDir();
+        string src = File.ReadAllText(Path.Combine(lib, "src", "mylib.c"));
+        string hdr = File.ReadAllText(Path.Combine(lib, "include", "mylib.h"));
+        byte[] obj = TestCompiler.CompileToObjWithApi(src, hdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        Assembly asm = Assembly.Load(LinkPipeline.LinkToBytes(new[] { of }, new List<string>(),
+            exportClass: null, pinvokeMap: null, debuggable: false, shared: true));
+        MethodInfo add = asm.GetType("mylib.Api").GetMethod("ml_add", BindingFlags.Public | BindingFlags.Static);
+        Assert.Equal(11, (int)add.Invoke(null, new object[] { 5, 6 }));  // 5+6+secret(0)=11
     }
 }
