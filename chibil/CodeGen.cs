@@ -3157,6 +3157,12 @@ public class CodeGen
     private void GenBitfieldAssign(Node node)
     {
         Member mem = node.Lhs.Member;
+        // The storage unit may be wider than 32 bits (e.g. a `size_t`/`long long`
+        // bitfield). The mask/shift/merge MUST be done in that width: otherwise a
+        // field at a high bit offset is lost — `value << 56` masks the shift count to
+        // 32-bit (`<< 24`), the scratch truncates to 32 bits, and the 64-bit clear
+        // mask is cut to 32 bits, so the high bits read back 0.
+        bool wide = mem.Ty.Size > 4;
         GenAddr(node.Lhs);
 
         // Save address for later store
@@ -3165,13 +3171,16 @@ public class CodeGen
         GenExpr(node.Rhs);
 
         // Save the truncated value for the expression result
-        long mask = (1L << mem.BitWidth) - 1;
+        long mask = mem.BitWidth >= 64 ? -1L : (1L << mem.BitWidth) - 1;
         int assignScratch = GetOrAddScratchLocal(node.Ty);
         _enc.OpCode(ILOpCode.Dup); Push();
         _enc.StoreLocal(assignScratch); Pop();
 
+        // Widen the new value to the storage width before masking/shifting.
+        if (wide) _enc.OpCode(mem.Ty.IsUnsigned ? ILOpCode.Conv_u8 : ILOpCode.Conv_i8);
+
         // Mask and shift new value into position
-        EmitConstI4(mask);
+        if (wide) EmitConstI8(mask); else EmitConstI4(mask);
         _enc.OpCode(ILOpCode.And); Pop();
         if (mem.BitOffset > 0)
         {
@@ -3183,14 +3192,14 @@ public class CodeGen
         // Stack: addr, shifted_new
         // We need: addr, (old & ~field_mask) | shifted_new
         // Duplicate addr, load old value
-        // This requires reordering; use scratch
-        int newValScratch = GetOrAddScratchLocal(_types.TyInt);
+        // This requires reordering; use scratch (in the storage width when wide).
+        int newValScratch = GetOrAddScratchLocal(wide ? mem.Ty : _types.TyInt);
         _enc.StoreLocal(newValScratch); Pop();
         _enc.OpCode(ILOpCode.Dup); Push(); // dup addr
         Load(mem.Ty); // load old value
 
         long clearMask = ~(mask << mem.BitOffset);
-        EmitConstI4(clearMask);
+        if (wide) EmitConstI8(clearMask); else EmitConstI4(clearMask);
         _enc.OpCode(ILOpCode.And); Pop();
         _enc.LoadLocal(newValScratch); Push();
         _enc.OpCode(ILOpCode.Or); Pop();

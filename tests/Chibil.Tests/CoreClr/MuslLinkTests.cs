@@ -210,6 +210,36 @@ int main(void){
     }
 
     [Fact]
+    public void Wide_bitfield_at_high_offset_round_trips()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // A bitfield in a 64-bit storage unit at a high bit offset (`unsigned long
+        // hi : 8` after `lo : 56`) must store/load correctly. chibil's bitfield STORE
+        // did mask/shift/merge in 32-bit, so `value << 56` masked the count to `<< 24`,
+        // the scratch was 32-bit, and the clear-mask was truncated -> the high field
+        // always read back 0. (This froze MicroPython's parser: its rule_stack packs
+        // `rule_id : 8` at bit offset 56 of a size_t, so every popped rule read 0 and
+        // the parser looped pushing rule 0 until the heap was exhausted.)
+        // Mirror MicroPython's rule_stack_t exactly: pointer-based assign into an
+        // array element, a uint8_t RHS, and a trailing regular field.
+        const string src =
+            "struct s { unsigned long long lo : 56; unsigned long long hi : 8; unsigned long long tail; };\n" +
+            "int main(void){\n" +
+            "  struct s a[2];\n" +
+            "  struct s *p = &a[0];\n" +
+            "  unsigned char v = 56;\n" +
+            "  p->lo = 123;\n" +
+            "  p->hi = v;\n" +
+            "  p->tail = 0;\n" +
+            "  if (p->lo != 123) return 1;\n" +   // low field intact
+            "  if (p->hi != 56) return 2;\n" +    // high field round-trips (was 0)
+            "  return 42;\n" +
+            "}\n";
+        int exit = RunViaHost(src, out string o);
+        Assert.True(exit == 42, $"expected 42 (wide bitfields round-trip), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Array_global_decays_to_pointer_when_passed()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
