@@ -296,6 +296,9 @@ public struct EcmaSignatureRewriter
             if (rtc == SignatureTypeCode.RequiredModifier || rtc == SignatureTypeCode.OptionalModifier)
             { RewriteCustomModifier(rtc, returnTypeEncoder.CustomModifiers()); goto drainReturn; }
             // rtc is now the primitive (I4/U4) — discard it and emit the enum valuetype.
+            System.Diagnostics.Debug.Assert(
+                rtc == SignatureTypeCode.Int32 || rtc == SignatureTypeCode.UInt32,
+                "enum usage annotation must land on an int32/uint32 (collapsed enum) position");
             var enumTypeHandle = MetadataTokens.TypeDefinitionHandle(retEnumRow);
             returnTypeEncoder.Type(isByRef).Type(enumTypeHandle, isValueType: true);
         }
@@ -328,6 +331,9 @@ public struct EcmaSignatureRewriter
                 if (ptc == SignatureTypeCode.RequiredModifier || ptc == SignatureTypeCode.OptionalModifier)
                 { RewriteCustomModifier(ptc, paramEncoder.CustomModifiers()); goto drainParam; }
                 // ptc is the primitive — discard it and emit the enum valuetype.
+                System.Diagnostics.Debug.Assert(
+                    ptc == SignatureTypeCode.Int32 || ptc == SignatureTypeCode.UInt32,
+                    "enum usage annotation must land on an int32/uint32 (collapsed enum) position");
                 var enumTypeHandle = MetadataTokens.TypeDefinitionHandle(paramEnumRow);
                 paramEncoder.Type(isByRef).Type(enumTypeHandle, isValueType: true);
             }
