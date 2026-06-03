@@ -1891,6 +1891,10 @@ public class Parser
         CType ty = Declarator(ref tok, tok, basety, attr.PendingCallConv);
         if (ty.Name == null) Util.ErrorTok(ty.NamePos, "function name omitted");
         string nameStr = GetIdent(ty.Name);
+        // Record public-API functions: a top-level function declarator (prototype or
+        // definition) whose name token originates from an --export-api header.
+        if (IsFromExportApiHeader(ty.Name))
+            _options.PublicApiFunctions.Add(nameStr);
         Obj fn = FindFunc(nameStr);
         if (fn != null)
         {
@@ -2006,6 +2010,22 @@ public class Parser
         // to the SAME object so it resolves (not "implicit declaration") and hits the
         // localloc special-case too.
         PushScope("__builtin_alloca").Var = _builtinAlloca;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  API facade helpers
+    // ═══════════════════════════════════════════════════════════════
+
+    // True if tok originates from one of the --export-api public headers (matched by
+    // file name, so an as-written include spelling and a resolved path both match).
+    private bool IsFromExportApiHeader(Token tok)
+    {
+        if (tok?.File == null || _options.ExportApiHeaders.Count == 0) return false;
+        string tf = System.IO.Path.GetFileName(tok.File.DisplayName ?? tok.File.Name ?? "");
+        foreach (string h in _options.ExportApiHeaders)
+            if (string.Equals(System.IO.Path.GetFileName(h), tf, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
     }
 
     // ═══════════════════════════════════════════════════════════════

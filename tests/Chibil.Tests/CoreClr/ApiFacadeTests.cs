@@ -31,4 +31,12 @@ public class ApiFacadeTests
         Assert.NotNull(obj);
         Assert.True(obj.Length > 0);
     }
+
+    [Fact]
+    public void Public_function_in_header_is_tagged_private_static_is_not()
+    {
+        var opts = TestCompiler.CompileAndReturnOptions(LibSrc, LibHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        Assert.Contains("ml_add", opts.PublicApiFunctions);     // declared in mylib.h
+        Assert.DoesNotContain("secret", opts.PublicApiFunctions); // static, src-only
+    }
 }
