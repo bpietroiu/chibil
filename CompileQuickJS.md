@@ -136,3 +136,42 @@ git clone --depth 1 https://github.com/tc39/test262 targets/quickjs-2025-09-13/t
 wsl bash targets/build/quickjs-test262.sh       # build run-test262.dll
 wsl bash targets/build/qjs-t262-run.sh built-ins/Array
 ```
+
+## 6. C# API facade — consuming QuickJS from .NET
+
+Building with **`--export-api=quickjs.h`** makes chibil-link emit a C# binding facade
+directly from the public header: a `quickjs` namespace containing a `quickjs.Api` class of
+forwarder functions plus the public types/enums, with real types and **no reflection, no
+hand-written P/Invoke** (the engine is already managed IL in the same assembly). From the
+public header alone the facade exposes:
+
+- **188 functions** as `static` forwarders on `quickjs.Api` (`JS_NewRuntime`, `JS_Eval`,
+  `JS_ToInt32`, …);
+- **21 public types** — `JSValue`, `JSValueUnion` (with named fields `int32`/`float64`/
+  `ptr`), opaque handles `JSRuntime`/`JSContext`, `JSClassDef`, `JSPropertyDescriptor`, …;
+- **3 enums** (`JSTypedArrayEnum`, `JSPromiseStateEnum`, `JSCFunctionEnum`).
+
+A C# program references `qjs.dll` and **evaluates JavaScript**:
+
+```csharp
+using quickjs;
+unsafe {
+    JSRuntime* rt = Api.JS_NewRuntime();
+    JSContext* ctx = Api.JS_NewContext(rt);
+    fixed (byte* c = System.Text.Encoding.ASCII.GetBytes("40+2")) {
+        JSValue v = Api.JS_Eval(ctx, (sbyte*)c, 4, (sbyte*)0, 0);
+        int outv; Api.JS_ToInt32(ctx, &outv, v);   // 42
+        int direct = v.u.int32;                    // 42 — nested struct field, read by name
+    }
+}
+```
+
+Reproduce (WSL):
+```
+wsl bash targets/build/quickjs-api.sh          # build qjs.dll with the facade
+wsl bash targets/build/quickjs-api-surface.sh  # assert the facade surface  -> SURFACE_ORACLE_OK
+wsl bash targets/build/quickjs-api-run.sh      # eval 40+2 through quickjs.Api -> 42 (BEHAVIORAL_ORACLE_OK)
+```
+
+The toy `mylib` fixture (`tests/Chibil.Tests/CoreClr/fixtures/mylib/`) exercises every
+facet of the facade in fast CI tests; QuickJS is the real-world oracle.

@@ -21,6 +21,12 @@ Emits a pure-MSIL (`ILOnly`) .NET assembly directly from chibil's COFF objects �
   template the way `dotnet build` does, so the program runs as `./foo` instead of
   `dotnet foo.dll`. Best-effort: if no SDK/runtime template is found the link still
   succeeds and the dll stays runnable via `dotnet foo.dll`.
+- Emits a **C# API facade from a public header** (`--export-api=lib.h`): a `lib` namespace
+  with a `lib.Api` class of forwarder functions plus the public structs (with named fields),
+  opaque handles, and enums — so a C# program calls the C library with real types, no
+  reflection, no hand-written P/Invoke. Validated on QuickJS: a C# program evaluates
+  JavaScript through `quickjs.Api.JS_Eval("40+2")` → `42` (188 functions, 21 public types,
+  3 enums emitted from `quickjs.h`). See [CompileQuickJS.md](CompileQuickJS.md) §6.
 - `-g` emits `DebuggableAttribute` so a .NET debugger binds breakpoints and locals.
 
 ### Compiler improvements
