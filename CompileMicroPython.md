@@ -75,48 +75,46 @@ Key configuration choices:
 
 After the chibil fix + the `-include` shim, **all 138 TUs compile to MSIL.**
 
-## 5. The remaining blocker — linking
+## 5. First link blocker — FIXED (unused `extern` symbols)
 
 ```
 chibil-link: field 'mp_const_notimplemented_obj' RVA data references a non-TypeDef value type.
 ```
 
-`mp_const_notimplemented_obj` (and `mp_const_ellipsis_obj`) are `const` singleton
-globals: `const mp_obj_singleton_t mp_const_notimplemented_obj = {{&mp_type_singleton}, …};`.
-The struct `_mp_obj_singleton_t` is **complete only in `objsingleton.c`**; every
-other TU that takes its address (e.g. `modbuiltins.c` via `obj.h`) sees it
-**forward-declared (incomplete)**.
+This was **misleading** — not a TypeDef, struct, or linker problem. Spike + TDD
+delta-reduction found a 4-line root cause:
 
-It has **two** layers, both rooted in how chibil emits a struct that is used only
-**by-pointer and as a `const` global's type** (never as a value local), so chibil
-never emits a sized `TypeDef` for it:
+```c
+struct S;                  /* incomplete, never completed */
+extern const struct S g;   /* declared, NEVER used */
+int main(void){ return 0; }   /* chibil -c ; chibil-link -lc -> same error */
+```
 
-**(a) FieldRVA sizing.** `chibil-link`'s `GetFieldDataSize` sizes a `HasFieldRVA`
-global from its field's value-type and requires a `TypeDef` with `ClassLayout`.
-Diagnostic (added then reverted) showed the field type is a **same-module
-`TypeRef`** — `TypeRef ''.'_mp_obj_singleton_t' scope=ModuleDefinition` — and that
-**no object** emits `_mp_obj_singleton_t` as a `TypeDef` (the object that owns the
-FieldRVA lists `_mp_obj_type_t`, `_mp_obj_dict_t`, … but not it). A prototype that
-falls back to sizing from the **FieldRVA data extent** (distance to the next
-FieldRVA symbol in the section) cleared this layer.
+`mp_const_notimplemented_obj`'s definition **and** its only use are both behind
+`#if MICROPY_PY_BUILTINS_NOTIMPLEMENTED` = `(ROM_LEVEL 10 >= EXTRA 30) = 0` in the
+minimal port. chibil evaluates that correctly and excludes both — leaving only an
+**unused `extern` declaration**. A real linker emits no symbol for an unused
+`extern`; chibil eagerly emitted a metadata `Field` for *every* declared global, so
+the unused declaration became a phantom undefined symbol that `chibil-link` swept
+into `SynthesizeDataImports` and failed to size.
 
-**(b) Symbol resolution.** With (a) bypassed, the link then treats
-`mp_const_notimplemented_obj` as an **unresolved data import** (e.g. from
-`argcheck.obj`) instead of binding the cross-TU references to the `objsingleton.c`
-**definition**. So the `const` global's def↔ref matching across the
-incomplete-type boundary also fails.
+**Fix (committed):** register an extern global's field **lazily, on first IL
+reference** — a used extern self-registers, an unused one never does. Matches `ld`.
+Red/green test + 129 CoreClr tests green.
 
-**Recommended fix — chibil side (fixes both layers at once):** make chibil emit a
-real, sized `TypeDef` (with `ClassLayout`) for a struct that is the type of a
-defined global, and emit the global's field type as that `TypeDef` token (not a
-same-module `TypeRef`), with consistent symbol naming for def and refs. Then
-`chibil-link`'s existing sizing + symbol resolution handle it unchanged.
+## 5b. Next blocker (open)
 
-The experimental `chibil-link` sizing fallback was **reverted** — it cleared (a)
-but not (b), and modifying the merge core is risky without the full test pass. The
-diagnosis above is the handoff. After the chibil-side fix: link with `-lc`, emit
-the invariant-globalization `runtimeconfig.json` (chibil-link does this), and run
-`dotnet micropython.dll` for the REPL.
+With that fixed, the link advances and now stops at:
+
+```
+chibil-link: <obj>/modsys.obj: data relocation at .data+0xF8 is not inside any
+FieldRVA field (uninitialized/unknown global?).
+```
+
+A separate, independent issue (a `.data` relocation in `modsys.c` whose owning
+global isn't mapped to a `FieldRVA` field) — the next layer to diagnose. After it:
+link with `-lc`, emit the invariant-globalization `runtimeconfig.json` (chibil-link
+does this), and run `dotnet micropython.dll` for the REPL.
 
 ## 6. Windows vs Linux
 
