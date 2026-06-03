@@ -321,6 +321,34 @@ int main(void){
     }
 
     [Fact]
+    public void Small_storage_bitfield_read_masks_other_bits()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // Reading a bitfield in a SMALL storage unit (uint8_t/uint16_t) must mask out the
+        // other bits of the storage byte. chibil's read sized its shift-extract by the
+        // storage width (8) while the value is loaded as a 32-bit int, so the byte's other
+        // bits (here garbage 0xFF) leaked into the result -- e.g. clearing `a:1` over
+        // garbage read back non-zero. (This was QuickJS's JSGlobalVar.is_lexical reading 1
+        // from realloc garbage, so `var` was wrongly treated as a lexical/TDZ binding.)
+        const string src =
+            "typedef unsigned char u8;\n" +
+            "struct S { int x; u8 a:1, b:1, c:1; int y; };\n" +
+            "static struct S g;\n" +
+            "int main(void){\n" +
+            "  char *p = (char*)&g;\n" +
+            "  for (unsigned i = 0; i < sizeof(g); i++) p[i] = (char)0xFF;\n" +  // garbage
+            "  g.a = 0; g.b = 0; g.c = 0;\n" +     // clear all three over the garbage byte
+            "  g.b = 1;\n" +                        // set b
+            "  if (g.a != 0) return 1;\n" +         // a must read 0 (was reading garbage)
+            "  if (g.b != 1) return 2;\n" +
+            "  if (g.c != 0) return 3;\n" +
+            "  return 42;\n" +
+            "}\n";
+        int exit = RunViaHost(src, out string o);
+        Assert.True(exit == 42, $"expected 42 (small bitfields mask correctly), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Union_compound_literal_initializes_the_designated_member_fully()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;

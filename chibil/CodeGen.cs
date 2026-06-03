@@ -2391,13 +2391,20 @@ public class CodeGen
                 Load(node.Ty);
                 if (node.Member.IsBitfield)
                 {
-                    int shift = (node.Member.Ty.Size * 8) - node.Member.BitWidth - node.Member.BitOffset;
+                    // The shift-extract sign/zero-fills from the MSB of the loaded VALUE,
+                    // not the storage unit: `Load` widens a sub-word storage type to a
+                    // 32-bit int (u8/u16/u32 -> i4), 8 bytes to i8. Sizing the shifts by
+                    // the storage width (Ty.Size*8) instead leaves the storage unit's other
+                    // bits in the result for u8/u16 bitfields. Use the loaded container's
+                    // width: 32 for Size<=4, 64 for Size==8.
+                    int containerBits = node.Member.Ty.Size <= 4 ? 32 : 64;
+                    int shift = containerBits - node.Member.BitWidth - node.Member.BitOffset;
                     if (shift > 0)
                     {
                         EmitConstI4(shift);
                         _enc.OpCode(ILOpCode.Shl); Pop();
                     }
-                    int rightShift = (node.Member.Ty.Size * 8) - node.Member.BitWidth;
+                    int rightShift = containerBits - node.Member.BitWidth;
                     if (rightShift > 0)
                     {
                         EmitConstI4(rightShift);
