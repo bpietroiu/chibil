@@ -102,19 +102,36 @@ into `SynthesizeDataImports` and failed to size.
 reference** — a used extern self-registers, an unused one never does. Matches `ld`.
 Red/green test + 129 CoreClr tests green.
 
-## 5b. Next blocker (open)
-
-With that fixed, the link advances and now stops at:
+## 5b. Second link blocker — FIXED (flexible array members)
 
 ```
-chibil-link: <obj>/modsys.obj: data relocation at .data+0xF8 is not inside any
+chibil-link: modsys.obj: data relocation at .data+0xF8 is not inside any
 FieldRVA field (uninitialized/unknown global?).
 ```
 
-A separate, independent issue (a `.data` relocation in `modsys.c` whose owning
-global isn't mapped to a `FieldRVA` field) — the next layer to diagnose. After it:
-link with `-lc`, emit the invariant-globalization `runtimeconfig.json` (chibil-link
-does this), and run `dotnet micropython.dll` for the REPL.
+`mp_sys_implementation_obj` is a `mp_rom_obj_tuple_t` — a struct with a **flexible
+array member** `items[]`. chibil-link sized the global by the struct's fixed
+`ClassLayout` (0x10), but the initializer fills the FAM (→ 0x28 bytes), so a pointer
+relocation in the FAM (0xF8) fell outside the undersized field.
+
+**Fix (committed):** size an initialized FieldRVA global by its **data extent** (to
+the next symbol in the section), not the struct's fixed size. Red/green test; 130
+CoreClr tests green.
+
+## 5c. **MicroPython links and starts running** 🎉
+
+With both link blockers fixed, the minimal port **links to a single 3.4 MB MSIL
+assembly** (`micropython.dll` + `micropython.runtimeconfig.json`) and **begins
+executing**: `dotnet micropython.dll` reaches `main → mp_init`, runs real IL through
+`mp_obj_dict_store → mp_map_lookup → qstr_hash`, and then hits a **runtime**
+`AccessViolationException` in `<Module>.find_qstr(UInt64*)`.
+
+## 5d. Next blocker (open) — runtime
+
+A data-layout / relocation issue in the **qstr pool** (`find_qstr` dereferences a
+bad pointer during `mp_init`). This is the first *runtime* blocker (beyond linking)
+— the next layer to debug, analogous to the runtime issues the bash port worked
+through after it first linked.
 
 ## 6. Windows vs Linux
 
