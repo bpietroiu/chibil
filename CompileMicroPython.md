@@ -225,37 +225,50 @@ constants, and use a 64-bit scratch when the storage unit exceeds 32 bits.
 [0, 1, 4, 9, 16]
 ```
 
-Arithmetic, lists, comprehensions, `range`, and `print` all work. Two distinct
-next blockers remain: a `System.InvalidProgramException` in `mp_iternext` (the JIT
-rejecting chibil's IL for the iterator-dispatch path) when `sorted()` iterates, and
-the `exit()` crash below.
+Arithmetic, lists, comprehensions, `range`, and `print` all work. The remaining open
+blocker is a `System.InvalidProgramException` in `mp_iternext` (the JIT rejecting
+chibil's IL for the iterator-dispatch path) when `sorted()` iterates. The `exit()`
+crash is fixed below.
 
-## 5g. Next blocker (open) — `setjmp`-in-loop resume corrupts the nlr chain
+## 5g. Runtime blocker — FIXED (`setjmp`-in-loop resume)
 
-`exit()` (raising `SystemExit`) crashes with an **uncaught** `__chibil_longjmp`
-exception that propagates past `parse_compile_execute` to `Main`. Tracing `nlr_jump`
-shows the longjmp firing **twice against the same nlr buffer** (same `top`, `jmpbuf`,
-`val`) before going uncaught.
+`exit()` crashed with an **uncaught** `__chibil_longjmp` that propagated past
+`parse_compile_execute` to `Main`. Tracing `nlr_jump` showed the longjmp firing
+**twice against the same nlr buffer** (same `top`, `jmpbuf`, `val`) before going
+uncaught.
 
 Root cause: the VM's `mp_execute_bytecode` does `nlr_push(&nlr)` **inside** its
-`for(;;)` dispatch loop (`py/vm.c:301`, with `goto outer_dispatch_loop` back-edges).
-chibil's `setjmp` lowering gates `setjmp`-in-loop (and multi-`setjmp`) functions to
-the **re-from-top** resume strategy — on a `longjmp` the whole function body re-runs
-from the top, re-executing `nlr_push_tail` and **re-pushing its own nlr onto
-`nlr_top`**. So when the VM catches `SystemExit`, finds no handler, and re-raises,
-`nlr_top` still points at the VM's (re-pushed) buffer instead of the caller's — the
-re-raise loops back to the VM and the chain is broken, ending uncaught.
+`for(;;)` dispatch loop (`py/vm.c:298-301`). chibil's `setjmp` lowering gated
+`setjmp`-in-loop functions to the **re-from-top** resume strategy — on a `longjmp` the
+whole function body re-runs from the top, re-executing `nlr_push_tail` and
+**re-pushing its own nlr onto `nlr_top`**. So when the VM caught an exception, found no
+handler, and re-raised, `nlr_top` still pointed at the VM's re-pushed buffer instead of
+the caller's — the re-raise looped back to the returned-from VM frame, ending uncaught.
+(Not a regression from §5e: forcing re-from-top everywhere reproduced the identical
+double-jump.)
 
-This is **not** a regression from the §5e `setjmp` resume-point fix: forcing
-re-from-top everywhere reproduces the identical double-jump. It is a pre-existing
-limitation, only now reachable because the parser works (§5f). The §5e fix solved it
-for single-`setjmp`, non-loop functions (resume *at* the call); the proper fix
-extends resume-at-site to `setjmp`-in-loop functions, which requires emitting `leave`
-for branches/`goto`s that exit the try region (the loop back-edge crossing the
-try-region start). That is a focused but non-trivial codegen change, deferred.
+**Fix (committed):** extend resume-at-site to a single `setjmp` inside `for(;;)` /
+`do`-`while` loops. With `tryStart` at the `setjmp` call, the loop back-edge (and any
+`goto` to a label marked before the call) exits the protected region, so it is emitted
+as a `leave` via a trampoline (`SjBranch` / `_setjmpOuterLabels` in
+`chibil/CodeGen.cs`). Cond loops (`for`/`while` with a condition) are excluded — their
+forward exit would branch *into* the try — and keep re-from-top. Red/green test
+`Setjmp_in_loop_resume_does_not_corrupt_the_nlr_chain` in `MuslLinkTests`.
 
-Real Python computation (arithmetic, lists, comprehensions) is unaffected — only the
-exception-propagation path through the VM's in-loop `setjmp` is.
+**Result:** the nlr chain stays intact; `exit()` no longer crashes. Exceptions now
+propagate, are **caught, printed as tracebacks, and the REPL continues**:
+
+```
+>>> exit()
+Traceback (most recent call last):
+  File "<stdin>", in <module>
+NameError: name not defined
+>>>
+```
+
+(`exit` isn't a builtin in the minimal port, so it surfaces as a `NameError` — the
+point is the exception is handled cleanly instead of crashing the process.) The
+remaining blocker is the `mp_iternext` `InvalidProgramException` noted in §5f.
 
 ## 6. Windows vs Linux
 
