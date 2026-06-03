@@ -967,6 +967,43 @@ public class CodeGen
                     PreAllocateFromNode(fn.Body, visited);
             }
         }
+
+        // Second pass: for public API structs, pre-allocate TypeDefs for any named
+        // struct/union members that will be emitted as named fields. These member types
+        // may not appear directly in any function signature or local, so they won't have
+        // been discovered in the main pass above.
+        // We must do this in a fixpoint loop since a newly discovered member type may
+        // itself have struct members that need TypeDefs. Take a snapshot each round to
+        // avoid mutating the list while enumerating it.
+        bool added = true;
+        while (added)
+        {
+            added = false;
+            var snapshot = _pendingTypeDefs.ToArray();
+            foreach (var (_, type, _) in snapshot)
+            {
+                if (type.Kind == TypeKind.Array) continue;
+                if (type.TagName == null || !_options.PublicApiTypes.Contains(type.TagName)) continue;
+                for (Member m = type.Members; m != null; m = m.Next)
+                {
+                    if (m.IsBitfield || m.Name == null) continue;
+                    CType mty = m.Ty;
+                    while (mty.Origin != null) mty = mty.Origin;
+                    if ((mty.Kind == TypeKind.Struct || mty.Kind == TypeKind.Union)
+                        && !mty.IsNestedMember && mty.Members != null)
+                    {
+                        int id = GetTypeId(mty);
+                        if (!_structTypeDefs.ContainsKey(id))
+                        {
+                            var predictedHandle = MetadataTokens.TypeDefinitionHandle(_nextStructTypeDefRow++);
+                            _structTypeDefs[id] = predictedHandle;
+                            _pendingTypeDefs.Add((id, mty, GetStructName(mty)));
+                            added = true;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private void PreAllocateFromType(CType ty)
@@ -1428,6 +1465,27 @@ public class CodeGen
 
     // ─── Phase 5: Materialize struct/array TypeDefs ───────────────
 
+    // True if `ty` can be encoded as a struct member FIELD signature. Scalars/enums and
+    // pointers/arrays-to-encodable are fine; a struct/union is fine only if it has a real
+    // TypeDef (NOT a no-TypeDef nested/anonymous aggregate, which EncodeType would throw on).
+    private bool CanEncodeFieldType(CType ty)
+    {
+        CType c = ty;
+        while (c.Origin != null) c = c.Origin;
+        switch (c.Kind)
+        {
+            case TypeKind.Struct:
+            case TypeKind.Union:
+                if (c.IsNestedMember) return false;
+                return _structTypeDefs.ContainsKey(GetTypeId(c));
+            case TypeKind.Ptr:
+            case TypeKind.Array:
+                return c.Base == null || CanEncodeFieldType(c.Base);
+            default:
+                return true;
+        }
+    }
+
     private void MaterializeStructTypeDefs()
     {
         foreach (var (typeId, type, name) in _pendingTypeDefs)
@@ -1477,6 +1535,7 @@ public class CodeGen
                         if (m.IsBitfield) continue;                    // not separately addressable
                         if (m.Ty.Kind == TypeKind.Array) continue;     // fixed arrays: first-cut skip
                         if (m.Name == null) continue;                  // anonymous member
+                        if (!CanEncodeFieldType(m.Ty)) continue;       // skip un-encodable (anon nested) members
                         var msig = new BlobBuilder();
                         msig.WriteByte(0x06);                          // FIELD
                         EncodeType(msig, m.Ty);                        // existing type-sig encoder

@@ -326,4 +326,58 @@ public class ApiFacadeTests
         Assert.Equal(mc, code.GetParameters()[0].ParameterType);
         Assert.Equal(105, (int)code.Invoke(null, new object[] { Enum.Parse(mc, "ML_GREEN") }));  // 5+100
     }
+
+    const string NestHdr =
+        "#ifndef MYLIB_H\n#define MYLIB_H\n" +
+        "struct MlInner { int a; int b; };\n" +
+        "struct MlOuter { struct MlInner inner; int tag; };\n" +
+        "struct MlAnon { union { int i; float f; } v; int tag; };\n" +
+        "int ml_outer_sum(struct MlOuter o);\n" +
+        "int ml_anon_tag(struct MlAnon a);\n" +
+        "#endif\n";
+    const string NestSrc =
+        "#include \"mylib.h\"\n" +
+        "int ml_outer_sum(struct MlOuter o){ return o.inner.a + o.inner.b + o.tag; }\n" +
+        "int ml_anon_tag(struct MlAnon a){ return a.tag; }\n";
+
+    static System.Reflection.Metadata.TypeDefinitionHandle FindTd(System.Reflection.Metadata.MetadataReader md, string name)
+    {
+        foreach (var h in md.TypeDefinitions)
+            if (md.GetString(md.GetTypeDefinition(h).Name) == name) return h;
+        return default;
+    }
+
+    [Fact]
+    public void Public_struct_named_aggregate_member_becomes_a_field()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(NestSrc, NestHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var md = ObjectFile.Load(obj, "mylib.obj").Md;
+        var outer = FindTd(md, "MlOuter");
+        Assert.False(outer.IsNil);
+        var names = new System.Collections.Generic.List<string>();
+        foreach (var fh in md.GetTypeDefinition(outer).GetFields())
+        {
+            string n = md.GetString(md.GetFieldDefinition(fh).Name);
+            if (n != "<alignment member>") names.Add(n);
+        }
+        Assert.Contains("inner", names);
+        Assert.Contains("tag", names);
+    }
+
+    [Fact]
+    public void Public_struct_anonymous_aggregate_member_is_skipped_not_crash()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(NestSrc, NestHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var md = ObjectFile.Load(obj, "mylib.obj").Md;
+        var anon = FindTd(md, "MlAnon");
+        Assert.False(anon.IsNil);
+        var names = new System.Collections.Generic.List<string>();
+        foreach (var fh in md.GetTypeDefinition(anon).GetFields())
+        {
+            string n = md.GetString(md.GetFieldDefinition(fh).Name);
+            if (n != "<alignment member>") names.Add(n);
+        }
+        Assert.Contains("tag", names);
+        Assert.DoesNotContain("v", names);
+    }
 }
