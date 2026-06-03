@@ -146,8 +146,15 @@ public class CodeGen
     private int _setjmpBufLocal = -1;
     private List<(Node Jb, int Sjval)> _setjmpSites;
     private bool _setjmpTryOpen;            // true once the try region has started (governs Return)
-    private bool _setjmpDeferStart;         // resume-at-site mode: single setjmp, not in a loop
+    private bool _setjmpDeferStart;         // resume-at-site mode: single setjmp (in or out of a loop)
     private LabelHandle _setjmpTryStartLabel;
+    // Statement labels marked BEFORE the setjmp site (loop headers, user labels). A
+    // branch from inside the resume-at-site try to one of these exits the protected
+    // region and must be a `leave`, not a `br`.
+    private readonly HashSet<LabelHandle> _setjmpOuterLabels = new();
+    // (trampoline, target) pairs: a redirected cross-out branch jumps to `trampoline`,
+    // emitted inside the try as `trampoline: leave target`.
+    private readonly List<(LabelHandle tramp, LabelHandle target)> _setjmpLeaveTrampolines = new();
     private readonly Dictionary<string, MemberReferenceHandle> _runtimeHelperRefs = new();
     private int _maxStack, _stackDepth;
     private Dictionary<string, LabelHandle> _labels;
@@ -1762,32 +1769,34 @@ public class CodeGen
         return false;
     }
 
-    /// <summary>Count setjmp call sites in a tree and whether any is lexically inside
-    /// a loop (for/while/do). Gates the resume-at-site lowering: only a single setjmp
-    /// not under a loop can safely place the try-region boundary at the call (a loop
-    /// back-edge crossing that boundary would need an illegal plain branch out of the
-    /// try).</summary>
-    private static (int count, bool insideLoop) CountSetjmp(Node n, bool inLoop = false)
+    /// <summary>Count setjmp call sites in a tree and whether any is lexically inside a
+    /// <em>cond loop</em> — a `for`/`while` with a condition. Such a loop emits a forward
+    /// exit (`brfalse brkLabel`) from before the body to a label after the loop; with the
+    /// resume-at-site try starting inside the loop body, that label is inside the try and
+    /// the exit would be an illegal branch INTO the protected region. `for(;;)` (no cond)
+    /// and `do/while` (cond at the back-edge) have no such forward exit and are safe for
+    /// resume-at-site (their back-edges become `leave` via trampolines).</summary>
+    private static (int count, bool insideCondLoop) CountSetjmp(Node n, bool inCondLoop = false)
     {
         int count = 0;
-        bool loopHit = false;
+        bool condHit = false;
         for (; n != null; n = n.Next)
         {
             if (n.Kind == NodeKind.FunCall && n.Lhs != null && n.Lhs.Kind == NodeKind.Var
                 && n.Lhs.Var != null && n.Lhs.Var.IsFunction && IsSetjmpName(n.Lhs.Var.Name))
             {
                 count++;
-                if (inLoop) loopHit = true;
+                if (inCondLoop) condHit = true;
             }
-            bool childInLoop = inLoop || n.Kind == NodeKind.For || n.Kind == NodeKind.Do;
+            bool childInCondLoop = inCondLoop || (n.Kind == NodeKind.For && n.Cond != null);
             foreach (var c in new[] { n.Lhs, n.Rhs, n.Cond, n.Then, n.Els, n.Init, n.Inc, n.Body, n.Args })
             {
-                var (cc, cl) = CountSetjmp(c, childInLoop);
+                var (cc, cl) = CountSetjmp(c, childInCondLoop);
                 count += cc;
-                loopHit |= cl;
+                condHit |= cl;
             }
         }
-        return (count, loopHit);
+        return (count, condHit);
     }
 
     // Default-convention MemberRef signatures for the linker-synthesized helpers.
@@ -1814,6 +1823,28 @@ public class CodeGen
         if (hasRet) Push();
     }
 
+    /// <summary>
+    /// Branch to <paramref name="target"/>, converting a branch that exits the
+    /// resume-at-site setjmp try region (target marked before tryStart) into a jump to
+    /// a trampoline that <c>leave</c>s — a plain <c>br</c> out of a protected region is
+    /// illegal IL. Conditional branches are handled uniformly: the conditional branch
+    /// goes to the trampoline, which does the unconditional leave. The caller still
+    /// performs its own stack <c>Pop()</c> for conditional opcodes, as before.
+    /// </summary>
+    private void SjBranch(ILOpCode op, LabelHandle target)
+    {
+        if (_setjmpDeferStart && _setjmpTryOpen && _setjmpOuterLabels.Contains(target))
+        {
+            var tramp = _enc.DefineLabel();
+            _enc.Branch(op, tramp);
+            _setjmpLeaveTrampolines.Add((tramp, target));
+        }
+        else
+        {
+            _enc.Branch(op, target);
+        }
+    }
+
     /// <summary>Emit `Lhead: .try { body } filter { ours? } handler { resume }` plus
     /// the epilogue outside the try. Body returns funnel through `leave` (see GenStmt
     /// Return). Site list is populated by setjmp lowering DURING GenStmt.</summary>
@@ -1836,8 +1867,13 @@ public class CodeGen
         // region AT the setjmp call, so code sequenced before it runs exactly once
         // (outside the try) and a longjmp resumes after the call — correct setjmp
         // semantics. Otherwise wrap the whole body (re-from-top), the prior behavior.
-        var (sjCount, sjInLoop) = CountSetjmp(fn.Body);
-        _setjmpDeferStart = sjCount == 1 && !sjInLoop;
+        // Resume-at-site for a single setjmp, including inside for(;;)/do-while loops
+        // (back-edges become `leave`). Excludes cond loops (for/while with a cond), whose
+        // forward exit would branch into the try; those keep the re-from-top strategy.
+        var (sjCount, sjInCondLoop) = CountSetjmp(fn.Body);
+        _setjmpDeferStart = sjCount == 1 && !sjInCondLoop;
+        _setjmpOuterLabels.Clear();
+        _setjmpLeaveTrampolines.Clear();
 
         if (!_setjmpDeferStart)
         {
@@ -1853,6 +1889,14 @@ public class CodeGen
         GenStmt(fn.Body);
         // Normal fall-through end of the try -> leave to the epilogue.
         _enc.Branch(ILOpCode.Leave, _setjmpEpiLabel);
+        // Leave-trampolines for branches that exit the try to a label marked before
+        // tryStart (loop back-edges, gotos to a pre-setjmp label). Reachable only via
+        // the redirected branches; each ends in an unconditional leave (no fall-through).
+        foreach (var (tramp, target) in _setjmpLeaveTrampolines)
+        {
+            _enc.MarkLabel(tramp);
+            _enc.Branch(ILOpCode.Leave, target);
+        }
         _enc.MarkLabel(tryEnd);
 
         _enc.MarkLabel(filterStart);
@@ -3354,6 +3398,7 @@ public class CodeGen
 
                 if (node.Init != null) GenStmt(node.Init);
                 _enc.MarkLabel(beginLabel);
+                if (_setjmpDeferStart && !_setjmpTryOpen) _setjmpOuterLabels.Add(beginLabel);
                 if (node.Cond != null)
                 {
                     GenExpr(node.Cond);
@@ -3368,7 +3413,7 @@ public class CodeGen
                     GenExpr(node.Inc);
                     while (_stackDepth > incDepth) { _enc.OpCode(ILOpCode.Pop); Pop(); }
                 }
-                _enc.Branch(ILOpCode.Br, beginLabel);
+                SjBranch(ILOpCode.Br, beginLabel);
                 _enc.MarkLabel(brkLabel);
                 RecordScopeRange(node.ScopeId, forScopeStart);
                 return;
@@ -3383,11 +3428,12 @@ public class CodeGen
                 if (node.BrkLabel != null) _labels[node.BrkLabel] = brkLabel;
 
                 _enc.MarkLabel(beginLabel);
+                if (_setjmpDeferStart && !_setjmpTryOpen) _setjmpOuterLabels.Add(beginLabel);
                 GenStmt(node.Then);
                 _enc.MarkLabel(contLabel);
                 GenExpr(node.Cond);
                 NormalizeToBranchable(node.Cond.Ty);
-                _enc.Branch(ILOpCode.Brtrue, beginLabel); Pop();
+                SjBranch(ILOpCode.Brtrue, beginLabel); Pop();
                 _enc.MarkLabel(brkLabel);
                 return;
             }
@@ -3462,7 +3508,7 @@ public class CodeGen
                     gotoTarget = _enc.DefineLabel();
                     _labels[node.UniqueLabel] = gotoTarget;
                 }
-                _enc.Branch(ILOpCode.Br, gotoTarget);
+                SjBranch(ILOpCode.Br, gotoTarget);
                 return;
 
             case NodeKind.GotoExpr:
@@ -3476,6 +3522,7 @@ public class CodeGen
                     _labels[node.UniqueLabel] = labelTarget;
                 }
                 _enc.MarkLabel(labelTarget);
+                if (_setjmpDeferStart && !_setjmpTryOpen) _setjmpOuterLabels.Add(labelTarget);
                 GenStmt(node.Lhs);
                 return;
 
