@@ -11,7 +11,11 @@ static inline int __builtin_ctzll(unsigned long long x) { if (!x) return 64; int
 #define __builtin_expect(x, c) (x)
 // chibil doesn't parse the C11 _Static_assert keyword yet — drop the check.
 #define _Static_assert(cond, msg)
-// GCC's alternate spelling `__attribute` (no trailing underscores) -> the form chibil
-// already parses. QuickJS uses `__attribute((unused))`.
-#define __attribute __attribute__
+// Strip GCC `__attribute__((...))` / `__attribute((...))` entirely. chibil parses it
+// in prefix position but not POSTFIX (`void f(...) __attribute__((format(...)));`, used
+// by run-test262.c), and ignores the attribute either way — so dropping it is
+// behavior-equivalent and handles every position. (TODO: parse postfix attributes in
+// chibil.)
+#define __attribute__(x)
+#define __attribute(x)
 #endif

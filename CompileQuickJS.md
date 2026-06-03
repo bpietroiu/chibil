@@ -88,13 +88,51 @@ the `NodeKind.Member` bitfield read; red/green test
 `Small_storage_bitfield_read_masks_other_bits`.)
 
 This single fix cleared the whole cascade — top-level bindings, and with them
-exceptions/classes/generators/Promises/async, all came up at once. `test262` and
-modules are the natural next exploration.
+exceptions/classes/generators/Promises/async, all came up at once.
 
-## 4. Reproduce
+## 4. test262 conformance
+
+`run-test262.c` (the QuickJS conformance runner) compiles + links with chibil into
+`run-test262.dll` (build: `targets/build/quickjs-test262.sh`). Against a fresh
+`tc39/test262` clone (`run-test262 -c test262.conf -d test262/test/<area>`):
+
+| Area | errors / tests |
+|---|---|
+| `language/types` | **0 / 113** |
+| `language/statements` | **0 / 9113** |
+| `language/expressions` | **0 / 10665** |
+| `built-ins/Array` | **0 / 2900** |
+| `built-ins/String` | **0 / 1198** |
+| `built-ins/Object` | **0 / 3402** |
+| `built-ins/RegExp` (prototype, named-groups) | **0 / 511** |
+| `built-ins/Map` | **0 / 171** |
+| `built-ins/Promise` (async / job queue) | **0 / 640** |
+| **total** | **0 / ~29,400** |
+
+**Zero chibil-caused failures** across ~29k tests spanning the core language, the
+standard library, and the async/Promise job queue. (Per-area "skipped"/"excluded"
+counts are tests tagged with unsupported-by-this-QuickJS features, e.g.
+`stable-array-sort`, `await-dictionary`, skip-listed in `test262.conf` — not failures.)
+
+The only failures observed anywhere were ~61 tests under
+`built-ins/RegExp/property-escapes/generated/` (`\p{Script=…}`, `\p{ID_Continue}`,
+"unknown unicode script") — a **Unicode-data-version skew**: QuickJS's bundled
+`libunicode` tables predate the freshly-cloned test262's Unicode version, so they fail
+on native QuickJS too, independent of chibil.
+
+(One chibil gap surfaced building the runner: `run-test262.c` uses a **postfix**
+`__attribute__` — `void f(...) __attribute__((format(...)))` — which chibil parses in
+prefix but not postfix position. Stripped via the compat shim, behavior-equivalent;
+TODO: parse postfix attributes natively.)
+
+## 5. Reproduce
 
 ```
 # clone (git-ignored): tar xf quickjs-2025-09-13-2.tar.xz into targets/
 wsl bash targets/build/quickjs-chibil.sh        # compile 7 TUs + link qjs.dll
 cd targets/quickjs-2025-09-13 && dotnet qjs.dll /tmp/script.js
+# test262:
+git clone --depth 1 https://github.com/tc39/test262 targets/quickjs-2025-09-13/test262
+wsl bash targets/build/quickjs-test262.sh       # build run-test262.dll
+wsl bash targets/build/qjs-t262-run.sh built-ins/Array
 ```
