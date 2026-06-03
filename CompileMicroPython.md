@@ -126,12 +126,29 @@ executing**: `dotnet micropython.dll` reaches `main → mp_init`, runs real IL t
 `mp_obj_dict_store → mp_map_lookup → qstr_hash`, and then hits a **runtime**
 `AccessViolationException` in `<Module>.find_qstr(UInt64*)`.
 
-## 5d. Next blocker (open) — runtime
+## 5d. Runtime blocker — DEBUGGED (Mutable FAM field storage overflow)
 
-A data-layout / relocation issue in the **qstr pool** (`find_qstr` dereferences a
-bad pointer during `mp_init`). This is the first *runtime* blocker (beyond linking)
-— the next layer to debug, analogous to the runtime issues the bash port worked
-through after it first linked.
+`find_qstr` faults during `mp_init`. Root cause, found by probing the pools from
+`main` before `mp_init`:
+
+- `mp_qstr_const_pool` reads correctly (`prev`, `total_prev_len=183`, `len=31`).
+- `mp_qstr_const_pool_static` (which `prev` points to) reads **garbage** — it sits at
+  `const_pool + 0x68`, but `const_pool` (len 31) needs `0x28 + 31*8 = 0x120` bytes,
+  so its FAM **overlaps** the static pool. `find_qstr` walks into garbage → fault.
+
+Why: the qstr pools are `const` but have pointer relocations (`prev`, `lengths`,
+`qstrs[]`), so chibil-link emits them as **Mutable** fields — plain CLR static fields
+of the struct type, initialised by the `.cctor` copying from a `$init` source field.
+The **FieldRVA extent fix (5b) correctly sizes the `$init` data to 0x120**, but the
+*target* Mutable field's storage is the struct's `ClassLayout` (**0x28**). The
+`.cctor` copies 0x120 bytes into a 0x28 field → **overflow into the adjacent static
+field**.
+
+**Fix (next):** size the Mutable target field's storage to its data extent too —
+emit it with a synthesized value-type whose `ClassLayout` = `cf.Size` (chibil-link
+already emits `AddTypeLayout` for opaque value-types), coordinated with the merge's
+row prediction. Then the `.cctor` copy fits and the FAM globals (qstr pools,
+attrtuples) are laid out correctly.
 
 ## 6. Windows vs Linux
 
