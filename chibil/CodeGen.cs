@@ -1337,20 +1337,27 @@ public class CodeGen
 
     private void RegisterGlobalFields(Obj prog)
     {
-        // Pass A: definitions
+        // Only DEFINITIONS get a field up front. Extern declarations are registered
+        // lazily, on first reference by emitted IL (see GetOrRegisterGlobalField), so
+        // an UNUSED extern produces no symbol at all — matching a real linker (ld emits
+        // nothing for an unused extern). Eagerly emitting extern fields turned every
+        // unused declaration into a phantom undefined symbol that chibil-link then
+        // misclassified as a native data import.
         for (Obj g = prog; g != null; g = g.Next)
         {
             if (g.IsFunction || !g.IsDefinition) continue;
             RegisterGlobalField(g);
         }
+    }
 
-        // Pass B: externs (not yet registered)
-        for (Obj g = prog; g != null; g = g.Next)
-        {
-            if (g.IsFunction || g.IsDefinition) continue;
-            if (_fieldDefs.ContainsKey(g) || _globalFieldsByName.ContainsKey(g.Name)) continue;
-            RegisterExternField(g);
-        }
+    /// <summary>Field for a referenced global; an extern's field is created here on
+    /// first IL reference (so unused externs never get one).</summary>
+    private FieldDefinitionHandle GetOrRegisterGlobalField(Obj g)
+    {
+        if (_fieldDefs.TryGetValue(g, out var fd)) return fd;
+        if (_globalFieldsByName.TryGetValue(g.Name, out var fd2)) return fd2;
+        RegisterExternField(g);
+        return _fieldDefs[g];
     }
 
     private void RegisterGlobalField(Obj g)
@@ -1897,15 +1904,8 @@ public class CodeGen
                     }
                     return;
                 }
-                // Global variable
-                if (_fieldDefs.TryGetValue(node.Var, out var fieldDef))
-                {
-                    _enc.OpCode(ILOpCode.Ldsflda); _enc.Token(fieldDef); Push();
-                }
-                else if (_globalFieldsByName.TryGetValue(node.Var.Name, out var fieldDef2))
-                {
-                    _enc.OpCode(ILOpCode.Ldsflda); _enc.Token(fieldDef2); Push();
-                }
+                // Global variable — register its extern field on first reference.
+                _enc.OpCode(ILOpCode.Ldsflda); _enc.Token(GetOrRegisterGlobalField(node.Var)); Push();
                 return;
 
             case NodeKind.Deref:
