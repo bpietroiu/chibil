@@ -145,7 +145,7 @@ public class AppHostTests
     }
 
     [Fact]
-    public void Launcher_runs_the_program_without_dotnet_on_the_command_line()
+    public async System.Threading.Tasks.Task Launcher_runs_the_program_without_dotnet_on_the_command_line()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return; // need an SDK for the template
 
@@ -175,9 +175,16 @@ public class AppHostTests
             using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(launcher)
             { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false })
                 ?? throw new Exception("could not start launcher process");
-            p.StandardOutput.ReadToEnd();
-            p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(30000)) { p.Kill(true); throw new Exception("launcher timed out"); }
+            System.Threading.Tasks.Task<string> outTask = p.StandardOutput.ReadToEndAsync();
+            System.Threading.Tasks.Task<string> errTask = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(30000))
+            {
+                p.Kill(true);
+                try { p.WaitForExit(5000); } catch { }
+                throw new Exception("launcher timed out");
+            }
+            await outTask;
+            await errTask;
             Assert.Equal(42, p.ExitCode); // the apphost found hostfxr, read runtimeconfig, ran main()
         }
         finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
