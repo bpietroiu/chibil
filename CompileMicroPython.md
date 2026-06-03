@@ -161,10 +161,43 @@ MicroPython 44a569b637 on 2026-06-03; minimal with unknown-cpu
 ```
 
 The GC initialises and allocates (`gc_init` → `print(2+3)` triggers a collection
-that reports live blocks), so the qstr/object machinery is sound. The **next**
-runtime blocker is a `NullReferenceException` in `parse_compile_execute`
-(`shared/runtime/pyexec.c:166`) — i.e. the parse/compile/execute path, a new layer
-beyond this fix.
+that reports live blocks), so the qstr/object machinery is sound. The next runtime
+blocker was a `NullReferenceException` in `parse_compile_execute` — fixed in §5e.
+
+## 5e. Runtime blocker — FIXED (setjmp resume point)
+
+Once the REPL evaluated a line, it faulted with a `NullReferenceException` in
+`parse_compile_execute` (`shared/runtime/pyexec.c:166`). Root cause (confirmed by
+spike: `SPIKE nlr.ret_val=0`): chibil lowered `setjmp`/`longjmp` to managed-exception
+resumption that **re-ran the function body from the top** on resume. MicroPython's
+nlr idiom is
+
+```c
+nlr_buf_t nlr;
+nlr.ret_val = NULL;                  // re-runs on resume → wipes the exception
+if (nlr_push(&nlr) == 0) { ... } else { /* derefs nlr.ret_val */ }
+```
+
+`nlr_jump` stores the exception into `nlr.ret_val` before throwing; chibil's resume
+re-executed `nlr.ret_val = NULL`, clobbering it back to NULL → null deref (with
+`MICROPY_PYEXEC_ENABLE_VM_ABORT = 0`, the `nlr.ret_val == NULL` guard is compiled
+out, so line 166 ran unconditionally).
+
+**Fix (committed):** for a function with a single `setjmp` not inside a loop, start
+the try region **at the `setjmp` call site** rather than the function top, so code
+sequenced before `setjmp` runs exactly once and a `longjmp` resumes *after* the call
+— correct `setjmp` semantics. Multi-`setjmp` / `setjmp`-in-loop keep the prior
+re-from-top behavior. (`chibil/CodeGen.cs`: `CountSetjmp` gate, deferred
+`tryStart`/`Lhead`, `_setjmpTryOpen`; red/green runtime tests in `MuslLinkTests`.)
+
+**Result:** the nlr exception path now works — the REPL parses, compiles, executes,
+and **raises/catches/prints exceptions** correctly (no NullReference). The next
+blocker is a `MemoryError` on every REPL line: evaluating `print(2+3)` tries to
+allocate ≈ the entire heap. Bumping `MICROPY_HEAP_SIZE` 25 KB → 1 MB grows the failed
+request in lock-step (`23808` → `1038848` bytes), so this is **not** "heap too small"
+but a **size-computation bug** — something allocates a quantity derived from the total
+heap size. A distinct next blocker (likely a `size_t`/pointer-arithmetic miscompile in
+the GC or allocator), to debug separately.
 
 ## 6. Windows vs Linux
 
