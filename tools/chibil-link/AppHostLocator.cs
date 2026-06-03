@@ -21,6 +21,8 @@ public static class AppHostLocator
     {
         get
         {
+            // Windows and Linux are the supported hosts; other OSes (macOS, etc.)
+            // are out of scope and fall through to the linux RID.
             string os = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "win" : "linux";
             string arch = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64";
             return $"{os}-{arch}";
@@ -80,9 +82,12 @@ public static class AppHostLocator
     private static string? HighestVersionDir(string parent)
     {
         if (!Directory.Exists(parent)) return null;
+        string[] dirs;
+        try { dirs = Directory.GetDirectories(parent); }
+        catch { return null; } // permission/path errors: degrade to "not found", never throw
         string? best = null;
         Version? bestV = null;
-        foreach (string d in Directory.GetDirectories(parent))
+        foreach (string d in dirs)
         {
             string name = Path.GetFileName(d);
             string core = name.Split('-')[0]; // strip "-preview.x" etc.
