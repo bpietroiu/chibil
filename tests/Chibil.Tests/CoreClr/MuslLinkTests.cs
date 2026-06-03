@@ -321,6 +321,27 @@ int main(void){
     }
 
     [Fact]
+    public void Union_compound_literal_initializes_the_designated_member_fully()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // A union compound literal `(U){ .p = ptr }` assigned to a union initializes the
+        // WHOLE union (the designated 8-byte pointer member), not just the first member.
+        // chibil treated a non-brace union initializer as initializing the FIRST member
+        // (int, 4 bytes), truncating the pointer's high 32 bits -> a bad pointer. This is
+        // QuickJS's JSValue: `JS_MKPTR(tag,p) = (JSValue){ (JSValueUnion){.ptr=p}, tag }`,
+        // which crashed with an AccessViolation in JS_SetImmutablePrototype.
+        const string src =
+            "typedef union { int i; void *p; double d; } U;\n" +
+            "int g;\n" +
+            "int main(void){\n" +
+            "  U u = (U){ .p = &g };\n" +          // non-first 8-byte member via compound literal
+            "  return u.p == (void*)&g ? 42 : 1;\n" +  // 42 if the full pointer survived
+            "}\n";
+        int exit = RunViaHost(src, out string o);
+        Assert.True(exit == 42, $"expected 42 (union pointer member intact), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Wide_bitfield_at_high_offset_round_trips()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
