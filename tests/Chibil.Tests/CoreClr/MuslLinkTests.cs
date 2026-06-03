@@ -351,6 +351,24 @@ int main(void){
     }
 
     [Fact]
+    public void Static_data_pointer_to_external_function_links()
+    {
+        // A function pointer to an undefined external function (libc `abs`) baked into
+        // STATIC DATA emits a COFF data relocation to `abs`. chibil-link errored
+        // "external data relocation target 'abs' ... not defined in any object". It must
+        // bind `abs` to a P/Invoke stub and ldftn it into the slot in the <Module>.cctor.
+        // (Same shape as QuickJS's js_math_funcs[] table of &fabs, &floor, ...)
+        const string src =
+            "extern int abs(int);\n" +
+            "static int (*fp)(int) = abs;\n" +    // function pointer in static data
+            "int main(void){ return fp(-9); }\n";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "fp.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string> { "c" });
+        Assert.NotEmpty(pe);
+    }
+
+    [Fact]
     public void Array_global_decays_to_pointer_when_passed()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
