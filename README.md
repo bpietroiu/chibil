@@ -16,6 +16,11 @@ Emits a pure-MSIL (`ILOnly`) .NET assembly directly from chibil's COFF objects â
   files, attached or separated forms; assembly identity from `-o`.
 - `argv`/`envp` marshalling for `int main(int, char**, char**)`.
 - Synthesizes P/Invoke stubs to bind libc at run time.
+- Emits a native **apphost launcher** (`foo.exe` on Windows, `foo` on Linux) next to
+  the managed `foo.dll` for executable targets â€” copying and patching the .NET apphost
+  template the way `dotnet build` does, so the program runs as `./foo` instead of
+  `dotnet foo.dll`. Best-effort: if no SDK/runtime template is found the link still
+  succeeds and the dll stays runnable via `dotnet foo.dll`.
 - `-g` emits `DebuggableAttribute` so a .NET debugger binds breakpoints and locals.
 
 ### Compiler improvements
