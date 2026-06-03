@@ -524,11 +524,23 @@ public class Parser
         if (tag != null && !Util.Equal(tok, "{"))
         {
             CType found = FindTag(tag);
-            if (found == null) Util.ErrorTok(tag, "unknown enum type");
-            if (found.Kind != TypeKind.Enum) Util.ErrorTok(tag, "not an enum tag");
-            rest = tok; return found;
+            if (found != null)
+            {
+                if (found.Kind != TypeKind.Enum) Util.ErrorTok(tag, "not an enum tag");
+                rest = tok; return found;
+            }
+            // Forward-declared enum (GCC extension, e.g. `typedef enum E E;` before the
+            // definition). An enum is int-sized, so the incomplete type is usable now; a
+            // later `enum E {...}` registers the constants and completes this same tag.
+            ty.TagName = Util.GetTokenText(tag);
+            PushTagScope(tag, ty);
+            rest = tok; return ty;
         }
         tok = Util.Skip(tok, "{");
+        // If the tag was forward-declared in this scope, complete THAT type object so the
+        // forward-declared typedef and this definition share one type.
+        if (tag != null && _scope.Tags.TryGetValue(Util.GetTokenText(tag), out CType fwd) && fwd.Kind == TypeKind.Enum)
+            ty = fwd;
         if (tag != null) ty.TagName = Util.GetTokenText(tag);
         int i = 0, val = 0;
         while (!ConsumeEnd(ref rest, tok))

@@ -7,3 +7,4 @@
 *.tar.xz
 # scratch scripts
 /gen-patch.sh
+/quickjs-2025-09-13/
