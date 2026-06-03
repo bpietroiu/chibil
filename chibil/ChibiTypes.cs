@@ -417,6 +417,24 @@ public class DataModel(int longSize, int ldoubleSize, int ldoubleAlign, int poin
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  API manifest helper types
+// ═══════════════════════════════════════════════════════════════════
+
+public sealed class ApiEnum
+{
+    public string Tag;
+    public bool IsUnsigned;
+    public List<(string Name, int Value)> Members = new();
+}
+
+public sealed class ApiEnumUse
+{
+    public string Function;   // function name
+    public int Position;      // 0 = return type, 1..N = parameter index
+    public string EnumTag;    // the enum tag at that position
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  CompilerOptions
 // ═══════════════════════════════════════════════════════════════════
 
@@ -432,6 +450,10 @@ public class CompilerOptions
     // Collected during parse: tag names of struct/union types declared in an
     // ExportApiHeaders header. Consumed by CodeGen for the .chiapi manifest.
     public HashSet<string> PublicApiTypes = new();
+    // Public enums declared in --export-api headers: tag, unsigned-ness, and enumerators.
+    public List<ApiEnum> PublicApiEnums = new();
+    // Enum usage on a public function: which param/return position is which enum tag.
+    public List<ApiEnumUse> PublicApiEnumUsages = new();
     public bool OptFpic;
     public bool OptFcommon = true;
     public string BaseFile;

@@ -212,6 +212,30 @@ public class ApiFacadeTests
         Assert.Equal(7, (int)sum.Invoke(null, new object[] { p }));   // field offsets match the IL
     }
 
+    const string EnHdr =
+        "#ifndef MYLIB_H\n#define MYLIB_H\n" +
+        "enum MlColor { ML_RED, ML_GREEN = 5, ML_BLUE };\n" +
+        "int ml_color_code(enum MlColor c);\n" +
+        "enum MlColor ml_default_color(void);\n" +
+        "#endif\n";
+    const string EnSrc =
+        "#include \"mylib.h\"\n" +
+        "int ml_color_code(enum MlColor c){ return (int)c + 100; }\n" +
+        "enum MlColor ml_default_color(void){ return ML_GREEN; }\n";
+
+    [Fact]
+    public void Public_enum_and_usages_are_captured()
+    {
+        var opts = TestCompiler.CompileAndReturnOptions(EnSrc, EnHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var e = opts.PublicApiEnums.Find(x => x.Tag == "MlColor");
+        Assert.NotNull(e);
+        Assert.Equal(0, e.Members.Find(m => m.Name == "ML_RED").Value);
+        Assert.Equal(5, e.Members.Find(m => m.Name == "ML_GREEN").Value);
+        Assert.Equal(6, e.Members.Find(m => m.Name == "ML_BLUE").Value);
+        Assert.Contains(opts.PublicApiEnumUsages, u => u.Function == "ml_color_code" && u.Position == 1 && u.EnumTag == "MlColor");
+        Assert.Contains(opts.PublicApiEnumUsages, u => u.Function == "ml_default_color" && u.Position == 0 && u.EnumTag == "MlColor");
+    }
+
     [Fact]
     public void Fixture_struct_value_passes_through_forwarder()
     {

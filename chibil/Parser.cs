@@ -543,15 +543,21 @@ public class Parser
             ty = fwd;
         if (tag != null) ty.TagName = Util.GetTokenText(tag);
         int i = 0, val = 0;
+        var enumerators = new System.Collections.Generic.List<(string, int)>();
         while (!ConsumeEnd(ref rest, tok))
         {
             if (i++ > 0) tok = Util.Skip(tok, ",");
             string name = GetIdent(tok); tok = tok.Next;
             if (Util.Equal(tok, "=")) val = (int)ConstExpr(ref tok, tok.Next);
+            enumerators.Add((name, val));
             VarScope sc = PushScope(name);
             sc.EnumTy = ty; sc.EnumVal = val++;
         }
         if (tag != null) PushTagScope(tag, ty);
+        // Record public enum definitions from --export-api headers.
+        if (tag != null && IsFromExportApiHeader(tag))
+            _options.PublicApiEnums.Add(new ApiEnum {
+                Tag = Util.GetTokenText(tag), IsUnsigned = ty.IsUnsigned, Members = enumerators });
         return ty;
     }
 
@@ -1898,7 +1904,17 @@ public class Parser
         // Record public-API functions: a top-level function declarator (prototype or
         // definition) whose name token originates from an --export-api header.
         if (IsFromExportApiHeader(ty.Name))
+        {
             _options.PublicApiFunctions.Add(nameStr);
+            // Return type = position 0.
+            if (ty.ReturnTy != null && ty.ReturnTy.Kind == TypeKind.Enum && ty.ReturnTy.TagName != null)
+                _options.PublicApiEnumUsages.Add(new ApiEnumUse { Function = nameStr, Position = 0, EnumTag = ty.ReturnTy.TagName });
+            // Parameters = positions 1..N.
+            int __pi = 1;
+            for (CType __p = ty.Params; __p != null; __p = __p.Next, __pi++)
+                if (__p.Kind == TypeKind.Enum && __p.TagName != null)
+                    _options.PublicApiEnumUsages.Add(new ApiEnumUse { Function = nameStr, Position = __pi, EnumTag = __p.TagName });
+        }
         Obj fn = FindFunc(nameStr);
         if (fn != null)
         {
