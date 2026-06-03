@@ -60,4 +60,39 @@ public class AppHostTests
         string tooLong = new string('a', 60) + ".dll"; // 64 bytes, no room for NUL
         Assert.False(AppHostPatcher.Patch(img, tooLong));
     }
+
+    [Fact]
+    public void Locator_returns_null_for_empty_dotnet_root()
+    {
+        string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "chibil_emptyroot_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(root);
+        try
+        {
+            Assert.Null(AppHostLocator.FindInRoot(root)); // no sdk/, no packs/ → not found, no throw
+        }
+        finally { try { System.IO.Directory.Delete(root, true); } catch { } }
+    }
+
+    [Fact]
+    public void Locator_finds_highest_sdk_apphost_template()
+    {
+        string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "chibil_fakeroot_" + Guid.NewGuid().ToString("N")[..8]);
+        string exe = System.Runtime.InteropServices.RuntimeInformation
+            .IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows) ? "apphost.exe" : "apphost";
+        string lowTpl  = System.IO.Path.Combine(root, "sdk", "9.0.100", "AppHostTemplate");
+        string highTpl = System.IO.Path.Combine(root, "sdk", "10.0.100", "AppHostTemplate");
+        System.IO.Directory.CreateDirectory(lowTpl);
+        System.IO.Directory.CreateDirectory(highTpl);
+        System.IO.File.WriteAllBytes(System.IO.Path.Combine(lowTpl, exe), new byte[] { 1 });
+        System.IO.File.WriteAllBytes(System.IO.Path.Combine(highTpl, exe), new byte[] { 2 });
+        try
+        {
+            string? found = AppHostLocator.FindInRoot(root);
+            Assert.NotNull(found);
+            Assert.Equal(System.IO.Path.Combine(highTpl, exe), found); // picks 10.0.100 over 9.0.100
+        }
+        finally { try { System.IO.Directory.Delete(root, true); } catch { } }
+    }
 }
