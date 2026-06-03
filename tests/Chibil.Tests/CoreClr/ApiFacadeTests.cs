@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using ChibilLink;
 using Xunit;
 
@@ -228,23 +227,11 @@ public class ApiFacadeTests
         Type pt = asm.GetType("mylib.MlPoint");
         MethodInfo sum = api.GetMethod("ml_sum", BindingFlags.Public | BindingFlags.Static);
         Assert.NotNull(sum);
-        // The forwarder's parameter must be the re-namespaced public struct, not a stray copy.
-        Assert.Equal(pt, sum.GetParameters()[0].ParameterType);
+        Assert.Equal(pt, sum.GetParameters()[0].ParameterType);   // forwarder takes the re-namespaced struct
 
-        // chibil emits MlPoint as an opaque value type (ClassLayout size=8, no named fields —
-        // fields are accessed via IL stfld/ldfld offsets, not reflection). Construct an instance
-        // by writing raw bytes {x=3, y=4} little-endian via GCHandle+Marshal (no unsafe needed).
-        object p = Activator.CreateInstance(pt);       // zero-initialized boxed MlPoint
-        var rawBytes = new byte[] { 3, 0, 0, 0, 4, 0, 0, 0 };  // x=3, y=4 little-endian
-        var gch = GCHandle.Alloc(p, GCHandleType.Pinned);
-        try
-        {
-            IntPtr addr = gch.AddrOfPinnedObject();
-            Marshal.Copy(rawBytes, 0, addr, rawBytes.Length);
-            // Unbox a fresh copy from the pinned bytes before releasing the handle
-            p = Marshal.PtrToStructure(addr, pt);
-        }
-        finally { gch.Free(); }
-        Assert.Equal(7, (int)sum.Invoke(null, new object[] { p }));  // 3+4, struct passed by value
+        object p = Activator.CreateInstance(pt);
+        pt.GetField("x", BindingFlags.Public | BindingFlags.Instance).SetValue(p, 3);
+        pt.GetField("y", BindingFlags.Public | BindingFlags.Instance).SetValue(p, 4);
+        Assert.Equal(7, (int)sum.Invoke(null, new object[] { p }));   // 3+4, by value, fields by name
     }
 }
