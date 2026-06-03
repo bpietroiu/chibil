@@ -285,6 +285,42 @@ int main(void){
     }
 
     [Fact]
+    public void Setjmp_in_loop_resume_does_not_corrupt_the_nlr_chain()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // Mirrors MicroPython's exit(): an nlr-style chain where the "VM" has its
+        // setjmp INSIDE a for(;;) loop. It catches a longjmp, returns "exception"
+        // (MP_VM_RETURN_EXCEPTION), and the caller re-raises through the chain to an
+        // outer frame. With the buggy re-from-top resume the VM re-runs `push(&n)`,
+        // re-pushing its own nlr, so the re-raise targets the returned-from VM frame
+        // -> uncaught crash. Resume-at-site must not re-run `push`, so `top` stays
+        // correct and the re-raise reaches main.
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "typedef struct nlr { struct nlr *prev; jmp_buf jb; } nlr_t;\n" +
+            "static nlr_t *top;\n" +
+            "static void push(nlr_t *n){ n->prev = top; top = n; }\n" +
+            "static void jump(void){ nlr_t *t = top; top = t->prev; longjmp(t->jb, 1); }\n" +
+            "static int vm(void){\n" +
+            "  for (;;) {\n" +
+            "    nlr_t n;\n" +
+            "    if ((push(&n), setjmp(n.jb)) == 0) { jump(); return 0; }\n" +
+            "    else { return 7; }\n" +
+            "  }\n" +
+            "}\n" +
+            "static void caller(void){ if (vm() == 7) { jump(); } }\n" +
+            "int main(void){\n" +
+            "  nlr_t n;\n" +
+            "  if ((push(&n), setjmp(n.jb)) == 0) { caller(); return 99; }\n" +
+            "  else { return 42; }\n" +
+            "}\n",
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (re-raise reached main), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Wide_bitfield_at_high_offset_round_trips()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
