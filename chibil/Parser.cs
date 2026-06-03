@@ -154,7 +154,7 @@ public class Parser
                 "typedef", "enum", "static", "extern", "_Alignas", "signed", "unsigned",
                 "const", "volatile", "auto", "register", "restrict", "__restrict",
                 "__restrict__", "_Noreturn", "float", "double", "typeof", "inline",
-                "_Thread_local", "__thread", "_Atomic", "__declspec",
+                "_Thread_local", "__thread", "_Atomic", "__declspec", "__attribute__",
                 "__cdecl", "__clrcall", "__stdcall",
                 "__int8", "__int16", "__int32", "__int64",
                 "__builtin_va_list" };
@@ -252,6 +252,16 @@ public class Parser
                 Util.Consume(ref tok, tok, "__restrict__") || Util.Consume(ref tok, tok, "_Noreturn"))
                 continue;
             if (Util.Equal(tok, "__declspec"))
+            {
+                tok = SkipBalancedParens(tok.Next);
+                continue;
+            }
+            // GCC __attribute__((...)) in declspec position (before/among the type
+            // specifiers), e.g. `__attribute__((noreturn)) void f(void)`. Semantics
+            // (noreturn/used/weak/format/…) don't affect MSIL codegen, so skip the
+            // whole ((...)) group. Struct/declarator-position attributes are handled
+            // by AttributeList.
+            if (Util.Equal(tok, "__attribute__"))
             {
                 tok = SkipBalancedParens(tok.Next);
                 continue;
@@ -635,7 +645,10 @@ public class Parser
                 {
                     tok = Util.Skip(tok, "("); ty.Align = (int)ConstExpr(ref tok, tok); tok = Util.Skip(tok, ")"); continue;
                 }
-                Util.ErrorTok(tok, "unknown attribute");
+                // Unknown attribute (noreturn, weak, used, format, section, …): none
+                // affect MSIL layout/codegen, so skip the name and any (arg list).
+                tok = tok.Next;
+                if (Util.Equal(tok, "(")) tok = SkipBalancedParens(tok);
             }
             tok = Util.Skip(tok, ")");
         }
