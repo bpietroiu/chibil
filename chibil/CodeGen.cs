@@ -3840,9 +3840,26 @@ public class CodeGen
                 }
                 else
                 {
-                    // Unknown target — create as undefined external
+                    // Unknown target — create as undefined external data symbol.
                     targetSym = _symtab.AddExternalDataSymbol(
                         SymPrefix + targetName, LogicalSection.Data, 0);
+                    // If it is actually an undefined external FUNCTION whose address is
+                    // baked into static data (a function-pointer table, e.g. QuickJS's
+                    // js_math_funcs[]), also emit a MemberRef carrying its signature so
+                    // chibil-link can bind a P/Invoke stub and ldftn it into the slot.
+                    if (_options.Target == TargetProfile.CoreClr
+                        && !_externalFuncRefs.ContainsKey(targetName))
+                    {
+                        for (Obj f = prog; f != null; f = f.Next)
+                        {
+                            if (f.IsFunction && !f.IsDefinition && f.Name == targetName
+                                && f.Ty.CallConv != CallConv.Clrcall)
+                            {
+                                RegisterExternalFunction(f);
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 new CoffRelocationEncoder(_coffHeader, _dataRelocs)

@@ -167,6 +167,16 @@ public static class FieldDataRelocator
                                 0x04000000 | extFieldRow, inlineAddend));
                             continue;
                         }
+                        // A function pointer to an undefined external FUNCTION baked into
+                        // static data (e.g. QuickJS's js_math_funcs[] = { fabs, ... }):
+                        // bind it to the same P/Invoke stub a call site would use and
+                        // ldftn it into the slot via the .cctor (isMethod: true). Falls
+                        // through to the error only for a genuinely unbound symbol.
+                        if (merger.PInvokeStubByName.TryGetValue(nm, out int stubTok))
+                        {
+                            relocs.Add(new Reloc(owner.PredictedRow, intra, true, stubTok, 0));
+                            continue;
+                        }
                         throw new LinkException(
                             $"{of.Path}: external data relocation target '{nm}' " +
                             $"in {sec.Name}+0x{r.VirtualAddress:X} is not defined in any object.");

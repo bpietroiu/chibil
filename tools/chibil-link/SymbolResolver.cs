@@ -134,6 +134,7 @@ public static class SymbolResolver
                     pinvokeToken = SynthesizePInvoke(merger, of, name, sigReader, libs, pinvokeMap, probe);
                     pinvokeByNameSig[key] = pinvokeToken;
                 }
+                merger.PInvokeStubByName.TryAdd(name, pinvokeToken);
                 map.RecordExternal(originalToken, pinvokeToken);
             }
         }

@@ -167,6 +167,12 @@ public sealed class MetadataMerger
     public readonly List<CopiedTypeDef> CopiedTypeDefs = new();
     public readonly List<CopiedField> CopiedFields = new();
 
+    // Name -> synthesized P/Invoke stub method token, recorded by SymbolResolver. Lets
+    // a static-data relocation (which carries only a symbol name) bind a function
+    // pointer to the same stub a call site would use. First write wins (one libc
+    // signature per name).
+    public readonly Dictionary<string, int> PInvokeStubByName = new();
+
     // COMMON symbols (external tentative-definition globals) collected during the
     // data-field pass, merged by name and allocated as one zero-init .bss slot each.
     private sealed class CommonSym
