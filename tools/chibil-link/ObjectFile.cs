@@ -35,6 +35,7 @@ public sealed unsafe class ObjectFile
     public MetadataReader Md;       // reader over .cormeta
     public List<ObjMethod> Methods = new();
     public ChibilDebug Debug;       // managed-PDB side-stream (.chidbg), or null
+    public ChibilApi Api;       // parsed .chiapi public-API manifest, or null
 
     /// <summary>Parsed .chidbg: the TU's source file + per-method line points and
     /// named locals, keyed by the object's LOCAL MethodDef RID (remapped to final
@@ -148,6 +149,10 @@ public sealed unsafe class ObjectFile
         var dbgSec = of.Coff.FindSection(".chidbg");
         if (dbgSec != null)
             of.Debug = ParseChibilDebug(of.Coff.GetSectionData(dbgSec.Value).ToArray());
+
+        var apiSec = of.Coff.FindSection(".chiapi");
+        if (apiSec != null)
+            of.Api = ChibilApi.Parse(of.Coff.GetSectionData(apiSec.Value).ToArray());
 
         return of;
     }

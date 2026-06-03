@@ -39,4 +39,15 @@ public class ApiFacadeTests
         Assert.Contains("ml_add", opts.PublicApiFunctions);     // declared in mylib.h
         Assert.DoesNotContain("secret", opts.PublicApiFunctions); // static, src-only
     }
+
+    [Fact]
+    public void Chiapi_section_lists_public_functions_and_group_name()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(LibSrc, LibHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        Assert.NotNull(of.Api);                          // .chiapi parsed
+        Assert.Equal("mylib", of.Api.Group);             // header base name → group/namespace
+        Assert.Contains("ml_add", of.Api.Functions);
+        Assert.DoesNotContain("secret", of.Api.Functions);
+    }
 }
