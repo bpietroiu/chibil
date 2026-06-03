@@ -119,6 +119,35 @@ public class ApiFacadeTests
         Assert.Contains("MlCtx", of.Api.Types);
     }
 
+    static System.Reflection.Assembly LinkTyLib()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(TySrc, TyHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string>(),
+            exportClass: null, pinvokeMap: null, debuggable: false, shared: true);
+        return System.Reflection.Assembly.Load(pe);
+    }
+
+    [Fact]
+    public void Public_struct_is_public_and_in_facade_namespace()
+    {
+        var asm = LinkTyLib();
+        Type pt = asm.GetType("mylib.MlPoint");
+        Assert.NotNull(pt);                         // re-namespaced into mylib, not global
+        Assert.True(pt.IsPublic, "public struct must be public");
+        Assert.True(pt.IsValueType, "struct must be a value type");
+        Assert.Null(asm.GetType("MlPoint"));        // no longer in the global namespace
+    }
+
+    [Fact]
+    public void Opaque_handle_is_public_and_in_facade_namespace()
+    {
+        var asm = LinkTyLib();
+        Type ctx = asm.GetType("mylib.MlCtx");
+        Assert.NotNull(ctx);                        // synthesized opaque handle, re-namespaced
+        Assert.True(ctx.IsPublic && ctx.IsValueType);
+    }
+
     static string FixtureDir([CallerFilePath] string here = "")
         => Path.Combine(Path.GetDirectoryName(here)!, "fixtures", "mylib");
 

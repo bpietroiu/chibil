@@ -206,18 +206,41 @@ public sealed class MetadataMerger
     // the set it promotes to public.
     private readonly HashSet<int> _exportOpaqueTypeRows = new();
 
+    private readonly HashSet<string> _apiTypeNames;  // null = no re-namespacing
+    private readonly string _apiNamespace;
+    // Output TypeDef rows of public-API types re-namespaced into the facade namespace.
+    public readonly HashSet<int> ApiPublicTypeRows = new();
+
     private readonly IReadOnlyList<string> _libs;
     private readonly string _entrySymbol;
 
     public MetadataMerger(IReadOnlyList<ObjectFile> objs, string exportClass = null,
         IReadOnlyList<string> libs = null, string entrySymbol = "main",
-        HashSet<string> apiFunctionNames = null)
+        HashSet<string> apiFunctionNames = null,
+        HashSet<string> apiTypeNames = null, string apiNamespace = null)
     {
         _objs = objs;
         _exportClass = exportClass;
         _libs = libs;
         _entrySymbol = string.IsNullOrEmpty(entrySymbol) ? "main" : entrySymbol;
         _apiFunctionNames = apiFunctionNames;
+        _apiTypeNames = apiTypeNames;
+        _apiNamespace = apiNamespace;
+    }
+
+    // After the merge, move each public-API type's canonical TypeDef into the facade
+    // namespace and mark it for public visibility. The linker already deduped same-named
+    // value types across TUs into one CopiedTypeDef, so this is a one-row metadata edit;
+    // the forwarders and <Module> methods reference it by token and are unaffected.
+    public void ApplyApiTypeNamespacing()
+    {
+        if (_apiTypeNames == null || _apiNamespace == null) return;
+        foreach (var ct in CopiedTypeDefs)
+            if (ct.Namespace.Length == 0 && _apiTypeNames.Contains(ct.Name))
+            {
+                ct.Namespace = _apiNamespace;
+                ApiPublicTypeRows.Add(ct.PredictedRow);
+            }
     }
 
     /// <summary>A synthesized native DATA import: storage allocated for an unresolved

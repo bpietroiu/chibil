@@ -24,24 +24,35 @@ public static class LinkPipeline
 
         // API facade: when objects carry a .chiapi manifest and no explicit
         // --export-class was given, build a `<group>.Api` facade restricted to the
-        // manifest's public functions (Plan 1: functions only).
+        // manifest's public functions (Plan 1: functions only; Plan 2 adds types).
         HashSet<string> apiFns = null;
+        HashSet<string> apiTypes = null;
+        string apiNs = null;
         string effectiveExportClass = exportClass;
         if (effectiveExportClass == null)
         {
             string group = null;
             var fns = new HashSet<string>();
+            var tys = new HashSet<string>();
             foreach (var o in objs)
                 if (o.Api != null)
                 {
                     group ??= o.Api.Group;
                     fns.UnionWith(o.Api.Functions);
+                    tys.UnionWith(o.Api.Types);
                 }
-            if (group != null) { effectiveExportClass = SanitizeNs(group) + ".Api"; apiFns = fns; }
+            if (group != null)
+            {
+                apiNs = SanitizeNs(group);
+                effectiveExportClass = apiNs + ".Api";
+                apiFns = fns;
+                apiTypes = tys;
+            }
         }
 
         return new PeWriter(objs, libs ?? new List<string>(), effectiveExportClass, pinvokeMap, debuggable,
-            shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>(), apiFns).Write();
+            shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>(), apiFns,
+            apiTypes, apiNs).Write();
     }
 
     // Turn a header base name into a valid namespace segment (letters/digits/underscore;
@@ -79,12 +90,15 @@ public sealed class PeWriter
     private readonly string _entrySymbol;    // C entry symbol for an executable (-e, default 'main')
     private readonly List<string> _libSearchPaths;   // -L native-library probe dirs
     private readonly HashSet<string> _apiFunctionNames; // null = no manifest restriction
+    private readonly HashSet<string> _apiTypeNames;     // null = no re-namespacing
+    private readonly string _apiNamespace;
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
     public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null,
         Dictionary<string, string> pinvokeMap = null, bool debuggable = false,
         bool shared = false, string assemblyName = "a", string entrySymbol = "main",
-        List<string> libSearchPaths = null, HashSet<string> apiFunctionNames = null)
+        List<string> libSearchPaths = null, HashSet<string> apiFunctionNames = null,
+        HashSet<string> apiTypeNames = null, string apiNamespace = null)
     {
         _objs = objs;
         _libs = libs;
@@ -96,6 +110,8 @@ public sealed class PeWriter
         _entrySymbol = string.IsNullOrEmpty(entrySymbol) ? "main" : entrySymbol;
         _libSearchPaths = libSearchPaths ?? new List<string>();
         _apiFunctionNames = apiFunctionNames;
+        _apiTypeNames = apiTypeNames;
+        _apiNamespace = apiNamespace;
     }
 
     private static string ValidateExportClass(string name)
@@ -110,8 +126,10 @@ public sealed class PeWriter
 
     public byte[] Write()
     {
-        var merger = new MetadataMerger(_objs, _exportClass, _libs, _entrySymbol, _apiFunctionNames);
+        var merger = new MetadataMerger(_objs, _exportClass, _libs, _entrySymbol, _apiFunctionNames,
+            _apiTypeNames, _apiNamespace);
         merger.MergeAndPredict();
+        merger.ApplyApiTypeNamespacing();
 
         // Resolve cross-object references and synthesize native P/Invoke stubs.
         // Runs after defined-method prediction (so the export table is complete)
@@ -340,6 +358,7 @@ public sealed class PeWriter
         var promotedTypeDefRows = merger.ExportTypeDefRow != 0
             ? merger.BuildExportReferencedTypeRows()
             : new System.Collections.Generic.HashSet<int>();
+        promotedTypeDefRows.UnionWith(merger.ApiPublicTypeRows); // manifest-declared public types
         foreach (var ct in merger.CopiedTypeDefs)
         {
             var tdH = mdBuilder.AddTypeDefinition(
