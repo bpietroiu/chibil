@@ -98,6 +98,46 @@ public class AppHostTests
     }
 
     [Fact]
+    public void DirOfResolvedDotnet_returns_containing_dir_for_a_plain_file()
+    {
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "chibil_dotnetdir_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            string dotnet = System.IO.Path.Combine(dir, "dotnet");
+            System.IO.File.WriteAllBytes(dotnet, new byte[] { 1 });
+            // Not a symlink: the dotnet root is simply the file's own directory.
+            Assert.Equal(System.IO.Path.GetFullPath(dir), AppHostLocator.DirOfResolvedDotnet(dotnet));
+        }
+        finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void DirOfResolvedDotnet_follows_symlink_to_real_root()
+    {
+        // The WSL/Debian case: /usr/bin/dotnet is a symlink to /usr/lib/dotnet/dotnet;
+        // the real root (with sdk/, packs/) is the symlink TARGET's directory.
+        string baseDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "chibil_dotnetlink_" + Guid.NewGuid().ToString("N")[..8]);
+        string realRoot = System.IO.Path.Combine(baseDir, "real");
+        string binDir = System.IO.Path.Combine(baseDir, "bin");
+        System.IO.Directory.CreateDirectory(realRoot);
+        System.IO.Directory.CreateDirectory(binDir);
+        string realDotnet = System.IO.Path.Combine(realRoot, "dotnet");
+        System.IO.File.WriteAllBytes(realDotnet, new byte[] { 1 });
+        string linkDotnet = System.IO.Path.Combine(binDir, "dotnet");
+        try { System.IO.File.CreateSymbolicLink(linkDotnet, realDotnet); }
+        catch { return; } // no symlink privilege (e.g. Windows without Developer Mode) — skip
+        try
+        {
+            Assert.Equal(System.IO.Path.GetFullPath(realRoot),
+                AppHostLocator.DirOfResolvedDotnet(linkDotnet));
+        }
+        finally { try { System.IO.Directory.Delete(baseDir, true); } catch { } }
+    }
+
+    [Fact]
     public void Writer_emits_patched_launcher_next_to_dll()
     {
         string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(),

@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 
@@ -29,11 +30,39 @@ public static class AppHostLocator
         }
     }
 
-    /// <summary>Resolve dotnet root (DOTNET_ROOT, else dir of `dotnet` on PATH) then search.</summary>
+    /// <summary>
+    /// Resolve candidate dotnet roots (DOTNET_ROOT, then the root behind each `dotnet`
+    /// on PATH) and return the first that yields a template, else null.
+    /// </summary>
     public static string? Find()
     {
-        string? root = ResolveDotnetRoot();
-        return root == null ? null : FindInRoot(root);
+        foreach (string root in CandidateRoots())
+        {
+            string? hit = FindInRoot(root);
+            if (hit != null) return hit;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The dotnet root for a given path to the `dotnet` executable: the directory of
+    /// the symlink's final target (e.g. /usr/bin/dotnet -> /usr/lib/dotnet/dotnet, so
+    /// the root is /usr/lib/dotnet), or the file's own directory when it is not a link.
+    /// Public for hermetic testing.
+    /// </summary>
+    public static string DirOfResolvedDotnet(string dotnetFilePath)
+    {
+        try
+        {
+            FileSystemInfo? target = File.ResolveLinkTarget(dotnetFilePath, returnFinalTarget: true);
+            string resolved = target?.FullName ?? dotnetFilePath; // null when not a symlink
+            return Path.GetDirectoryName(Path.GetFullPath(resolved))
+                   ?? Path.GetFullPath(dotnetFilePath);
+        }
+        catch
+        {
+            return Path.GetDirectoryName(Path.GetFullPath(dotnetFilePath)) ?? dotnetFilePath;
+        }
     }
 
     /// <summary>Search a specific dotnet root. Public for hermetic testing.</summary>
@@ -60,23 +89,36 @@ public static class AppHostLocator
         return null;
     }
 
-    private static string? ResolveDotnetRoot()
+    /// <summary>
+    /// Candidate dotnet roots to probe, in priority order: DOTNET_ROOT, then for each
+    /// `dotnet` found on PATH both its symlink-resolved root (handles /usr/bin/dotnet ->
+    /// /usr/lib/dotnet on WSL/Debian) and the raw PATH directory (handles installs where
+    /// `dotnet` sits directly in the root, e.g. C:\Program Files\dotnet).
+    /// </summary>
+    private static IEnumerable<string> CandidateRoots()
     {
         string? env = Environment.GetEnvironmentVariable("DOTNET_ROOT");
-        if (!string.IsNullOrEmpty(env) && Directory.Exists(env)) return env;
+        if (!string.IsNullOrEmpty(env) && Directory.Exists(env)) yield return env;
 
         string dotnet = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "dotnet.exe" : "dotnet";
         string? path = Environment.GetEnvironmentVariable("PATH");
-        if (path != null)
+        if (path == null) yield break;
+
+        foreach (string dir in path.Split(Path.PathSeparator))
         {
-            foreach (string dir in path.Split(Path.PathSeparator))
+            if (string.IsNullOrEmpty(dir)) continue;
+            string? resolved = null;
+            try
             {
-                if (string.IsNullOrEmpty(dir)) continue;
-                try { if (File.Exists(Path.Combine(dir, dotnet))) return dir; }
-                catch { /* malformed PATH entry */ }
+                string full = Path.Combine(dir, dotnet);
+                if (File.Exists(full)) resolved = DirOfResolvedDotnet(full);
             }
+            catch { /* malformed PATH entry */ }
+
+            if (resolved == null) continue;
+            yield return resolved;     // symlink target's dir (the real root on WSL/Debian)
+            if (resolved != dir) yield return dir; // fallback: the PATH dir itself
         }
-        return null;
     }
 
     private static string? HighestVersionDir(string parent)
