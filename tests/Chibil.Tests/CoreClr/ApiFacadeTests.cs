@@ -380,4 +380,20 @@ public class ApiFacadeTests
         Assert.Contains("tag", names);
         Assert.DoesNotContain("v", names);
     }
+
+    [Fact]
+    public void Linked_public_struct_has_nested_aggregate_field()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(NestSrc, NestHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        Assembly asm = Assembly.Load(LinkPipeline.LinkToBytes(new[] { of }, new List<string>(),
+            exportClass: null, pinvokeMap: null, debuggable: false, shared: true));
+        Type outer = asm.GetType("mylib.MlOuter");
+        Assert.NotNull(outer);
+        FieldInfo inner = outer.GetField("inner", BindingFlags.Public | BindingFlags.Instance);
+        Assert.NotNull(inner);                                   // nested-aggregate field survived the link
+        Assert.Equal("MlInner", inner.FieldType.Name);          // typed as the inner struct
+        MethodInfo sum = asm.GetType("mylib.Api").GetMethod("ml_outer_sum", BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(sum);
+    }
 }

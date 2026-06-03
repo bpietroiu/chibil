@@ -2291,6 +2291,14 @@ public sealed class MetadataMerger
                 var fd = md.GetFieldDefinition(fh2);
                 string fn = md.GetString(fd.Name);
                 if (fn == "<alignment member>") continue;  // skip chibil's size filler
+                // Ensure any value-type TypeDef referenced by this field's signature
+                // is already copied before RewriteFieldSignature tries to remap its
+                // token. A nested-aggregate member field (e.g. `valuetype MlInner`)
+                // carries a TypeDef token that must map to a real output row or
+                // RewriteFieldSignature produces token 0x02000000 (bad token).
+                var preScan = md.GetBlobReader(fd.Signature);
+                preScan.ReadSignatureHeader();          // consume the FIELD (0x06) header
+                ScanSigTypeForTypeDefs(of, ref preScan);
                 var sr = md.GetBlobReader(fd.Signature);
                 var ob = new BlobBuilder();
                 EcmaSignatureRewriter.RewriteFieldSignature(sr, map, ob);
