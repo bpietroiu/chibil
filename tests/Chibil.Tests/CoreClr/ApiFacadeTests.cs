@@ -237,6 +237,18 @@ public class ApiFacadeTests
     }
 
     [Fact]
+    public void Chiapi_v3_round_trips_enums_and_usages()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(EnSrc, EnHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        Assert.NotNull(of.Api);
+        var e = of.Api.Enums.Find(x => x.Tag == "MlColor");
+        Assert.NotNull(e);
+        Assert.Equal(6, e.Members.Find(m => m.Name == "ML_BLUE").Value);
+        Assert.Contains(of.Api.EnumUsages, u => u.Function == "ml_color_code" && u.Position == 1 && u.EnumTag == "MlColor");
+    }
+
+    [Fact]
     public void Fixture_struct_value_passes_through_forwarder()
     {
         string lib = FixtureDir();

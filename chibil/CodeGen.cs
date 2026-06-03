@@ -4123,19 +4123,20 @@ public class CodeGen
         return b;
     }
 
-    // Serialize the .chiapi manifest: magic 'CAPI', version 2, the facade group name
+    // Serialize the .chiapi manifest: magic 'CAPI', version 3, the facade group name
     // (the first --export-api header's base name, no extension), then the public
-    // function names, then the public type names. chibil-link consumes this to build
-    // the per-header Api facade. See ChibilApi.Parse.
+    // function names, then the public type names, then the public enum definitions,
+    // then the enum usages on public function parameters/returns.
+    // chibil-link consumes this to build the per-header Api facade. See ChibilApi.Parse.
     private BlobBuilder BuildChiapiBlob()
     {
         if (_options.ExportApiHeaders.Count == 0 ||
-            (_options.PublicApiFunctions.Count == 0 && _options.PublicApiTypes.Count == 0))
+            (_options.PublicApiFunctions.Count == 0 && _options.PublicApiTypes.Count == 0 && _options.PublicApiEnums.Count == 0))
             return null;
         string group = System.IO.Path.GetFileNameWithoutExtension(_options.ExportApiHeaders[0]);
         var b = new BlobBuilder();
         b.WriteByte((byte)'C'); b.WriteByte((byte)'A'); b.WriteByte((byte)'P'); b.WriteByte((byte)'I');
-        b.WriteByte(2); // version
+        b.WriteByte(3); // version
         byte[] g = System.Text.Encoding.UTF8.GetBytes(group);
         b.WriteUInt16((ushort)g.Length); b.WriteBytes(g);
         var fns = new System.Collections.Generic.List<string>(_options.PublicApiFunctions);
@@ -4153,6 +4154,36 @@ public class CodeGen
         {
             byte[] nm = System.Text.Encoding.UTF8.GetBytes(t);
             b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
+        }
+        // Enums section (v3)
+        var enums = _options.PublicApiEnums;
+        b.WriteInt32(enums.Count);
+        foreach (var e in enums)
+        {
+            byte[] tg = System.Text.Encoding.UTF8.GetBytes(e.Tag);
+            b.WriteUInt16((ushort)tg.Length); b.WriteBytes(tg);
+            b.WriteByte(e.IsUnsigned ? (byte)1 : (byte)0);
+            b.WriteInt32(e.Members.Count);
+            foreach (var (mn, mv) in e.Members)
+            {
+                byte[] nm = System.Text.Encoding.UTF8.GetBytes(mn);
+                b.WriteUInt16((ushort)nm.Length); b.WriteBytes(nm);
+                b.WriteInt32(mv);
+            }
+        }
+        // Usages section (v3): dedup defensively — (function,position) maps to exactly one enum tag.
+        var seenUse = new System.Collections.Generic.HashSet<(string, int)>();
+        var uses = new System.Collections.Generic.List<ApiEnumUse>();
+        foreach (var u in _options.PublicApiEnumUsages)
+            if (seenUse.Add((u.Function, u.Position))) uses.Add(u);
+        b.WriteInt32(uses.Count);
+        foreach (var u in uses)
+        {
+            byte[] fn = System.Text.Encoding.UTF8.GetBytes(u.Function);
+            b.WriteUInt16((ushort)fn.Length); b.WriteBytes(fn);
+            b.WriteInt32(u.Position);
+            byte[] et = System.Text.Encoding.UTF8.GetBytes(u.EnumTag);
+            b.WriteUInt16((ushort)et.Length); b.WriteBytes(et);
         }
         return b;
     }
