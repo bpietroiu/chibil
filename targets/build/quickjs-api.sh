@@ -1,0 +1,33 @@
+#!/bin/bash
+# Build qjs.dll with the C# API facade: --export-api=quickjs.h makes chibil-link emit a
+# `quickjs.Api` class of forwarders + public types/enums in the `quickjs` namespace, so a
+# C# program can reference qjs.dll and call quickjs.Api.JS_NewRuntime() etc. with real types.
+# Run under WSL: wsl bash /mnt/d/sandbox/chibil/targets/build/quickjs-api.sh
+set -u
+ROOT=/mnt/d/sandbox/chibil
+CH="dotnet $ROOT/chibil/bin/Debug/net10.0/chibil.dll"
+LINK="dotnet $ROOT/tools/chibil-link/bin/Debug/net10.0/chibil-link.dll"
+M=$ROOT/targets/musl-1.2.6
+MUSLINC="-I$M/arch/x86_64 -I$M/arch/generic -I$M/obj/include -I$M/include"
+SRC=$ROOT/targets/quickjs-2025-09-13
+cd "$SRC" || exit 1
+INCS="-I$ROOT/targets/build/qjs-compat -I. $MUSLINC"
+DEFS="-DEMSCRIPTEN -D_GNU_SOURCE -DCONFIG_VERSION=\"2025-09-13\""
+# --export-api=quickjs.h: the public header is the API manifest for the facade.
+CFLAGS="-c --target=coreclr -nostdinc -mlp64 --export-api=quickjs.h -include $ROOT/targets/build/quickjs-chibil-compat.h $INCS $DEFS"
+OBJDIR=/tmp/qjs_api_obj
+mkdir -p "$OBJDIR"
+ok=0; fail=0; objs=()
+for src in cutils dtoa libregexp libunicode quickjs quickjs-libc qjs; do
+    if $CH $CFLAGS "$src.c" -o "$OBJDIR/$src.obj" > "$OBJDIR/$src.log" 2>&1; then
+        ok=$((ok+1)); objs+=("$OBJDIR/$src.obj")
+    else
+        fail=$((fail+1)); echo "COMPILE FAIL: $src"; tail -4 "$OBJDIR/$src.log"
+    fi
+done
+echo "=== compiled OK=$ok FAIL=$fail ==="
+if [ "$fail" -gt 0 ]; then exit 1; fi
+echo "=== linking qjs.dll with --export-api facade ==="
+$LINK -g -o qjs.dll -lc -lm "${objs[@]}" 2>&1 | tail -8
+echo "link exit: ${PIPESTATUS[0]}"
+ls -la qjs.dll 2>/dev/null
