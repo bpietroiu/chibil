@@ -181,6 +181,12 @@ public sealed class MetadataMerger
     // in different namespaces with the same size do not wrongly collide.
     private readonly Dictionary<(string ns, string name, int size), CopiedTypeDef> _typeDefByKey = new();
 
+    // Synthesized fixed-size storage value types (ClassLayout == size) for Mutable
+    // fields whose initialized data extent exceeds their declared struct size
+    // (flexible array members / trailing padding). Cached by size so identically
+    // sized fields share one type. Value is the `valuetype <T>` field signature.
+    private readonly Dictionary<int, BlobHandle> _sizedStorageSig = new();
+
     private int _outTypeDefRow = ModuleTypeDefRow;   // row 1 = <Module>
     private int _outFieldRow;
 
@@ -1497,13 +1503,21 @@ public sealed class MetadataMerger
                 : secName.StartsWith(".rdata", StringComparison.Ordinal) ? CopiedField.FieldKind.ReadOnly
                 : CopiedField.FieldKind.Mutable;
 
+            // A Mutable field whose initialized data extent exceeds its declared
+            // struct size (flexible array member / trailing padding) needs storage
+            // sized to the extent: the .cctor copies `size` bytes into it, so a
+            // struct-sized field would overflow the copy into the next static field.
+            BlobHandle sigBlob = Builder.GetOrAddBlob(sigB);
+            if (kind == CopiedField.FieldKind.Mutable && size > typeSize)
+                sigBlob = GetOrAddSizedStorageFieldSig(size);
+
             _outFieldRow++;
             map.SetField(fh, _outFieldRow);
             CopiedFields.Add(new CopiedField
             {
                 Attributes = fd.Attributes,
                 Name = md.GetString(fd.Name),
-                SignatureBlob = Builder.GetOrAddBlob(sigB),
+                SignatureBlob = sigBlob,
                 Data = data,
                 Alignment = align,
                 PredictedRow = _outFieldRow,
@@ -1992,6 +2006,37 @@ public sealed class MetadataMerger
         // type); internal opaque types just need to exist so the JIT resolves them.
         if (_exportClass != null) _exportOpaqueTypeRows.Add(copied.PredictedRow);
         reserved[key] = copied.PredictedRow;
+    }
+
+    /// <summary>
+    /// Field signature <c>valuetype &lt;T&gt;</c> where T is a synthesized value type
+    /// with <c>ClassLayout == size</c>. Gives a Mutable field whose initialized data
+    /// extent exceeds its declared struct size (flexible array member / trailing
+    /// padding) storage that matches the bytes the <c>&lt;Module&gt;.cctor</c> copies
+    /// into it — otherwise the copy overflows into the adjacent static field.
+    /// </summary>
+    private BlobHandle GetOrAddSizedStorageFieldSig(int size)
+    {
+        if (_sizedStorageSig.TryGetValue(size, out var cached)) return cached;
+
+        _outTypeDefRow++;
+        var td = new CopiedTypeDef
+        {
+            Name = $"$FieldStorage${size}",
+            Namespace = "",
+            BaseType = GetOrAddCoreValueTypeRef(),
+            LayoutSize = size,
+            LayoutPack = 1,
+            PredictedRow = _outTypeDefRow,
+        };
+        CopiedTypeDefs.Add(td);
+
+        var b = new BlobBuilder();
+        new BlobEncoder(b).FieldSignature()
+            .Type(MetadataTokens.TypeDefinitionHandle(td.PredictedRow), isValueType: true);
+        var sig = Builder.GetOrAddBlob(b);
+        _sizedStorageSig[size] = sig;
+        return sig;
     }
 
     private void EnsureTypeDefCopied(ObjectFile of, TypeDefinitionHandle inH)
