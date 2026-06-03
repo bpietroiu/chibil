@@ -126,7 +126,7 @@ executing**: `dotnet micropython.dll` reaches `main → mp_init`, runs real IL t
 `mp_obj_dict_store → mp_map_lookup → qstr_hash`, and then hits a **runtime**
 `AccessViolationException` in `<Module>.find_qstr(UInt64*)`.
 
-## 5d. Runtime blocker — DEBUGGED (Mutable FAM field storage overflow)
+## 5d. Runtime blocker — FIXED (Mutable FAM field storage overflow)
 
 `find_qstr` faults during `mp_init`. Root cause, found by probing the pools from
 `main` before `mp_init`:
@@ -144,11 +144,27 @@ The **FieldRVA extent fix (5b) correctly sizes the `$init` data to 0x120**, but 
 `.cctor` copies 0x120 bytes into a 0x28 field → **overflow into the adjacent static
 field**.
 
-**Fix (next):** size the Mutable target field's storage to its data extent too —
-emit it with a synthesized value-type whose `ClassLayout` = `cf.Size` (chibil-link
-already emits `AddTypeLayout` for opaque value-types), coordinated with the merge's
-row prediction. Then the `.cctor` copy fits and the FAM globals (qstr pools,
-attrtuples) are laid out correctly.
+**Fix (committed):** size the Mutable target field's storage to its data extent —
+emit it with a synthesized value-type whose `ClassLayout` = `cf.Size` (`chibil-link`
+already emits `AddTypeLayout` for opaque value-types), minted during the merge's
+field pass so row prediction holds. The `.cctor` copy now fits and the FAM globals
+(qstr pools, attrtuples) are laid out correctly. (`MetadataMerger.GetOrAddSizedStorageFieldSig`;
+red/green metadata-assertion test in `FlexibleArrayGlobalTests`.)
+
+**Result:** with the fix, the pools no longer overlap (gap `0x160` ≥ the `0x120`
+`const_pool` needs; `const_pool.prev == &static_pool`, `total_prev_len == static_pool.len`),
+and MicroPython boots clean past `find_qstr`/`mp_init` to the **REPL prompt**:
+
+```
+MicroPython 44a569b637 on 2026-06-03; minimal with unknown-cpu
+>>>
+```
+
+The GC initialises and allocates (`gc_init` → `print(2+3)` triggers a collection
+that reports live blocks), so the qstr/object machinery is sound. The **next**
+runtime blocker is a `NullReferenceException` in `parse_compile_execute`
+(`shared/runtime/pyexec.c:166`) — i.e. the parse/compile/execute path, a new layer
+beyond this fix.
 
 ## 6. Windows vs Linux
 
