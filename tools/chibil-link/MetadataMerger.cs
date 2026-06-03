@@ -137,6 +137,16 @@ public sealed class MetadataMerger
         public int LayoutSize;          // ClassLayout size (>=0 => emit)
         public int LayoutPack;          // ClassLayout packing
         public int PredictedRow;        // 1-based output TypeDef row (>=2)
+        public bool ExplicitLayout;                 // true → emit ExplicitLayout + per-field offsets
+        public List<MemberField> Members = new();   // named member fields (may be empty)
+        public int FirstFieldRow;                   // predicted output field row of Members[0], or 0
+    }
+
+    public sealed class MemberField
+    {
+        public string Name;
+        public BlobHandle Signature;   // output-blob field signature (tokens already mapped)
+        public int Offset;             // FieldLayout offset
     }
 
     // A field with RVA-mapped initial data (string literal / initialized global).
@@ -378,7 +388,7 @@ public sealed class MetadataMerger
 
         // Append read-only source fields (rows N+1..M) for each Mutable (.data)
         // global, so the .cctor can cpblk their bytes into the writable target.
-        // Field-row order is final after this; later passes touch only TypeDef/method rows.
+        // Field-row order for global fields is final after this.
         ReserveMutableSourceFields();
 
         // ── Value-type TypeDefs referenced ONLY by local-variable signatures
@@ -422,6 +432,14 @@ public sealed class MetadataMerger
         //    real value-type TypeDefs are reserved (so we don't duplicate a name
         //    that has a real body) and is the LAST TypeDef-reserving pass.
         ReserveOpaqueTypeDefs();
+
+        // Assign consecutive output field rows to named member fields of ExplicitLayout
+        // public structs, AFTER all TypeDef-reserving passes (including
+        // EnsureMethodSigTypeDefs which is where public struct TypeDefs like MlPoint
+        // are first added to CopiedTypeDefs). TypeDefs added by ReserveOpaqueTypeDefs
+        // are always empty structs (no named members), so they get FirstFieldRow=0.
+        // Global field rows (1..G) are already finalized; member fields start at G+1.
+        ReserveMemberFields();
 
         // ── StandAloneSigs (local-variable sigs) ──────────────────────────────
         foreach (var of in _objs)
@@ -1573,9 +1591,38 @@ public sealed class MetadataMerger
                 cf.SourceFieldRow = ++_outFieldRow;
     }
 
-    /// <summary>Total output Field rows (targets + appended Mutable sources).
-    /// Used as the upper bound for value-type TypeDefs' field list.</summary>
-    public int TotalFieldRows => _outFieldRow;
+    /// <summary>Total global field rows (target + mutable-source fields belonging to
+    /// &lt;Module&gt;). Struct member fields are appended AFTER this; use
+    /// <see cref="TotalFieldRows"/> for the grand total.</summary>
+    public int TotalGlobalFieldRows => _outFieldRow;
+
+    // Grand total including struct member fields (set by ReserveMemberFields).
+    // Initialized to -1 as a sentinel; ReserveMemberFields always sets a real value.
+    private int _totalFieldRows = -1;
+
+    /// <summary>Grand total of all output Field rows: global fields + struct member fields.
+    /// Valid only after <see cref="ReserveMemberFields"/> has been called.</summary>
+    public int TotalFieldRows => _totalFieldRows;
+
+    /// <summary>
+    /// Assign consecutive output field rows to each CopiedTypeDef's named member
+    /// fields, in CopiedTypeDef (PredictedRow) order, AFTER all global field rows
+    /// are finalized. Member field rows start at TotalGlobalFieldRows+1 and are
+    /// contiguous within each TypeDef, so TypeDef field-range semantics are satisfied.
+    /// Also records the per-TypeDef FirstFieldRow for PeWriter's field-range starts
+    /// and computes the grand-total field count.
+    /// </summary>
+    public void ReserveMemberFields()
+    {
+        int outFieldRow = _outFieldRow;   // continues from last global field row
+        foreach (var ct in CopiedTypeDefs)
+        {
+            if (ct.Members.Count == 0) { ct.FirstFieldRow = 0; continue; }
+            ct.FirstFieldRow = outFieldRow + 1;   // first member's output field row
+            outFieldRow += ct.Members.Count;
+        }
+        _totalFieldRows = outFieldRow;
+    }
 
     /// <summary>
     /// Ensure every value-type TypeDef referenced by any local-variable
@@ -2106,6 +2153,29 @@ public sealed class MetadataMerger
         _typeDefByKey[(ns, name, size)] = copied;
         CopiedTypeDefs.Add(copied);
         map.SetTypeDef(inH, copied.PredictedRow);
+
+        // Extract named member fields from ExplicitLayout public structs.
+        // Scalars and pointers have no type tokens in their field signatures, so
+        // RewriteFieldSignature is correct and future-proofs nested-struct members.
+        if ((td.Attributes & System.Reflection.TypeAttributes.ExplicitLayout) != 0)
+        {
+            copied.ExplicitLayout = true;
+            foreach (var fh2 in td.GetFields())
+            {
+                var fd = md.GetFieldDefinition(fh2);
+                string fn = md.GetString(fd.Name);
+                if (fn == "<alignment member>") continue;  // skip chibil's size filler
+                var sr = md.GetBlobReader(fd.Signature);
+                var ob = new BlobBuilder();
+                EcmaSignatureRewriter.RewriteFieldSignature(sr, map, ob);
+                copied.Members.Add(new MemberField
+                {
+                    Name = fn,
+                    Signature = Builder.GetOrAddBlob(ob),
+                    Offset = fd.GetOffset(),
+                });
+            }
+        }
     }
 
     private static int GetFieldDataSize(MetadataReader md, FieldDefinition fd)

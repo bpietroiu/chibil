@@ -345,24 +345,62 @@ public sealed class PeWriter
                 ns.Length == 0 ? default : mdBuilder.GetOrAddString(ns),
                 mdBuilder.GetOrAddString(nm),
                 merger.GetOrAddCoreObjectRef(),
-                MetadataTokens.FieldDefinitionHandle(merger.TotalFieldRows + 1),  // owns no fields
+                MetadataTokens.FieldDefinitionHandle(merger.TotalGlobalFieldRows + 1),  // owns no fields
                 MetadataTokens.MethodDefinitionHandle(firstForwarderRow));
             AssertRow(merger.ExportTypeDefRow, MetadataTokens.GetRowNumber(exportTd), "TypeDef export class");
         }
 
+        // ── Step 5a0b: emit named member fields for ExplicitLayout public structs ──
+        // These are appended AFTER all global/RVA fields so that <Module>'s field
+        // range (rows 1..G) is unaffected.  Member fields are emitted in
+        // CopiedTypeDef (PredictedRow) order so each struct's range is contiguous.
+        foreach (var ct in merger.CopiedTypeDefs)
+            foreach (var mf in ct.Members)
+            {
+                var mfh = mdBuilder.AddFieldDefinition(
+                    System.Reflection.FieldAttributes.Public,
+                    mdBuilder.GetOrAddString(mf.Name), mf.Signature);
+                mdBuilder.AddFieldLayout(mfh, mf.Offset);
+            }
+
         // ── Step 5a1: value-type TypeDefs referenced by field signatures ──────
-        // These own no fields/methods, so their lists point past the end of the
-        // Field/MethodDef tables (1-based, exclusive upper bound = count + 1).
+        // Each struct TypeDef's FieldList must be monotonically non-decreasing.
+        // We track a cursor starting just past the global fields.  TypeDefs with
+        // named members point their FieldList at their FirstFieldRow (= the cursor
+        // value when prediction assigned them their rows); member-less TypeDefs
+        // inherit the current cursor so the range stays non-decreasing.
+        int totalGlobalFields = merger.TotalGlobalFieldRows;
         int totalFields = merger.TotalFieldRows;
         int totalMethods = merger.Plan.Count;
+        // fieldListCursor: the FieldList value for the next TypeDef that has no
+        // members of its own (it points past the previous member block or past
+        // the globals if no member-bearing struct has been emitted yet).
+        int fieldListCursor = totalGlobalFields + 1;
         var promotedTypeDefRows = merger.ExportTypeDefRow != 0
             ? merger.BuildExportReferencedTypeRows()
             : new System.Collections.Generic.HashSet<int>();
         promotedTypeDefRows.UnionWith(merger.ApiPublicTypeRows); // manifest-declared public types
         foreach (var ct in merger.CopiedTypeDefs)
         {
+            // Determine this TypeDef's FieldList start.
+            int fieldListStart;
+            if (ct.Members.Count > 0)
+            {
+                // Member-bearing struct: use the predicted first-member row.
+                fieldListStart = ct.FirstFieldRow;
+                // Advance cursor past this struct's members for the next TypeDef.
+                fieldListCursor = fieldListStart + ct.Members.Count;
+            }
+            else
+            {
+                // No members: keep the cursor (monotonically non-decreasing).
+                fieldListStart = fieldListCursor;
+            }
+
             var tdH = mdBuilder.AddTypeDefinition(
-                System.Reflection.TypeAttributes.SequentialLayout
+                (ct.ExplicitLayout
+                    ? System.Reflection.TypeAttributes.ExplicitLayout
+                    : System.Reflection.TypeAttributes.SequentialLayout)
                     | System.Reflection.TypeAttributes.Sealed
                     | System.Reflection.TypeAttributes.AnsiClass
                     | (promotedTypeDefRows.Contains(ct.PredictedRow)
@@ -371,7 +409,7 @@ public sealed class PeWriter
                 ct.Namespace.Length == 0 ? default : mdBuilder.GetOrAddString(ct.Namespace),
                 mdBuilder.GetOrAddString(ct.Name),
                 ct.BaseType,
-                MetadataTokens.FieldDefinitionHandle(totalFields + 1),
+                MetadataTokens.FieldDefinitionHandle(fieldListStart),
                 MetadataTokens.MethodDefinitionHandle(totalMethods + 1));
             AssertRow(ct.PredictedRow, MetadataTokens.GetRowNumber(tdH), $"TypeDef '{ct.Name}'");
             if (ct.LayoutSize >= 0)

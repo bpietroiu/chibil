@@ -195,6 +195,25 @@ public class ApiFacadeTests
     }
 
     [Fact]
+    public void Public_struct_fields_are_named_and_readable_in_the_assembly()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(TySrc, TyHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        Assembly asm = Assembly.Load(LinkPipeline.LinkToBytes(new[] { of }, new List<string>(),
+            exportClass: null, pinvokeMap: null, debuggable: false, shared: true));
+        Type pt = asm.GetType("mylib.MlPoint");
+        Assert.NotNull(pt);
+        FieldInfo fx = pt.GetField("x", BindingFlags.Public | BindingFlags.Instance);
+        FieldInfo fy = pt.GetField("y", BindingFlags.Public | BindingFlags.Instance);
+        Assert.NotNull(fx); Assert.NotNull(fy);
+        Assert.Equal(typeof(int), fx.FieldType);
+        object p = Activator.CreateInstance(pt);
+        fx.SetValue(p, 3); fy.SetValue(p, 4);
+        MethodInfo sum = asm.GetType("mylib.Api").GetMethod("ml_sum", BindingFlags.Public | BindingFlags.Static);
+        Assert.Equal(7, (int)sum.Invoke(null, new object[] { p }));   // field offsets match the IL
+    }
+
+    [Fact]
     public void Fixture_struct_value_passes_through_forwarder()
     {
         string lib = FixtureDir();
