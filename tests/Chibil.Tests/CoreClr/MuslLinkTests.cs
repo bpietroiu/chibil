@@ -210,6 +210,81 @@ int main(void){
     }
 
     [Fact]
+    public void Longjmp_passes_through_loop_setjmp_frame_to_outer()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // A longjmp targeting the OUTER frame must pass cleanly THROUGH an intermediate
+        // frame whose setjmp is inside a loop (gated OUT of resume-at-site -> re-from-top).
+        // This mirrors MicroPython's exit(): the SystemExit longjmp unwinds through
+        // mp_execute_bytecode (setjmp in the VM dispatch loop) up to parse_compile_execute.
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "jmp_buf outer;\n" +
+            "static void deepest(void){ longjmp(outer, 5); }\n" +
+            "static void loopframe(void){\n" +
+            "  jmp_buf injb;\n" +
+            "  for (int k = 0; k < 1; k++) {\n" +
+            "    if (setjmp(injb) == 0) { deepest(); }\n" +   // setjmp in a loop -> re-from-top
+            "  }\n" +
+            "}\n" +
+            "int main(void){\n" +
+            "  if (setjmp(outer) == 0) { loopframe(); return 99; }\n" +
+            "  else { return 42; }\n" +
+            "}\n",
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (outer caught through loop frame), got {exit}. {o}");
+    }
+
+    [Fact]
+    public void Setjmp_with_local_buffer_catches_cross_frame_longjmp()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // The setjmp BUFFER is a local (as in MicroPython's `nlr_buf_t nlr;
+        // setjmp(&nlr.jmpbuf)`), not a global. The filter matches a longjmp by the
+        // buffer address; a local buffer must still match across frames.
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "static void raise_to(long *b){ longjmp((void *)b, 7); }\n" +
+            "int main(void){\n" +
+            "  jmp_buf local;\n" +
+            "  if (setjmp(local) == 0) { raise_to(local); return 99; }\n" +
+            "  else { return 42; }\n" +
+            "}\n",
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (local-buffer setjmp caught), got {exit}. {o}");
+    }
+
+    [Fact]
+    public void Setjmp_outer_catches_reraise_from_inner_that_popped()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // Nested setjmp: an inner frame catches a longjmp, then re-raises (longjmp) to
+        // the OUTER frame, which must catch the re-raise. This is MicroPython's exit()
+        // flow: fun_bc_call (inner) catches SystemExit and re-raises via nlr_jump to
+        // parse_compile_execute (outer). Both functions are single-setjmp.
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "jmp_buf outer, inner;\n" +
+            "static void innermost(void){ longjmp(inner, 1); }\n" +
+            "static void middle(void){\n" +
+            "  if (setjmp(inner) == 0) { innermost(); }\n" +
+            "  else { longjmp(outer, 2); }\n" +
+            "}\n" +
+            "int main(void){\n" +
+            "  if (setjmp(outer) == 0) { middle(); return 99; }\n" +
+            "  else { return 42; }\n" +
+            "}\n",
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (outer caught the re-raise), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Wide_bitfield_at_high_offset_round_trips()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
