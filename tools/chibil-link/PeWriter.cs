@@ -21,8 +21,37 @@ public static class LinkPipeline
     {
         if (objs == null || objs.Count == 0)
             throw new LinkException("no input objects.");
-        return new PeWriter(objs, libs ?? new List<string>(), exportClass, pinvokeMap, debuggable,
-            shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>()).Write();
+
+        // API facade: when objects carry a .chiapi manifest and no explicit
+        // --export-class was given, build a `<group>.Api` facade restricted to the
+        // manifest's public functions (Plan 1: functions only).
+        HashSet<string> apiFns = null;
+        string effectiveExportClass = exportClass;
+        if (effectiveExportClass == null)
+        {
+            string group = null;
+            var fns = new HashSet<string>();
+            foreach (var o in objs)
+                if (o.Api != null)
+                {
+                    group ??= o.Api.Group;
+                    fns.UnionWith(o.Api.Functions);
+                }
+            if (group != null) { effectiveExportClass = SanitizeNs(group) + ".Api"; apiFns = fns; }
+        }
+
+        return new PeWriter(objs, libs ?? new List<string>(), effectiveExportClass, pinvokeMap, debuggable,
+            shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>(), apiFns).Write();
+    }
+
+    // Turn a header base name into a valid namespace segment (letters/digits/underscore;
+    // a leading digit is prefixed with '_'). e.g. "quickjs-libc" -> "quickjs_libc".
+    private static string SanitizeNs(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (char c in s) sb.Append(char.IsLetterOrDigit(c) || c == '_' ? c : '_');
+        if (sb.Length == 0 || char.IsDigit(sb[0])) sb.Insert(0, '_');
+        return sb.ToString();
     }
 }
 
@@ -49,12 +78,13 @@ public sealed class PeWriter
     private readonly string _assemblyName;   // assembly identity (from -o base name)
     private readonly string _entrySymbol;    // C entry symbol for an executable (-e, default 'main')
     private readonly List<string> _libSearchPaths;   // -L native-library probe dirs
+    private readonly HashSet<string> _apiFunctionNames; // null = no manifest restriction
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
     public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null,
         Dictionary<string, string> pinvokeMap = null, bool debuggable = false,
         bool shared = false, string assemblyName = "a", string entrySymbol = "main",
-        List<string> libSearchPaths = null)
+        List<string> libSearchPaths = null, HashSet<string> apiFunctionNames = null)
     {
         _objs = objs;
         _libs = libs;
@@ -65,6 +95,7 @@ public sealed class PeWriter
         _assemblyName = string.IsNullOrEmpty(assemblyName) ? "a" : assemblyName;
         _entrySymbol = string.IsNullOrEmpty(entrySymbol) ? "main" : entrySymbol;
         _libSearchPaths = libSearchPaths ?? new List<string>();
+        _apiFunctionNames = apiFunctionNames;
     }
 
     private static string ValidateExportClass(string name)
@@ -79,7 +110,7 @@ public sealed class PeWriter
 
     public byte[] Write()
     {
-        var merger = new MetadataMerger(_objs, _exportClass, _libs, _entrySymbol);
+        var merger = new MetadataMerger(_objs, _exportClass, _libs, _entrySymbol, _apiFunctionNames);
         merger.MergeAndPredict();
 
         // Resolve cross-object references and synthesize native P/Invoke stubs.

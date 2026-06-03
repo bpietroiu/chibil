@@ -50,4 +50,38 @@ public class ApiFacadeTests
         Assert.Contains("ml_add", of.Api.Functions);
         Assert.DoesNotContain("secret", of.Api.Functions);
     }
+
+    static Assembly LinkLib()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(LibSrc, LibHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        // shared=true: no main; no explicit exportClass so manifest drives the facade
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new List<string>(), exportClass: null,
+            pinvokeMap: null, debuggable: false, shared: true);
+        return Assembly.Load(pe);
+    }
+
+    [Fact]
+    public void Facade_Api_class_in_header_namespace_forwards_public_functions()
+    {
+        Assembly asm = LinkLib();
+        Type api = asm.GetType("mylib.Api");
+        Assert.NotNull(api);                                   // namespace from header base name
+        Assert.True(api.IsPublic && api.IsAbstract && api.IsSealed);
+        MethodInfo add = api.GetMethod("ml_add", BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(add);
+        Assert.Null(api.GetMethod("secret", BindingFlags.Public | BindingFlags.Static)); // private hidden
+        Assert.Equal(7, (int)add.Invoke(null, new object[] { 3, 4 })); // forwarder runs: 3+4+secret(0)=7
+    }
+
+    [Fact]
+    public void No_export_api_means_no_facade()
+    {
+        byte[] obj = TestCompiler.CompileToObj("int ml_add(int a,int b){return a+b;} int main(void){return 0;}",
+            Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        Assembly asm = Assembly.Load(LinkPipeline.LinkToBytes(new[] { of }, new List<string>()));
+        Assert.Null(asm.GetType("mylib.Api"));
+        Assert.DoesNotContain(asm.GetTypes(), t => t.IsPublic); // unchanged: no public facade
+    }
 }
