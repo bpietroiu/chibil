@@ -32,6 +32,11 @@ namespace ChibilLink;
 /// eagerly so that <see cref="MapToken"/> resolves signature/IL tokens to their
 /// final rows. Method rows are reserved (predicted) but added later by the writer.
 /// </summary>
+/// <summary>One external native symbol the linked output imports: a P/Invoke
+/// function stub (<c>Kind == "func"</c>) or a native data import (<c>Kind == "data"</c>),
+/// bound to native library <see cref="Lib"/> (e.g. <c>libc.so.6</c>).</summary>
+public sealed record ImportRecord(string Name, string Kind, string Lib);
+
 public sealed class MetadataMerger
 {
     public readonly MetadataBuilder Builder = new();
@@ -97,9 +102,34 @@ public sealed class MetadataMerger
         public string Name;
         public BlobHandle SignatureBlob;     // already rewritten into the shared heap
         public EntityHandle ModuleRef;       // native library ModuleRef
+        public string Lib;                   // native library module name (e.g. libc.so.6)
     }
 
     public readonly List<MethodSlot> Plan = new();
+
+    /// <summary>The external native symbols the output imports — P/Invoke function
+    /// stubs (one per distinct name, though several signature variants may exist for a
+    /// variadic) plus native data imports — deduped by (Lib, Kind, Name) and sorted by
+    /// library, then kind (func before data), then name. Valid after SymbolResolver runs.</summary>
+    public List<ImportRecord> CollectImports()
+    {
+        var seen = new HashSet<(string, string, string)>();
+        var list = new List<ImportRecord>();
+        foreach (var slot in Plan)
+            if (slot.PInvoke != null && seen.Add((slot.PInvoke.Lib, "func", slot.PInvoke.Name)))
+                list.Add(new ImportRecord(slot.PInvoke.Name, "func", slot.PInvoke.Lib));
+        foreach (var d in DataImports)
+            if (seen.Add((d.Lib, "data", d.Name)))
+                list.Add(new ImportRecord(d.Name, "data", d.Lib));
+        list.Sort((a, b) =>
+        {
+            int c = string.CompareOrdinal(a.Lib, b.Lib);
+            if (c != 0) return c;
+            if (a.Kind != b.Kind) return a.Kind == "func" ? -1 : 1;   // func before data
+            return string.CompareOrdinal(a.Name, b.Name);
+        });
+        return list;
+    }
 
     /// <summary>Real methods marked extern-linkage (UnmanagedExport) and eligible
     /// for export (excludes the synthesized entry and the C 'main').</summary>

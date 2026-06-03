@@ -65,6 +65,13 @@ public class LinkOptionsParseTests
         Assert.Equal("N.T", Parse(cmd).ExportClass);
     }
 
+    [Fact]
+    public void Print_imports_flag_parses()
+    {
+        Assert.True(Parse("--print-imports a.obj").PrintImports);
+        Assert.False(Parse("a.obj").PrintImports);
+    }
+
     [Theory]
     [InlineData("-e _start a.obj")]
     [InlineData("-e_start a.obj")]

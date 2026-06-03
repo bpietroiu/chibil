@@ -50,6 +50,7 @@ public sealed class LinkOptions
     public string Entry = "main";                 // -e/--entry  C entry symbol
     public bool ShowHelp = false;                 // --help
     public bool ShowVersion = false;              // --version
+    public bool PrintImports = false;             // --print-imports  list native imports to stdout
 
     public const string Version = "0.1";
 
@@ -67,6 +68,7 @@ public sealed class LinkOptions
         "  --export-class=<N.T>     emit a public static facade class N.T forwarding\n" +
         "                           to exported C functions (callable from C#)\n" +
         "  --pinvoke=<n=lib,...>    pin unresolved symbol <n> to native library <lib>\n" +
+        "  --print-imports          also list the native imports (functions + data) to stdout\n" +
         "  @<file>                  read further options from <file>\n" +
         "  --help                   show this help and exit\n" +
         "  --version                show version and exit\n" +
@@ -110,6 +112,7 @@ public sealed class LinkOptions
                     case "--entry": o.Entry = Val(); break;
                     case "--export-class": o.ExportClass = Val(); break;
                     case "--pinvoke": ParsePinvoke(o, Val()); break;
+                    case "--print-imports": o.PrintImports = true; break;
                     case "--relocatable": break;                  // accepted/ignored
                     default:
                         throw new LinkException($"unrecognized option '{a}'");
@@ -218,16 +221,31 @@ public static class Linker
         string asmName = Path.GetFileNameWithoutExtension(opts.Output);
         if (string.IsNullOrEmpty(asmName)) asmName = "a";
 
+        var imports = opts.PrintImports ? new List<ImportRecord>() : null;
         byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries, opts.ExportClass,
-            opts.PinvokeMap, opts.Debug, opts.Shared, asmName, opts.Entry, opts.LibSearchPaths);
+            opts.PinvokeMap, opts.Debug, opts.Shared, asmName, opts.Entry, opts.LibSearchPaths, imports);
         File.WriteAllBytes(opts.Output, pe);
 
         WriteRuntimeConfig(opts.Output);
+
+        if (imports != null)
+            PrintImports(imports);
 
         // For executable targets, also emit a native launcher (foo.exe / foo) that
         // boots CoreCLR and runs the dll — like `dotnet build`. Best-effort.
         if (!opts.Shared)
             AppHostWriter.TryEmit(opts.Output);
+    }
+
+    // Print the native imports (function P/Invoke stubs + data imports) the output binds,
+    // one per line `<lib>  <kind>  <name>`, after a count header. Already deduped + sorted.
+    private static void PrintImports(List<ImportRecord> imports)
+    {
+        int func = 0;
+        foreach (var i in imports) if (i.Kind == "func") func++;
+        Console.Out.WriteLine($"imports: {imports.Count} ({func} func, {imports.Count - func} data)");
+        foreach (var i in imports)
+            Console.Out.WriteLine($"{i.Lib}  {i.Kind}  {i.Name}");
     }
 
     private static void WriteRuntimeConfig(string outputPath)

@@ -185,6 +185,7 @@ public static class SymbolResolver
             Name = name,
             SignatureBlob = sigBlob,
             ModuleRef = moduleRef,
+            Lib = lib,
         };
         return merger.ReservePInvokeRow(stub);
     }

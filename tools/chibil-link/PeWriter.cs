@@ -17,7 +17,7 @@ public static class LinkPipeline
     public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs,
         string exportClass = null, Dictionary<string, string> pinvokeMap = null, bool debuggable = false,
         bool shared = false, string assemblyName = "a", string entrySymbol = "main",
-        List<string> libSearchPaths = null)
+        List<string> libSearchPaths = null, List<ImportRecord> importsOut = null)
     {
         if (objs == null || objs.Count == 0)
             throw new LinkException("no input objects.");
@@ -61,9 +61,12 @@ public static class LinkPipeline
             }
         }
 
-        return new PeWriter(objs, libs ?? new List<string>(), effectiveExportClass, pinvokeMap, debuggable,
+        var writer = new PeWriter(objs, libs ?? new List<string>(), effectiveExportClass, pinvokeMap, debuggable,
             shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>(), apiFns,
-            apiTypes, apiNs, apiEnums, apiEnumUsages).Write();
+            apiTypes, apiNs, apiEnums, apiEnumUsages);
+        byte[] pe = writer.Write();
+        importsOut?.AddRange(writer.Imports);
+        return pe;
     }
 
     // Turn a header base name into a valid namespace segment (letters/digits/underscore;
@@ -106,6 +109,10 @@ public sealed class PeWriter
     private readonly List<ApiEnum> _apiEnums;           // null = no enum synthesis
     private readonly List<ApiEnumUse> _apiEnumUsages;  // null = no enum usage threading
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
+
+    /// <summary>The external native symbols the output imports (function P/Invoke stubs
+    /// + data imports). Populated by <see cref="Write"/> after symbol resolution.</summary>
+    public IReadOnlyList<ImportRecord> Imports { get; private set; } = new List<ImportRecord>();
 
     public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null,
         Dictionary<string, string> pinvokeMap = null, bool debuggable = false,
@@ -152,6 +159,9 @@ public sealed class PeWriter
         // and before the entry row, reserving any P/Invoke MethodDef rows in the
         // plan so the row-prediction assertions below still hold.
         SymbolResolver.Resolve(merger, _objs, _libs, _pinvokeMap, _libSearchPaths);
+
+        // The full set of native imports (function stubs + data imports) is known now.
+        Imports = merger.CollectImports();
 
         // Collect FieldRVA pointer relocations (function/data pointers baked into
         // initialized globals) and, if any exist, synthesize a <Module> .cctor
