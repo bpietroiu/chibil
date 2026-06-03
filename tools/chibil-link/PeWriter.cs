@@ -29,6 +29,7 @@ public static class LinkPipeline
         HashSet<string> apiTypes = null;
         string apiNs = null;
         List<ApiEnum> apiEnums = null;
+        List<ApiEnumUse> apiEnumUsages = null;
         string effectiveExportClass = exportClass;
         if (effectiveExportClass == null)
         {
@@ -37,6 +38,7 @@ public static class LinkPipeline
             var tys = new HashSet<string>();
             var seenEnumTags = new HashSet<string>();
             var ens = new List<ApiEnum>();
+            var uses = new List<ApiEnumUse>();
             foreach (var o in objs)
                 if (o.Api != null)
                 {
@@ -46,6 +48,7 @@ public static class LinkPipeline
                     foreach (var e in o.Api.Enums)
                         if (seenEnumTags.Add(e.Tag))
                             ens.Add(e);
+                    uses.AddRange(o.Api.EnumUsages);
                 }
             if (group != null)
             {
@@ -54,12 +57,13 @@ public static class LinkPipeline
                 apiFns = fns;
                 apiTypes = tys;
                 if (ens.Count > 0) apiEnums = ens;
+                if (uses.Count > 0) apiEnumUsages = uses;
             }
         }
 
         return new PeWriter(objs, libs ?? new List<string>(), effectiveExportClass, pinvokeMap, debuggable,
             shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>(), apiFns,
-            apiTypes, apiNs, apiEnums).Write();
+            apiTypes, apiNs, apiEnums, apiEnumUsages).Write();
     }
 
     // Turn a header base name into a valid namespace segment (letters/digits/underscore;
@@ -100,6 +104,7 @@ public sealed class PeWriter
     private readonly HashSet<string> _apiTypeNames;     // null = no re-namespacing
     private readonly string _apiNamespace;
     private readonly List<ApiEnum> _apiEnums;           // null = no enum synthesis
+    private readonly List<ApiEnumUse> _apiEnumUsages;  // null = no enum usage threading
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
     public PeWriter(IReadOnlyList<ObjectFile> objs, List<string> libs, string exportClass = null,
@@ -107,7 +112,7 @@ public sealed class PeWriter
         bool shared = false, string assemblyName = "a", string entrySymbol = "main",
         List<string> libSearchPaths = null, HashSet<string> apiFunctionNames = null,
         HashSet<string> apiTypeNames = null, string apiNamespace = null,
-        List<ApiEnum> apiEnums = null)
+        List<ApiEnum> apiEnums = null, List<ApiEnumUse> apiEnumUsages = null)
     {
         _objs = objs;
         _libs = libs;
@@ -122,6 +127,7 @@ public sealed class PeWriter
         _apiTypeNames = apiTypeNames;
         _apiNamespace = apiNamespace;
         _apiEnums = apiEnums;
+        _apiEnumUsages = apiEnumUsages;
     }
 
     private static string ValidateExportClass(string name)
@@ -137,7 +143,7 @@ public sealed class PeWriter
     public byte[] Write()
     {
         var merger = new MetadataMerger(_objs, _exportClass, _libs, _entrySymbol, _apiFunctionNames,
-            _apiTypeNames, _apiNamespace, _apiEnums);
+            _apiTypeNames, _apiNamespace, _apiEnums, _apiEnumUsages);
         merger.MergeAndPredict();
         merger.ApplyApiTypeNamespacing();
 

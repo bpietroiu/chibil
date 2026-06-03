@@ -254,6 +254,99 @@ public struct EcmaSignatureRewriter
     }
 
     /// <summary>
+    /// Rewrites a method signature into <paramref name="blobBuilder"/>, but at positions
+    /// present in <paramref name="positionToEnumRow"/> (0 = return type, 1..N = params)
+    /// substitutes the source primitive type with a synthesized enum valuetype TypeDef.
+    /// The source type at an annotated position is always a single primitive I4/U4 byte
+    /// (chibil collapses enums to int32), so the reader is advanced by one SignatureTypeCode.
+    /// Positions not in the map are rewritten normally. The existing no-enum overload is
+    /// unchanged — this method is only called for functions with enum usage annotations.
+    /// </summary>
+    public static void RewriteMethodSignatureWithEnums(BlobReader signatureReader, TokenMap tokenMap,
+        BlobBuilder blobBuilder, IReadOnlyDictionary<int, int> positionToEnumRow)
+    {
+        new EcmaSignatureRewriter(signatureReader, tokenMap)
+            .RewriteMethodSignatureWithEnums(blobBuilder, positionToEnumRow);
+    }
+
+    private void RewriteMethodSignatureWithEnums(BlobBuilder blobBuilder, IReadOnlyDictionary<int, int> positionToEnumRow)
+    {
+        SignatureHeader header = _blobReader.ReadSignatureHeader();
+        int arity = header.IsGeneric ? _blobReader.ReadCompressedInteger() : 0;
+        var encoder = new BlobEncoder(blobBuilder);
+        var sigEncoder = encoder.MethodSignature(header.CallingConvention, arity, header.IsInstance);
+        int count = _blobReader.ReadCompressedInteger();
+        sigEncoder.Parameters(count, out ReturnTypeEncoder returnTypeEncoder, out ParametersEncoder paramsEncoder);
+        RewriteMethodSignatureWithEnums(count, returnTypeEncoder, paramsEncoder, positionToEnumRow);
+    }
+
+    private void RewriteMethodSignatureWithEnums(int count, ReturnTypeEncoder returnTypeEncoder,
+        ParametersEncoder paramsEncoder, IReadOnlyDictionary<int, int> positionToEnumRow)
+    {
+        // ── Return type (position 0) ──────────────────────────────────────────
+        if (positionToEnumRow.TryGetValue(0, out int retEnumRow))
+        {
+            // Advance past the source primitive type (always I4/U4 for a chibil enum).
+            // Drain any modopts/byref prefixes first (shouldn't be present on enum positions,
+            // but be safe).
+            bool isByRef = false;
+        drainReturn:
+            SignatureTypeCode rtc = _blobReader.ReadSignatureTypeCode();
+            if (rtc == SignatureTypeCode.ByReference) { isByRef = true; goto drainReturn; }
+            if (rtc == SignatureTypeCode.RequiredModifier || rtc == SignatureTypeCode.OptionalModifier)
+            { RewriteCustomModifier(rtc, returnTypeEncoder.CustomModifiers()); goto drainReturn; }
+            // rtc is now the primitive (I4/U4) — discard it and emit the enum valuetype.
+            var enumTypeHandle = MetadataTokens.TypeDefinitionHandle(retEnumRow);
+            returnTypeEncoder.Type(isByRef).Type(enumTypeHandle, isValueType: true);
+        }
+        else
+        {
+            // Normal return-type rewrite (mirrors existing RewriteMethodSignature).
+            bool isByRef = false;
+        againReturnType:
+            SignatureTypeCode typeCode = _blobReader.ReadSignatureTypeCode();
+            if (typeCode == SignatureTypeCode.ByReference) { isByRef = true; goto againReturnType; }
+            if (typeCode == SignatureTypeCode.RequiredModifier || typeCode == SignatureTypeCode.OptionalModifier)
+            { RewriteCustomModifier(typeCode, returnTypeEncoder.CustomModifiers()); goto againReturnType; }
+            if (typeCode == SignatureTypeCode.Void) returnTypeEncoder.Void();
+            else if (typeCode == SignatureTypeCode.TypedReference) returnTypeEncoder.TypedReference();
+            else RewriteType(typeCode, returnTypeEncoder.Type(isByRef));
+        }
+
+        // ── Parameters (positions 1..count) ──────────────────────────────────
+        for (int i = 0; i < count; i++)
+        {
+            ParameterTypeEncoder paramEncoder = paramsEncoder.AddParameter();
+            int pos = i + 1;
+            if (positionToEnumRow.TryGetValue(pos, out int paramEnumRow))
+            {
+                // Drain any modopts/byref prefixes then discard the primitive type.
+                bool isByRef = false;
+            drainParam:
+                SignatureTypeCode ptc = _blobReader.ReadSignatureTypeCode();
+                if (ptc == SignatureTypeCode.ByReference) { isByRef = true; goto drainParam; }
+                if (ptc == SignatureTypeCode.RequiredModifier || ptc == SignatureTypeCode.OptionalModifier)
+                { RewriteCustomModifier(ptc, paramEncoder.CustomModifiers()); goto drainParam; }
+                // ptc is the primitive — discard it and emit the enum valuetype.
+                var enumTypeHandle = MetadataTokens.TypeDefinitionHandle(paramEnumRow);
+                paramEncoder.Type(isByRef).Type(enumTypeHandle, isValueType: true);
+            }
+            else
+            {
+                // Normal parameter rewrite.
+                bool isByRef = false;
+            againParameter:
+                SignatureTypeCode typeCode = _blobReader.ReadSignatureTypeCode();
+                if (typeCode == SignatureTypeCode.RequiredModifier || typeCode == SignatureTypeCode.OptionalModifier)
+                { RewriteCustomModifier(typeCode, paramEncoder.CustomModifiers()); goto againParameter; }
+                if (typeCode == SignatureTypeCode.ByReference) { isByRef = true; goto againParameter; }
+                if (typeCode == SignatureTypeCode.TypedReference) paramEncoder.TypedReference();
+                else RewriteType(typeCode, paramEncoder.Type(isByRef));
+            }
+        }
+    }
+
+    /// <summary>
     /// Overload that consults <paramref name="injector"/> at each
     /// <c>CustomMod*</c> position so the rewritten signature carries any
     /// asm2obj-injected modifier bytes (matching the symbols emitted by

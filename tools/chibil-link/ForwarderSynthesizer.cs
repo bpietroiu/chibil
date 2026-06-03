@@ -22,10 +22,19 @@ public static class ForwarderSynthesizer
         {
             int n = merger.MethodParamCount(of, m);
             int calleeToken = merger.MapToken(of, m.OriginalToken);
+
+            // If this function has enum usages, build an enum-aware signature so the
+            // public forwarder advertises the enum type at those positions. The forwarder
+            // IL (ldarg…; call <module fn>; ret) is unchanged — enum↔int interchangeability
+            // on the IL stack makes the int-typed <Module> callee verify and run.
+            BlobHandle sigBlob = merger.ApiEnumUsageRows.TryGetValue(m.Name, out var posMap)
+                ? merger.RewriteMethodSignatureWithEnums(of, m, posMap)
+                : merger.RewriteMethodSignature(of, m);
+
             list.Add(new MetadataMerger.SynthMethod
             {
                 Name = m.Name,
-                SignatureBlob = merger.RewriteMethodSignature(of, m), // identical sig (raw pointers)
+                SignatureBlob = sigBlob,
                 Il = BuildForwarderIl(n, calleeToken),
                 // peak depth = the n args pushed before `call`; the lone return value
                 // (if any) never exceeds that. 0-arg calls still need a slot of 1.

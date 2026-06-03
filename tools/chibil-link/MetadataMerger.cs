@@ -224,10 +224,13 @@ public sealed class MetadataMerger
     private readonly HashSet<string> _apiTypeNames;  // null = no re-namespacing
     private readonly string _apiNamespace;
     private readonly List<ApiEnum> _apiEnums;         // null = no enum synthesis
+    private readonly List<ApiEnumUse> _apiEnumUsages; // null = no enum usage threading
     // Output TypeDef rows of public-API types re-namespaced into the facade namespace.
     public readonly HashSet<int> ApiPublicTypeRows = new();
     // Enum tag -> output TypeDef row (populated by SynthesizeApiEnums).
     public readonly Dictionary<string, int> ApiEnumRow = new();
+    // function name -> (position -> enum TypeDef row); populated after SynthesizeApiEnums.
+    public readonly Dictionary<string, Dictionary<int, int>> ApiEnumUsageRows = new();
 
     private readonly IReadOnlyList<string> _libs;
     private readonly string _entrySymbol;
@@ -236,7 +239,7 @@ public sealed class MetadataMerger
         IReadOnlyList<string> libs = null, string entrySymbol = "main",
         HashSet<string> apiFunctionNames = null,
         HashSet<string> apiTypeNames = null, string apiNamespace = null,
-        List<ApiEnum> apiEnums = null)
+        List<ApiEnum> apiEnums = null, List<ApiEnumUse> apiEnumUsages = null)
     {
         _objs = objs;
         _exportClass = exportClass;
@@ -246,6 +249,7 @@ public sealed class MetadataMerger
         _apiTypeNames = apiTypeNames;
         _apiNamespace = apiNamespace;
         _apiEnums = apiEnums;
+        _apiEnumUsages = apiEnumUsages;
     }
 
     // After the merge, move each public-API type's canonical TypeDef into the facade
@@ -452,6 +456,10 @@ public sealed class MetadataMerger
         // BEFORE ReserveMemberFields (so the synthesized value__/literal fields
         // get consecutive field-row assignments with the rest of the member fields).
         SynthesizeApiEnums();
+
+        // Build the function -> (position -> enum TypeDef row) usage map.
+        // ApiEnumRow must be filled first (by SynthesizeApiEnums above).
+        BuildApiEnumUsageRows();
 
         // Assign consecutive output field rows to named member fields of ExplicitLayout
         // public structs, AFTER all TypeDef-reserving passes (including
@@ -1993,6 +2001,25 @@ public sealed class MetadataMerger
         }
     }
 
+    /// <summary>Build <see cref="ApiEnumUsageRows"/> from the aggregated enum usages
+    /// and the already-populated <see cref="ApiEnumRow"/>. Each usage maps
+    /// (function name, position) to the synthesized enum TypeDef row. Duplicates are
+    /// silently deduped (a position maps to exactly one enum row).</summary>
+    private void BuildApiEnumUsageRows()
+    {
+        if (_apiEnumUsages == null) return;
+        foreach (var u in _apiEnumUsages)
+        {
+            if (!ApiEnumRow.TryGetValue(u.EnumTag, out int row)) continue;
+            if (!ApiEnumUsageRows.TryGetValue(u.Function, out var posMap))
+            {
+                posMap = new Dictionary<int, int>();
+                ApiEnumUsageRows[u.Function] = posMap;
+            }
+            posMap[u.Position] = row;
+        }
+    }
+
     /// <summary>For every function signature (defined methods AND external-call
     /// MemberRefs) that names an opaque struct with no TypeDef in the merged output
     /// — a forward-declared-only type referenced via a module-scoped TypeRef, e.g.
@@ -2371,6 +2398,18 @@ public sealed class MetadataMerger
         var sigReader = md.GetBlobReader(def.Signature);
         var sigBuilder = new BlobBuilder();
         EcmaSignatureRewriter.RewriteMethodSignature(sigReader, _maps[of], sigBuilder);
+        return Builder.GetOrAddBlob(sigBuilder);
+    }
+
+    /// <summary>Rewrite a method's signature blob into the shared heap, substituting
+    /// enum TypeDefs at the given param/return positions (0 = return, 1..N = params).</summary>
+    public BlobHandle RewriteMethodSignatureWithEnums(ObjectFile of, ObjMethod m,
+        IReadOnlyDictionary<int, int> posToEnumRow)
+    {
+        var def = of.Md.GetMethodDefinition(m.Handle);
+        var sigReader = of.Md.GetBlobReader(def.Signature);
+        var sigBuilder = new BlobBuilder();
+        EcmaSignatureRewriter.RewriteMethodSignatureWithEnums(sigReader, _maps[of], sigBuilder, posToEnumRow);
         return Builder.GetOrAddBlob(sigBuilder);
     }
 

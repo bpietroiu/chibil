@@ -270,6 +270,23 @@ public class ApiFacadeTests
     }
 
     [Fact]
+    public void Forwarder_signature_uses_enum_and_runs()
+    {
+        var asm = LinkEnLib();
+        Type api = asm.GetType("mylib.Api");
+        Type mc = asm.GetType("mylib.MlColor");
+        MethodInfo code = api.GetMethod("ml_color_code", BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(code);
+        Assert.Equal(mc, code.GetParameters()[0].ParameterType);   // param threaded to the enum
+        MethodInfo def = api.GetMethod("ml_default_color", BindingFlags.Public | BindingFlags.Static);
+        Assert.Equal(mc, def.ReturnType);                          // return threaded to the enum
+        object blue = Enum.Parse(mc, "ML_BLUE");                   // 6
+        Assert.Equal(106, (int)code.Invoke(null, new object[] { blue }));  // enum arg -> int callee -> runs
+        object dc = def.Invoke(null, null);
+        Assert.Equal(5, (int)dc);                                  // ML_GREEN
+    }
+
+    [Fact]
     public void Fixture_struct_value_passes_through_forwarder()
     {
         string lib = FixtureDir();
