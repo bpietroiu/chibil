@@ -432,7 +432,10 @@ public class ApiFacadeTests
             "#endif\n";
         const string src =
             "#include \"mylib.h\"\n" +
-            "extern int chibil_extern_data;\n" +    // a real unresolved extern → runs the data-import resolver
+            // A real unresolved extern → the -l-gated data-import resolver runs (the trigger).
+            // It resolves as a STATIC data import, so it never counts toward the non-static
+            // total below — only a leaked struct member field would.
+            "extern int chibil_extern_data;\n" +
             "int ml_box_sum(struct MlBox b){ return b.a + b.b + chibil_extern_data; }\n";
         byte[] obj = TestCompiler.CompileToObjWithApi(src, hdr, "mylib.h", Chibil.TargetProfile.CoreClr);
         var of = ObjectFile.Load(obj, "mylib.obj");
