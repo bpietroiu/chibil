@@ -423,6 +423,12 @@ public class DataModel(int longSize, int ldoubleSize, int ldoubleAlign, int poin
 public class CompilerOptions
 {
     public List<string> IncludePaths = new();
+    // --export-api=<header>: headers whose top-level declarations form the public API
+    // surface (resolved paths or as-written include spellings, matched by file name).
+    public List<string> ExportApiHeaders = new();
+    // Collected during parse: names of functions declared at top level inside an
+    // ExportApiHeaders header. Consumed by CodeGen to emit the .chiapi manifest.
+    public HashSet<string> PublicApiFunctions = new();
     public bool OptFpic;
     public bool OptFcommon = true;
     public string BaseFile;

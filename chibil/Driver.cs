@@ -149,6 +149,7 @@ public class Driver
             if (arg == "-nostdinc") { _optNoStdInc = true; continue; }
             if (arg == "-mlp64" || arg == "-mllp64") continue; // handled in Run() pre-scan
             if (arg.StartsWith("-I")) { Options.IncludePaths.Add(arg[2..]); continue; }
+            if (arg.StartsWith("--export-api=")) { Options.ExportApiHeaders.Add(arg["--export-api=".Length..]); continue; }
             if (arg == "-D") { Define(args[++i]); continue; }
             if (arg.StartsWith("-D")) { Define(arg[2..]); continue; }
             if (arg == "-U") { _preprocessor.UndefMacro(args[++i]); continue; }

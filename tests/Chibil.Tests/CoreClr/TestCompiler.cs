@@ -72,4 +72,41 @@ static class TestCompiler
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
         }
     }
+
+    public static byte[] CompileToObjWithApi(string source, string header, string headerName,
+        TargetProfile target, string name = "t.c")
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "chibil-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string srcPath = Path.Combine(dir, name);
+        string hdrPath = Path.Combine(dir, headerName);
+        File.WriteAllText(srcPath, source);
+        File.WriteAllText(hdrPath, header);
+        try
+        {
+            var opts = new CompilerOptions { Target = target, BaseFile = srcPath };
+            opts.IncludePaths.Add(dir);          // so #include "mylib.h" resolves
+            opts.ExportApiHeaders.Add(hdrPath);  // the public header
+            var types = new TypeSystem(opts.DataModel);
+            var tokenizer = new Tokenizer(opts, types);
+            var preprocessor = new Preprocessor(tokenizer, opts, types);
+            preprocessor.InitMacros();
+            var parser = new Parser(tokenizer, opts, types);
+            preprocessor.SetParser(parser);
+
+            Token tok = tokenizer.TokenizeFile(srcPath);
+            if (tok == null)
+                throw new InvalidOperationException($"Failed to tokenize {srcPath}");
+
+            tok = preprocessor.Preprocess(tok);
+            Obj prog = parser.Parse(tok);
+
+            var codegen = new CodeGen(opts, tokenizer, types);
+            return codegen.Generate(prog, "t.obj", Path.GetFullPath(srcPath));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
 }
