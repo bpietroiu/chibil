@@ -96,4 +96,91 @@ public class AppHostTests
         }
         finally { try { System.IO.Directory.Delete(root, true); } catch { } }
     }
+
+    [Fact]
+    public void Writer_emits_patched_launcher_next_to_dll()
+    {
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "chibil_ahw_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            string dll = System.IO.Path.Combine(dir, "myapp.dll");
+            System.IO.File.WriteAllBytes(dll, new byte[] { 0 }); // contents irrelevant for emission
+            AppHostWriter.TryEmit(dll);
+
+            string exe = System.Runtime.InteropServices.RuntimeInformation
+                .IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows) ? "myapp.exe" : "myapp";
+            string launcher = System.IO.Path.Combine(dir, exe);
+
+            // If no SDK template is available the writer warns-and-skips — only assert
+            // patching when a launcher was actually produced.
+            if (System.IO.File.Exists(launcher))
+            {
+                string text = System.Text.Encoding.ASCII.GetString(System.IO.File.ReadAllBytes(launcher));
+                Assert.DoesNotContain(Placeholder, text); // sentinel replaced
+                Assert.Contains("myapp.dll", text);       // bound to the dll filename
+            }
+        }
+        finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void Writer_does_not_clobber_dll_when_launcher_path_would_collide()
+    {
+        // Linux `-o foo` (no extension): launcher path == dll path. Must skip, never
+        // overwrite the assembly. (On Windows the .exe ext means no collision; the dll
+        // stays intact either way — this asserts the dll is preserved.)
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "chibil_ahw_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            string dll = System.IO.Path.Combine(dir, "foo"); // no .dll extension
+            System.IO.File.WriteAllBytes(dll, new byte[] { 7, 7, 7 });
+            AppHostWriter.TryEmit(dll);
+            Assert.Equal(new byte[] { 7, 7, 7 }, System.IO.File.ReadAllBytes(dll)); // untouched
+        }
+        finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void Shared_target_emits_no_launcher_executable_does()
+    {
+        // Drives the real Linker.Run gate: -shared must not produce a launcher; a
+        // non-shared link of the same object must (when an SDK template is available).
+        const string src = "int main(void){ return 0; }\n";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "chibil_gate_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            string objPath = System.IO.Path.Combine(dir, "g.obj");
+            System.IO.File.WriteAllBytes(objPath, obj);
+            string exe = System.Runtime.InteropServices.RuntimeInformation
+                .IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows) ? ".exe" : "";
+
+            // -shared: library, no launcher.
+            string libOut = System.IO.Path.Combine(dir, "lib.dll");
+            Linker.Run(new LinkOptions {
+                Inputs = new System.Collections.Generic.List<string> { objPath },
+                Output = libOut, Shared = true });
+            Assert.False(System.IO.File.Exists(System.IO.Path.Combine(dir, "lib" + exe)),
+                "shared target must not emit a launcher");
+
+            // executable: dll + runtimeconfig always; launcher iff a template is available.
+            string appOut = System.IO.Path.Combine(dir, "app.dll");
+            Linker.Run(new LinkOptions {
+                Inputs = new System.Collections.Generic.List<string> { objPath },
+                Output = appOut, Shared = false });
+            Assert.True(System.IO.File.Exists(appOut));
+            Assert.True(System.IO.File.Exists(System.IO.Path.Combine(dir, "app.runtimeconfig.json")));
+            if (AppHostLocator.Find() != null)
+                Assert.True(System.IO.File.Exists(System.IO.Path.Combine(dir, "app" + exe)),
+                    "executable target should emit a launcher when a template is available");
+        }
+        finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+    }
 }

@@ -38,6 +38,7 @@
     <Compile Include="..\..\tools\chibil-link\PortablePdbWriter.cs" />
     <Compile Include="..\..\tools\chibil-link\AppHostPatcher.cs" />
     <Compile Include="..\..\tools\chibil-link\AppHostLocator.cs" />
+    <Compile Include="..\..\tools\chibil-link\AppHostWriter.cs" />
   </ItemGroup>
 
   <ItemGroup>

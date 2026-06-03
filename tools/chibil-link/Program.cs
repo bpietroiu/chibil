@@ -223,6 +223,11 @@ public static class Linker
         File.WriteAllBytes(opts.Output, pe);
 
         WriteRuntimeConfig(opts.Output);
+
+        // For executable targets, also emit a native launcher (foo.exe / foo) that
+        // boots CoreCLR and runs the dll — like `dotnet build`. Best-effort.
+        if (!opts.Shared)
+            AppHostWriter.TryEmit(opts.Output);
     }
 
     private static void WriteRuntimeConfig(string outputPath)
