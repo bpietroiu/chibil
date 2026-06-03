@@ -308,4 +308,22 @@ public class ApiFacadeTests
         pt.GetField("y", BindingFlags.Public | BindingFlags.Instance).SetValue(p, 4);
         Assert.Equal(7, (int)sum.Invoke(null, new object[] { p }));   // 3+4, by value, fields by name
     }
+
+    [Fact]
+    public void Fixture_enum_threads_through_facade()
+    {
+        string lib = FixtureDir();
+        byte[] obj = TestCompiler.CompileToObjWithApi(
+            File.ReadAllText(Path.Combine(lib, "src", "mylib.c")),
+            File.ReadAllText(Path.Combine(lib, "include", "mylib.h")),
+            "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        Assembly asm = Assembly.Load(LinkPipeline.LinkToBytes(new[] { of }, new List<string>(),
+            exportClass: null, pinvokeMap: null, debuggable: false, shared: true));
+        Type mc = asm.GetType("mylib.MlColor");
+        Assert.True(mc.IsEnum);
+        MethodInfo code = asm.GetType("mylib.Api").GetMethod("ml_color_code", BindingFlags.Public | BindingFlags.Static);
+        Assert.Equal(mc, code.GetParameters()[0].ParameterType);
+        Assert.Equal(105, (int)code.Invoke(null, new object[] { Enum.Parse(mc, "ML_GREEN") }));  // 5+100
+    }
 }
