@@ -1450,9 +1450,11 @@ public class CodeGen
             else
             {
                 var predicted = _structTypeDefs[typeId];
-                // Unions use ExplicitLayout (all members at offset 0);
-                // structs use SequentialLayout
-                var layoutAttr = type.Kind == TypeKind.Union
+                // Public API structs use ExplicitLayout so per-field offsets are honored.
+                // Unions also use ExplicitLayout (all members at offset 0).
+                // Other structs use SequentialLayout.
+                bool isPublicApi = type.TagName != null && _options.PublicApiTypes.Contains(type.TagName);
+                var layoutAttr = (type.Kind == TypeKind.Union || isPublicApi)
                     ? TypeAttributes.ExplicitLayout
                     : TypeAttributes.SequentialLayout;
                 handle = _md.AddTypeDefinition(
@@ -1464,6 +1466,28 @@ public class CodeGen
 
                 Debug.Assert(handle == predicted, $"Struct TypeDef handle mismatch: predicted {predicted}, got {handle}");
                 _md.AddTypeLayout(handle, 0, (uint)type.Size);
+
+                // For public API structs, emit one named PUBLIC FieldDef per eligible member
+                // (scalar/pointer members; skip bitfields, arrays, and anonymous members).
+                // These fields are purely additive — chibil's IL accesses members by raw offset.
+                if (isPublicApi)
+                {
+                    for (Member m = type.Members; m != null; m = m.Next)
+                    {
+                        if (m.IsBitfield) continue;                    // not separately addressable
+                        if (m.Ty.Kind == TypeKind.Array) continue;     // fixed arrays: first-cut skip
+                        if (m.Name == null) continue;                  // anonymous member
+                        var msig = new BlobBuilder();
+                        msig.WriteByte(0x06);                          // FIELD
+                        EncodeType(msig, m.Ty);                        // existing type-sig encoder
+                        var mfh = _md.AddFieldDefinition(
+                            FieldAttributes.Public,
+                            _md.GetOrAddString(Util.GetTokenText(m.Name)),
+                            _md.GetOrAddBlob(msig));
+                        _nextFieldRow++;
+                        _md.AddFieldLayout(mfh, m.Offset);
+                    }
+                }
             }
 
             // NativeCppClassAttribute
@@ -1484,9 +1508,10 @@ public class CodeGen
                     _md.GetOrAddBlob(alignFieldSig));
                 _nextFieldRow++;
 
-                // For ExplicitLayout (unions), set field offset to 0
+                // For ExplicitLayout (unions and public API structs), set field offset to 0.
                 // (MSVC /clr C++ uses offset 0; /clr /BC incorrectly uses 0xFFFFFFFF)
-                if (type.Kind == TypeKind.Union)
+                bool isPublicApiForAlign = type.TagName != null && _options.PublicApiTypes.Contains(type.TagName);
+                if (type.Kind == TypeKind.Union || isPublicApiForAlign)
                     _md.AddFieldLayout(alignField, 0);
             }
         }

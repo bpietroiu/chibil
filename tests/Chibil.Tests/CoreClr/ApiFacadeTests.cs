@@ -167,6 +167,34 @@ public class ApiFacadeTests
     }
 
     [Fact]
+    public void Public_struct_typedef_in_object_has_named_member_fields()
+    {
+        byte[] obj = TestCompiler.CompileToObjWithApi(TySrc, TyHdr, "mylib.h", Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "mylib.obj");
+        var md = of.Md;
+        System.Reflection.Metadata.TypeDefinitionHandle mlPoint = default;
+        foreach (var h in md.TypeDefinitions)
+            if (md.GetString(md.GetTypeDefinition(h).Name) == "MlPoint") { mlPoint = h; break; }
+        Assert.False(mlPoint.IsNil, "MlPoint TypeDef must exist in the object");
+
+        var td = md.GetTypeDefinition(mlPoint);
+        Assert.True((td.Attributes & System.Reflection.TypeAttributes.ExplicitLayout) != 0,
+            "public struct must be ExplicitLayout so member offsets are exact");
+
+        var names = new System.Collections.Generic.Dictionary<string, int>();
+        foreach (var fh in td.GetFields())
+        {
+            var fd = md.GetFieldDefinition(fh);
+            string n = md.GetString(fd.Name);
+            if (n == "<alignment member>") continue;       // chibil's alignment filler
+            names[n] = fd.GetOffset();                      // FieldLayout offset
+        }
+        Assert.True(names.ContainsKey("x") && names.ContainsKey("y"), "members x and y must be named fields");
+        Assert.Equal(0, names["x"]);                        // int x at offset 0
+        Assert.Equal(4, names["y"]);                        // int y at offset 4
+    }
+
+    [Fact]
     public void Fixture_struct_value_passes_through_forwarder()
     {
         string lib = FixtureDir();
