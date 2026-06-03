@@ -3,3 +3,5 @@ references/
 [Oo]bj/
 tmp/
 /*.obj
+.vs/
+myapp.dll
