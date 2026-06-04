@@ -832,10 +832,9 @@ public class CodeGen
         attrBlob.WriteSerializedString(mangledName);
         attrBlob.WriteUInt16(0x0000); // NumNamed
 
-        // TypeRef for DecoratedNameAttribute
-        var decoratedNameRef = _md.AddTypeReference(_mscorlibRef,
-            _md.GetOrAddString("System.Runtime.CompilerServices"),
-            _md.GetOrAddString("DecoratedNameAttribute"));
+        // TypeRef for DecoratedNameAttribute — cached, so emitting the attribute on
+        // every function reuses one TypeRef row instead of adding a duplicate per call.
+        var decoratedNameRef = GetLazyTypeRef("System.Runtime.CompilerServices", "DecoratedNameAttribute");
 
         // MemberRef for .ctor(string)
         var ctorSig = new BlobBuilder();
