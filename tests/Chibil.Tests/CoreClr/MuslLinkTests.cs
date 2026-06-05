@@ -451,6 +451,34 @@ int main(void){
         Assert.True(exit == 42, $"expected 42, got {exit}. {o}");
     }
 
+    [Fact]
+    public void Weak_alias_target_resolves_within_its_own_object_not_a_global_static_collision()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // musl's weak_alias target is ALWAYS a symbol defined in the SAME translation
+        // unit. Many TUs independently define a file-local `static dummy` with DIFFERENT
+        // signatures (musl has 20+: dummy(void), dummy(char*,char*), dummy(int), ...).
+        // These are distinct functions (internal linkage), but a global name table that
+        // merges defined functions "last wins" collapses them. If an alias resolves its
+        // target through that global table, TU0's `weak_alias(dummy, vm_wait)` binds
+        // vm_wait to TU1's 2-arg dummy — so TU0's zero-arg `vm_wait()` call site has the
+        // wrong arity and the JIT throws InvalidProgramException. The alias must resolve
+        // `dummy` within TU0. Regression for QuickJS-on-managed-musl: __mmap calls
+        // __vm_wait() (= weak_alias to mmap.c's static dummy(void)), which collided with
+        // clearenv/putenv/unsetenv's static dummy(char*,char*) -> InvalidProgram at __mmap.
+        int exit = LinkRun(new[]
+        {
+            "static void dummy(void) { }\n" +
+            "typedef void VT(void);\n" +
+            "extern VT vm_wait __attribute__((weak, alias(\"dummy\")));\n" +
+            "extern int keep_tu1(void);\n" +
+            "int main(void){ vm_wait(); return 42 + keep_tu1(); }\n",   // keep_tu1() == 0
+            "static void dummy(char *a, char *b) { (void)a; (void)b; }\n" +
+            "int keep_tu1(void){ dummy(0, 0); return 0; }\n",            // keeps TU1's 2-arg dummy
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (vm_wait bound to TU0's own dummy), got {exit}. {o}");
+    }
+
     static int LinkRun(string[] sources, out string output)
     {
         var objs = new List<ObjectFile>();
