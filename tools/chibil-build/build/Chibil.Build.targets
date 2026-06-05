@@ -1,0 +1,4 @@
+<Project>
+  <UsingTask TaskName="Chibil.Build.ChibilCompile" AssemblyFile="$(ChibilBuildTasksDll)" />
+  <UsingTask TaskName="Chibil.Build.ChibilLink" AssemblyFile="$(ChibilBuildTasksDll)" />
+</Project>

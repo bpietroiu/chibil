@@ -1,0 +1,12 @@
+<Project>
+  <!-- Tool/output locations under the artifacts root (./build). Override any of
+       these from the command line if your config differs. -->
+  <PropertyGroup>
+    <ChibilToolConfig Condition="'$(ChibilToolConfig)' == ''">debug</ChibilToolConfig>
+    <ChibilArtifacts Condition="'$(ChibilArtifacts)' == ''">$(MSBuildThisFileDirectory)..\..\..\build</ChibilArtifacts>
+    <ChibilDll Condition="'$(ChibilDll)' == ''">$(ChibilArtifacts)\bin\Chibil\$(ChibilToolConfig)\chibil.dll</ChibilDll>
+    <ChibilLinkDll Condition="'$(ChibilLinkDll)' == ''">$(ChibilArtifacts)\bin\ChibilLink\$(ChibilToolConfig)\chibil-link.dll</ChibilLinkDll>
+    <ChibilPalDll Condition="'$(ChibilPalDll)' == ''">$(ChibilArtifacts)\bin\Chibil.Pal\release\Chibil.Pal.dll</ChibilPalDll>
+    <ChibilBuildTasksDll Condition="'$(ChibilBuildTasksDll)' == ''">$(ChibilArtifacts)\bin\Chibil.Build.Tasks\$(ChibilToolConfig)\Chibil.Build.Tasks.dll</ChibilBuildTasksDll>
+  </PropertyGroup>
+</Project>

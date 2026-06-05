@@ -1,0 +1,24 @@
+<Project DefaultTargets="Run">
+  <Import Project="$(MSBuildThisFileDirectory)..\build\Chibil.Build.props" />
+  <Import Project="$(MSBuildThisFileDirectory)..\build\Chibil.Build.targets" />
+  <PropertyGroup>
+    <SmokeOut>$(ChibilArtifacts)\smoke</SmokeOut>
+  </PropertyGroup>
+  <Target Name="Build">
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(MSBuildThisFileDirectory)smoke.c"
+                   OutputDir="$(SmokeOut)"
+                   ExtraArgs="--target=coreclr -mlp64">
+      <Output TaskParameter="Objects" ItemName="SmokeObj" />
+    </ChibilCompile>
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)" Objects="@(SmokeObj)"
+                Output="$(SmokeOut)\smoke.dll" />
+  </Target>
+  <Target Name="Run" DependsOnTargets="Build">
+    <Exec Command="dotnet &quot;$(SmokeOut)\smoke.dll&quot;" IgnoreExitCode="true">
+      <Output TaskParameter="ExitCode" PropertyName="SmokeExit" />
+    </Exec>
+    <Error Condition="'$(SmokeExit)' != '7'" Text="smoke expected exit 7, got $(SmokeExit)" />
+    <Message Importance="high" Text="smoke OK: exit 7" />
+  </Target>
+</Project>
