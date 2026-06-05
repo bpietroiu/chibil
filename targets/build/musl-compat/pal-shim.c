@@ -10,3 +10,9 @@ long __syscall_cp(long n, long a, long b, long c, long d, long e, long f)
 {
     return __chibil_syscall(n, a, b, c, d, e, f);
 }
+
+/* musl's internal locks. The managed PAL is single-threaded for now, so locking
+ * is a no-op (an uncontended lock never touches the futex path). When real
+ * threading lands, back these with a managed Monitor. */
+void __lock(volatile int *l)   { (void)l; }
+void __unlock(volatile int *l) { (void)l; }

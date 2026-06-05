@@ -15,10 +15,15 @@ namespace Chibil
     {
         // x86-64 Linux syscall numbers (the subset implemented so far).
         const long SYS_write = 1;
+        const long SYS_mmap = 9;
+        const long SYS_mprotect = 10;
+        const long SYS_munmap = 11;
+        const long SYS_madvise = 28;
         const long SYS_exit = 60;
         const long SYS_exit_group = 231;
 
         const long ENOSYS = 38;
+        const long MAP_ANONYMOUS = 0x20;
 
         public static long Syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6)
         {
@@ -34,6 +39,22 @@ namespace Chibil
                     stream.Flush();
                     return a3;   // bytes written
                 }
+                case SYS_mmap:
+                {
+                    // void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t off)
+                    if (((int)a4 & MAP_ANONYMOUS) == 0) return -ENOSYS;   // only anonymous for now
+                    nuint len = (nuint)a2;
+                    void* p = System.Runtime.InteropServices.NativeMemory.AlignedAlloc(len, 4096);
+                    System.Runtime.InteropServices.NativeMemory.Fill(p, len, 0);  // anon mmap is zero-filled
+                    return (long)p;
+                }
+                case SYS_munmap:
+                    System.Runtime.InteropServices.NativeMemory.AlignedFree((void*)a1);
+                    return 0;
+                case SYS_madvise:
+                    return 0;   // advisory only — safe no-op
+                case SYS_mprotect:
+                    return 0;   // managed memory has no page protection — no-op (mallocng hardening)
                 case SYS_exit:
                 case SYS_exit_group:
                     Environment.Exit((int)a1);
