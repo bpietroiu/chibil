@@ -1,7 +1,7 @@
 #!/bin/bash
 # Categorize the musl-spike failures by root cause (exact counts).
 set -u
-OBJ=/tmp/musl_spike
+OBJ="${OBJ:-/tmp/musl_spike}"
 sc=0; at=0; wa=0; dl=0; other=0; otherlist=""
 for l in "$OBJ"/*.obj.log; do
     obj="${l%.log}"; [ -f "$obj" ] && continue          # compiled OK

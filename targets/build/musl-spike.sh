@@ -10,8 +10,19 @@ cd "$M" || exit 1
 
 # musl source build include set (arch + internal + public + generated).
 INCS="-Iarch/x86_64 -Iarch/generic -Isrc/include -Isrc/internal -Iinclude -Iobj/include"
-CFLAGS="-c --target=coreclr -nostdinc -mlp64 -D_GNU_SOURCE -D_XOPEN_SOURCE=700 $INCS"
-OBJ=/tmp/musl_spike; mkdir -p "$OBJ"; : > /tmp/musl_spike_fail.txt
+# SHIM=1 prepends the chibil compat layer: shadow arch headers (syscall/atomic)
+# first on the path + the force-included weak_alias/features override.
+SHIM="${SHIM:-0}"
+if [ "$SHIM" = "1" ]; then
+    INCS="-I$ROOT/targets/build/musl-compat $INCS"
+    SHIMFLAG="-include $ROOT/targets/build/musl-chibil-compat.h"
+    OBJ=/tmp/musl_spike_shim
+else
+    SHIMFLAG=""
+    OBJ=/tmp/musl_spike
+fi
+CFLAGS="-c --target=coreclr -nostdinc -mlp64 -D_GNU_SOURCE -D_XOPEN_SOURCE=700 $SHIMFLAG $INCS"
+mkdir -p "$OBJ"; FAILTXT="$OBJ/fail.txt"; : > "$FAILTXT"
 
 # Stratified sample: ALL of the small pure subsystems, a capped sample of large ones.
 ALL_DIRS="string ctype errno stdlib prng exit env multibyte"
@@ -32,7 +43,7 @@ for f in "${files[@]}"; do
         fail=$((fail+1))
         # first compiler error line for bucketing
         err=$(grep -m1 -iE "error:|not supported|unsupported|InvalidOperation|Exception|assert" "$obj.log" | head -1)
-        echo "$f :: ${err:-<no error line; see log>}" >> /tmp/musl_spike_fail.txt
+        echo "$f :: ${err:-<no error line; see log>}" >> "$FAILTXT"
     fi
 done
 
@@ -40,7 +51,7 @@ echo ""
 echo "=== RESULT: $ok ok / $fail fail  (rate: $(awk "BEGIN{printf \"%.0f\", 100*$ok/($ok+$fail)}")%) ==="
 echo ""
 echo "=== failure buckets (normalized error message x count) ==="
-sed -E 's/.*:: //; s/'"'"'[^'"'"']*'"'"'/QUOTE/g; s/[0-9]+/N/g; s|[A-Za-z0-9_./-]+\.[ch]|FILE|g' /tmp/musl_spike_fail.txt \
+sed -E 's/.*:: //; s/'"'"'[^'"'"']*'"'"'/QUOTE/g; s/[0-9]+/N/g; s|[A-Za-z0-9_./-]+\.[ch]|FILE|g' "$FAILTXT" \
     | sort | uniq -c | sort -rn | head -20
 echo ""
 echo "=== per-subsystem ok/total ==="

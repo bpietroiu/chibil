@@ -189,6 +189,42 @@ compile C" (it already does) — it's a **`musl-chibil-compat.h`** that:
 That single shim should lift this sample from 58% toward ~99% (only genuinely
 platform-specific TUs remain — which the PAL owns anyway). This directly confirms
 **D1** (the syscall seam is the right boundary — it's literally where musl breaks)
-and **D5** (compile musl from source, shim the seam). Next concrete step: build
-that compat header, re-measure, then implement the managed `__syscall` PAL +
-fd table and rewire chibil-link's resolver to treat `musl.dll` as internal libc.
+and **D5** (compile musl from source, shim the seam).
+
+## Shim built + re-measured (2026-06-05) — lift PROVEN, one lever left
+
+Built the compat layer:
+- `targets/build/musl-compat/syscall_arch.h` — shadows the inline-asm
+  `__syscall0..6` with forwarders to one extern `__chibil_syscall` (the PAL seam,
+  made concrete). Shadowed via `-I…/musl-compat` first on the path.
+- `targets/build/musl-compat/atomic_arch.h` — plain-C (single-threaded) `a_*`
+  primitives replacing the `lock`-asm ones (real musl backs these with
+  `Interlocked` externs).
+- `targets/build/musl-chibil-compat.h` (force-included) — pulls musl's real
+  `features.h`, then neutralizes `weak_alias` (chibil has no `__alias__`; real
+  aliasing is a link-time concern).
+
+Re-ran the same 308 TUs with `SHIM=1`:
+
+| build | ok | fail | rate |
+|---|---|---|---|
+| baseline | 178 | 130 | 58% |
+| **+ compat shim** | **228** | **80** | **74%** |
+
+The shim **eliminated the entire seam**: `syscall_arch.h` 68→**0**,
+`atomic_arch.h` 11→**0**, `weak_alias` 46→**0**. `ctype` 7/37→36/37, `string`
+65/74→72/74.
+
+**The 80 residuals collapse to a single chibil parser gap** — comma-separated
+*function* declarations: `T f(…), g(…);`. It hits `src/internal/syscall.h:26`
+(`hidden long __syscall_ret(...), __syscall_cp(...);` — pulled in by every
+syscall-using TU → 75 failures) and `dynlink.h:114` (4). Confirmed in isolation:
+`long a(int), b(long);` → *"parameter name omitted"*, while separate decls
+compile. `hidden` is not involved. The only non-parser residual is 1 asm barrier
+(`explicit_bzero`).
+
+**So the next lever is one small chibil parser feature** — support multiple
+function declarators in one declaration — which would take this sample from 74%
+to ~99.7% (only `explicit_bzero`'s barrier asm remains, trivially shimmed). After
+that: implement the managed `__chibil_syscall` PAL + fd table, and rewire
+chibil-link's resolver to treat `musl.dll` as internal libc (imports → ~0).
