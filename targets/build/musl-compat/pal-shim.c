@@ -17,6 +17,11 @@ long __syscall_cp(long n, long a, long b, long c, long d, long e, long f)
 void __lock(volatile int *l)   { (void)l; }
 void __unlock(volatile int *l) { (void)l; }
 
+/* __toread/__towrite call this to register stdio for atexit flushing. The managed
+ * crt doesn't run musl's atexit yet (stdout is line-buffered, which covers the
+ * common case), so this is a no-op for now. */
+void __stdio_exit_needed(void) { }
+
 /* Managed-crt startup init. Natively __init_libc sets __libc.auxv from the program
  * stack; the managed PAL has no auxv, so code that walks it (e.g. mallocng's
  * get_random_secret) would deref a null pointer. Build a minimal auxv with a real
@@ -33,4 +38,14 @@ void __chibil_pal_init(void)
     __chibil_auxv[1] = (unsigned long)__chibil_random16;
     __chibil_auxv[2] = 0;
     __libc.auxv = (size_t *)__chibil_auxv;
+}
+
+/* The real src/stdio/__stdio_seek.c hits a chibil __scc cast-parse bug (a known
+ * residual). Console streams aren't seekable anyway, so stub it (ESPIPE) until
+ * that parser bug is fixed. */
+#include "stdio_impl.h"
+off_t __stdio_seek(FILE *f, off_t off, int whence)
+{
+    (void)f; (void)off; (void)whence;
+    return -1;
 }

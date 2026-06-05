@@ -15,6 +15,8 @@ namespace Chibil
     {
         // x86-64 Linux syscall numbers (the subset implemented so far).
         const long SYS_write = 1;
+        const long SYS_ioctl = 16;
+        const long SYS_writev = 20;
         const long SYS_mmap = 9;
         const long SYS_mprotect = 10;
         const long SYS_munmap = 11;
@@ -40,6 +42,22 @@ namespace Chibil
                     stream.Flush();
                     return a3;   // bytes written
                 }
+                case SYS_writev:
+                {
+                    // ssize_t writev(int fd, const struct iovec *iov, int iovcnt)
+                    // iovec = { void *iov_base; size_t iov_len; } — 16 bytes each.
+                    var stream = (int)a1 == 2 ? Console.OpenStandardError() : Console.OpenStandardOutput();
+                    long total = 0;
+                    byte* iov = (byte*)a2;
+                    for (int i = 0; i < (int)a3; i++)
+                    {
+                        ulong* e = (ulong*)(iov + i * 16);
+                        ulong basep = e[0], len = e[1];
+                        if (len != 0) { stream.Write(new ReadOnlySpan<byte>((void*)basep, (int)len)); total += (long)len; }
+                    }
+                    stream.Flush();
+                    return total;
+                }
                 case SYS_mmap:
                 {
                     // void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t off)
@@ -51,6 +69,11 @@ namespace Chibil
                 }
                 case SYS_munmap:
                     System.Runtime.InteropServices.NativeMemory.AlignedFree((void*)a1);
+                    return 0;
+                case SYS_ioctl:
+                    // 0 = "success": musl's __stdout_write treats this as a tty and
+                    // keeps stdout LINE-buffered, so printf("…\n") flushes promptly
+                    // (the managed crt doesn't run musl's atexit stdio flush yet).
                     return 0;
                 case SYS_madvise:
                     return 0;   // advisory only — safe no-op
