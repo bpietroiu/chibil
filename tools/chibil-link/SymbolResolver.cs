@@ -39,6 +39,15 @@ public static class SymbolResolver
         foreach (var of in objs)
             table.AddDefined(of, merger);
 
+        // __attribute__((alias)) bindings: an alias resolves to its target's merged
+        // token, so every reference to the alias hits the target's MethodDef. Done
+        // after all real definitions are known so targets are present in the table.
+        foreach (var of in objs)
+            if (of.TryReadAliasManifest(out var aliases))
+                foreach (var kv in aliases)
+                    if (table.DefinedMethodToken.TryGetValue(kv.Value, out int tok))
+                        table.DefinedMethodToken[kv.Key] = tok;
+
         // Synthesized P/Invoke methods, deduped by (native name + concrete
         // signature blob) across all objects. A native variadic callee (e.g.
         // snprintf) produces one MemberRef per call-site argument shape — all

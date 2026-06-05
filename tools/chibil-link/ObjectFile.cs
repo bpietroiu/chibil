@@ -157,6 +157,35 @@ public sealed unsafe class ObjectFile
         return of;
     }
 
+    /// <summary>
+    /// Reads the <c>.chialias</c> manifest chibil emits for
+    /// <c>__attribute__((alias("target")))</c> symbols. Payload (little-endian):
+    ///   uint32 count
+    ///   repeat count: uint32 aliasLen, aliasName(utf8), uint32 targetLen, targetName(utf8)
+    /// Returns false + empty dict when the object carries no such section.
+    /// </summary>
+    public bool TryReadAliasManifest(out Dictionary<string, string> aliases)
+    {
+        aliases = new Dictionary<string, string>();
+        var sec = Coff.FindSection(ChiAliasSectionName);
+        if (sec == null) return false;
+
+        byte[] data = Coff.GetSectionData(sec.Value).ToArray();
+        using var br = new System.IO.BinaryReader(new System.IO.MemoryStream(data));
+        uint count = br.ReadUInt32();
+        for (uint i = 0; i < count; i++)
+        {
+            int aliasLen = checked((int)br.ReadUInt32());
+            string alias = System.Text.Encoding.UTF8.GetString(br.ReadBytes(aliasLen));
+            int targetLen = checked((int)br.ReadUInt32());
+            string target = System.Text.Encoding.UTF8.GetString(br.ReadBytes(targetLen));
+            aliases[alias] = target;
+        }
+        return true;
+    }
+
+    private const string ChiAliasSectionName = ".chialias";
+
     // Parse the .chidbg side-stream emitted by chibil (see CodeGen.BuildChibilDebugBlob):
     // magic 'CDBG', version 4, source path + SHA-256, then per-method (RID, IL size,
     // line points with columns, and nested lexical scopes with their named locals).
