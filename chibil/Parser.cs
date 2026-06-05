@@ -667,6 +667,7 @@ public class Parser
                 {
                     tok = Util.Skip(tok, "(");
                     // the target symbol name (a string literal); strip the trailing NUL.
+                    if (tok.Kind != TokenKind.Str) Util.ErrorTok(tok, "alias attribute requires a string literal");
                     ty.AliasTarget = Encoding.UTF8.GetString(tok.Str, 0, tok.Str.Length - 1);
                     tok = tok.Next;
                     tok = Util.Skip(tok, ")");

@@ -42,11 +42,19 @@ public static class SymbolResolver
         // __attribute__((alias)) bindings: an alias resolves to its target's merged
         // token, so every reference to the alias hits the target's MethodDef. Done
         // after all real definitions are known so targets are present in the table.
+        // (Function aliases only: musl's weak_alias targets are always defined
+        // in-module. If a target is not a defined function — e.g. a data symbol or
+        // a cross-object reference — warn, since the alias would otherwise silently
+        // fall through to a P/Invoke stub that fails at run time.)
         foreach (var of in objs)
             if (of.TryReadAliasManifest(out var aliases))
                 foreach (var kv in aliases)
                     if (table.DefinedMethodToken.TryGetValue(kv.Value, out int tok))
                         table.DefinedMethodToken[kv.Key] = tok;
+                    else
+                        Console.Error.WriteLine(
+                            $"chibil-link: warning: alias '{kv.Key}' targets '{kv.Value}', " +
+                            "which is not a defined function — the alias will not resolve.");
 
         // Synthesized P/Invoke methods, deduped by (native name + concrete
         // signature blob) across all objects. A native variadic callee (e.g.
