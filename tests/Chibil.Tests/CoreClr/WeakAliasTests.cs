@@ -18,4 +18,15 @@ public class WeakAliasTests
         byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
         Assert.NotEmpty(obj);
     }
+
+    [Fact]
+    public void Postfix_attribute_on_prototype_parses()
+    {
+        const string src =
+            "int g(int) __attribute__((weak));\n" +   // postfix attribute, no alias
+            "int g(int x){ return x; }\n" +
+            "int main(void){ return g(0); }\n";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        Assert.NotEmpty(obj);
+    }
 }

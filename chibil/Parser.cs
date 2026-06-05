@@ -1907,6 +1907,7 @@ public class Parser
     private Token Function(Token tok, CType basety, VarAttr attr)
     {
         CType ty = Declarator(ref tok, tok, basety, attr.PendingCallConv);
+        if (Util.Equal(tok, "__attribute__")) tok = AttributeList(tok, ty);   // postfix attrs
         if (ty.Name == null) Util.ErrorTok(ty.NamePos, "function name omitted");
         string nameStr = GetIdent(ty.Name);
         // Record public-API functions: a top-level function declarator (prototype or
@@ -2041,6 +2042,7 @@ public class Parser
         {
             if (!first) tok = Util.Skip(tok, ","); first = false;
             CType ty = Declarator(ref tok, tok, basety, attr.PendingCallConv);
+            if (Util.Equal(tok, "__attribute__")) tok = AttributeList(tok, ty);   // postfix attrs
             if (ty.Name == null) Util.ErrorTok(ty.NamePos, "variable name omitted");
             Obj v = NewGvar(GetIdent(ty.Name), ty);
             v.IsDefinition = !attr.IsExtern; v.IsStatic = attr.IsStatic;
