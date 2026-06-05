@@ -5,3 +5,4 @@ tmp/
 /*.obj
 .vs/
 myapp.dll
+/build/

@@ -1,0 +1,13 @@
+<Project>
+  <!--
+    Centralized output: every project writes to ./build (the .NET 8+ artifacts
+    layout): build/bin/<Project>/<config>/, build/obj/..., build/publish/...
+    This file is auto-imported by every project under the repo, so NO .csproj is
+    edited. The upstream scenarios/Directory.Build.props shadows this for that one
+    project (CoffEmitterTests keeps its local bin/obj) - accepted exception.
+  -->
+  <PropertyGroup>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath>$(MSBuildThisFileDirectory)build</ArtifactsPath>
+  </PropertyGroup>
+</Project>
