@@ -1563,6 +1563,19 @@ public sealed class MetadataMerger
         foreach (var cf in CopiedFields)
             definedField[cf.Name] = cf.PredictedRow;
 
+        // DATA aliases: musl emits `weak_alias(__environ, environ)` etc. on globals.
+        // The alias manifest (.chialias) carries both function and data aliases; the
+        // function ones are handled in SymbolResolver. Here, bind a data alias to its
+        // target's defined-global row — the data analog of the function-alias path —
+        // so references to the alias name resolve to the target's storage. A STRONG
+        // definition of the alias name wins (skip those, like the function path).
+        foreach (var of in _objs)
+            if (of.TryReadAliasManifest(out var aliases))
+                foreach (var kv in aliases)
+                    if (!definedField.ContainsKey(kv.Key) &&
+                        definedField.TryGetValue(kv.Value, out int targetRow))
+                        definedField[kv.Key] = targetRow;   // alias -> target's global row
+
         foreach (var of in _objs)
         {
             var md = of.Md;

@@ -93,3 +93,124 @@ off_t __stdio_seek(FILE *f, off_t off, int whence)
     (void)f; (void)off; (void)whence;
     return -1;
 }
+
+/* fstatat(): the real src/stat/fstatat.c uses a nested designated initializer
+ * (.st_atim.tv_sec = ...) that hits a chibil parser residual. It backs
+ * stat/fstat/lstat, which the engine references but JS_Eval never exercises (no
+ * file I/O for an in-memory eval). Forward to the statx syscall and translate the
+ * fields directly here so the wrappers link and behave when a path IS stat'd. */
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <stdint.h>
+#include <sys/sysmacros.h>
+#define SYS_statx 332
+#ifndef AT_NO_AUTOMOUNT
+#define AT_NO_AUTOMOUNT 0x800
+#endif
+struct __chibil_statx {
+    uint32_t stx_mask, stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink, stx_uid, stx_gid;
+    uint16_t stx_mode, pad1;
+    uint64_t stx_ino, stx_size, stx_blocks, stx_attributes_mask;
+    struct { int64_t tv_sec; uint32_t tv_nsec; int32_t pad; } stx_atime, stx_btime, stx_ctime, stx_mtime;
+    uint32_t stx_rdev_major, stx_rdev_minor, stx_dev_major, stx_dev_minor;
+    uint64_t spare[14];
+};
+int fstatat(int fd, const char *restrict path, struct stat *restrict st, int flag)
+{
+    struct __chibil_statx stx;
+    long ret = __chibil_syscall(SYS_statx, fd, (long)path, flag | AT_NO_AUTOMOUNT, 0x7ff, (long)&stx, 0);
+    if (ret) return (int)ret;
+    st->st_dev = makedev(stx.stx_dev_major, stx.stx_dev_minor);
+    st->st_ino = stx.stx_ino;
+    st->st_mode = stx.stx_mode;
+    st->st_nlink = stx.stx_nlink;
+    st->st_uid = stx.stx_uid;
+    st->st_gid = stx.stx_gid;
+    st->st_rdev = makedev(stx.stx_rdev_major, stx.stx_rdev_minor);
+    st->st_size = stx.stx_size;
+    st->st_blksize = stx.stx_blksize;
+    st->st_blocks = stx.stx_blocks;
+    st->st_atim.tv_sec = stx.stx_atime.tv_sec;
+    st->st_atim.tv_nsec = stx.stx_atime.tv_nsec;
+    st->st_mtim.tv_sec = stx.stx_mtime.tv_sec;
+    st->st_mtim.tv_nsec = stx.stx_mtime.tv_nsec;
+    st->st_ctim.tv_sec = stx.stx_ctime.tv_sec;
+    st->st_ctim.tv_nsec = stx.stx_ctime.tv_nsec;
+    return 0;
+}
+
+/* settimeofday(): src/linux/settimeofday.c hits a chibil compound-literal codegen
+ * residual (&(struct timespec){...} -> stack underflow). Setting the wall clock is
+ * not supported by the managed PAL and JS_Eval never calls it; no-op success. */
+struct timeval; struct timezone;
+int settimeofday(const struct timeval *tv, const struct timezone *tz)
+{ (void)tv; (void)tz; return 0; }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Link tail: thread / process / network / terminal primitives.
+ *
+ * The managed PAL is single-threaded and has no fork/exec/sockets. The engine TUs
+ * and the managed-musl objects reference these symbols, but JS_Eval("40+2") never
+ * exercises any of them. Each is a no-op (or failure-returning) stub whose only job
+ * is to make the link self-contained. Owning subsystems (thread, network, process,
+ * passwd, conf, termios) are deliberately NOT pulled into the managed-musl object
+ * set because they would drag in further threading/socket machinery the managed PAL
+ * cannot honour. Signatures match musl's public prototypes so the link binds cleanly.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/* Threading (src/thread): no real threads in the managed model. */
+void __inhibit_ptc(void) { }
+void __release_ptc(void) { }
+struct __ptcb;
+void _pthread_cleanup_push(struct __ptcb *cb, void (*f)(void *), void *x) { (void)cb;(void)f;(void)x; }
+void _pthread_cleanup_pop(struct __ptcb *cb, int run) { (void)cb;(void)run; }
+void pthread_testcancel(void) { }
+int pthread_attr_init(void *a) { (void)a; return 0; }
+int pthread_attr_setdetachstate(void *a, int s) { (void)a;(void)s; return 0; }
+#define EAGAIN_ 11
+int pthread_create(void *t, const void *attr, void *(*fn)(void *), void *arg)
+{ (void)t;(void)attr;(void)fn;(void)arg; return EAGAIN_; }   /* cannot spawn threads */
+unsigned __default_stacksize = 128*1024;   /* DEFAULT_STACK_SIZE; backs pthread_attr_init */
+
+/* Temp-name helper (src/temp): only the file-creation paths use it (not JS_Eval). */
+char *__randname(char *t) { return t; }
+
+/* Filesystem (src/stat internal): the kstat path of fstat.c calls __fstatat; the
+ * statx-based fstatat is shimmed above. Forward __fstatat to it. */
+int fstatat(int, const char *, void *, int);
+int __fstatat(int fd, const char *path, void *st, int flag)
+{ return fstatat(fd, path, st, flag); }
+
+/* Terminal / conf (src/termios, src/conf): no tty/sysconf surface for JS_Eval. */
+int tcsetattr(int fd, int act, const void *tio) { (void)fd;(void)act;(void)tio; return 0; }
+long sysconf(int name) { (void)name; return -1; }
+
+/* ioctl(): src/misc/ioctl.c hits a chibil offsetof-in-static-table residual (the
+ * v4l2 time-conversion table). The variadic public wrapper just forwards a single
+ * arg to SYS_ioctl; the managed PAL maps that syscall to 0. */
+#define SYS_ioctl 16
+int ioctl(int fd, int req, void *arg) { return (int)__chibil_syscall(SYS_ioctl, fd, req, (long)arg, 0, 0, 0); }
+
+/* Process (src/process): no fork/exec in the managed model. */
+typedef int __pid_t_shim;
+int posix_spawn(int *pid, const char *path, const void *fa, const void *attr,
+                char *const argv[], char *const envp[])
+{ (void)pid;(void)path;(void)fa;(void)attr;(void)argv;(void)envp; return 38; } /* ENOSYS */
+
+/* Group DB (src/passwd): pulled by misc/initgroups; never on the JS_Eval path. */
+int getgrouplist(const char *user, unsigned gid, unsigned *groups, int *ngroups)
+{ (void)user;(void)gid; if (ngroups) { if (groups && *ngroups>0) groups[0]=gid; *ngroups = 1; } return 0; }
+
+/* Network (src/network): no sockets in the managed PAL. Fail with ENOSYS. */
+int socket(int d, int t, int p) { (void)d;(void)t;(void)p; return -1; }
+int connect(int fd, const void *addr, unsigned len) { (void)fd;(void)addr;(void)len; return -1; }
+long send(int fd, const void *buf, unsigned long n, int flags) { (void)fd;(void)buf;(void)n;(void)flags; return -1; }
+
+/* Dynamic-linking / init-array data symbols referenced at link time but unused in a
+ * statically-merged managed image: provide zero-init storage so they resolve. */
+void *__fini_array_start[1] = { 0 };
+void *__fini_array_end[1]   = { 0 };
+long  _DYNAMIC[1]           = { 0 };
