@@ -33,13 +33,33 @@ files=()
 for d in $ALL_DIRS;    do while read -r f; do files+=("$f"); done < <(find "src/$d" -name '*.c' 2>/dev/null); done
 for d in $SAMPLE_DIRS; do while read -r f; do files+=("$f"); done < <(find "src/$d" -name '*.c' 2>/dev/null | sort | head -$SAMPLE_N); done
 
-echo "=== compiling ${#files[@]} musl TUs with chibil --target=coreclr ==="
-ok=0; fail=0
+# Incremental: skip a TU whose .obj is already newer than its source AND every
+# build input (the compiler + the compat headers). A chibil rebuild or a shim edit
+# bumps one of these, invalidating the whole cache; a failed TU leaves no .obj, so
+# it is always retried (cheap to re-check after a fix). INCREMENTAL=0 forces a full
+# rebuild.
+INCREMENTAL="${INCREMENTAL:-1}"
+deps=("$ROOT/chibil/bin/Debug/net10.0/chibil.dll")
+[ "$SHIM" = "1" ] && deps+=("$ROOT/targets/build/musl-chibil-compat.h" \
+    "$ROOT/targets/build/musl-compat/syscall_arch.h" \
+    "$ROOT/targets/build/musl-compat/atomic_arch.h" \
+    "$ROOT/targets/build/musl-compat/pthread_arch.h")
+newest_dep=$(ls -t "${deps[@]}" 2>/dev/null | head -1)
+up_to_date() { # $1=obj $2=src
+    [ -f "$1" ] && [ "$1" -nt "$2" ] && { [ -z "$newest_dep" ] || [ "$1" -nt "$newest_dep" ]; }
+}
+
+echo "=== compiling ${#files[@]} musl TUs with chibil --target=coreclr (incremental=$INCREMENTAL) ==="
+ok=0; fail=0; cached=0
 for f in "${files[@]}"; do
     obj="$OBJ/$(echo "$f" | tr '/' '_').obj"
+    if [ "$INCREMENTAL" = "1" ] && up_to_date "$obj" "$f"; then
+        ok=$((ok+1)); cached=$((cached+1)); continue
+    fi
     if $CH $CFLAGS "$f" -o "$obj" > "$obj.log" 2>&1; then
         ok=$((ok+1))
     else
+        rm -f "$obj"   # no stale obj for a failed TU (keeps it flagged + retried)
         fail=$((fail+1))
         # first compiler error line for bucketing
         err=$(grep -m1 -iE "error:|not supported|unsupported|InvalidOperation|Exception|assert" "$obj.log" | head -1)
@@ -48,7 +68,7 @@ for f in "${files[@]}"; do
 done
 
 echo ""
-echo "=== RESULT: $ok ok / $fail fail  (rate: $(awk "BEGIN{printf \"%.0f\", 100*$ok/($ok+$fail)}")%) ==="
+echo "=== RESULT: $ok ok ($cached cached) / $fail fail  (rate: $(awk "BEGIN{printf \"%.0f\", 100*$ok/($ok+$fail)}")%) ==="
 echo ""
 echo "=== failure buckets (normalized error message x count) ==="
 sed -E 's/.*:: //; s/'"'"'[^'"'"']*'"'"'/QUOTE/g; s/[0-9]+/N/g; s|[A-Za-z0-9_./-]+\.[ch]|FILE|g' "$FAILTXT" \
