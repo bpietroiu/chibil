@@ -309,6 +309,10 @@ public sealed class MetadataMerger
     }
     public readonly List<DataImport> DataImports = new();
 
+    public IReadOnlyDictionary<string, string> BindMap = new Dictionary<string, string>();
+    public IReadOnlyList<AssemblyIdentity> ReferenceIdentities = new List<AssemblyIdentity>();
+    private readonly Dictionary<(string asm, string ns, string type), EntityHandle> _externTypeRefs = new();
+
     /// <summary>Output TypeDef row reserved for the export class (row 2), or 0 if disabled.</summary>
     public int ExportTypeDefRow => _exportTypeDefRow;
 
@@ -1400,6 +1404,47 @@ public sealed class MetadataMerger
             Builder.GetOrAddString("System.Runtime.InteropServices"),
             Builder.GetOrAddString("NativeLibrary"));
         return _nativeLibraryTypeRef;
+    }
+
+    /// <summary>Bind C symbol <paramref name="name"/> to the managed method named by
+    /// <paramref name="dotted"/> (e.g. "Chibil.Pal.Syscall") in one of the referenced
+    /// assemblies. Returns the MemberRef token to redirect the extern's call to.</summary>
+    public int ResolveManagedBind(string name, string dotted, BlobReader sigReader, ObjectFile of)
+    {
+        // Split "Ns.Sub.Type.Method" -> ns="Ns.Sub", type="Type", method="Method".
+        int lastDot = dotted.LastIndexOf('.');
+        if (lastDot < 0) throw new LinkException($"--bind target '{dotted}' must be Namespace.Type.Method");
+        string method = dotted[(lastDot + 1)..];
+        string typeFull = dotted[..lastDot];
+        int typeDot = typeFull.LastIndexOf('.');
+        string ns = typeDot < 0 ? "" : typeFull[..typeDot];
+        string typeName = typeDot < 0 ? typeFull : typeFull[(typeDot + 1)..];
+
+        // v1: the first -r reference assembly is the bind target.
+        if (ReferenceIdentities.Count == 0)
+            throw new LinkException($"--bind needs a -r reference assembly for '{name}'");
+        var id = ReferenceIdentities[0];
+
+        if (!_assemblyRefByName.TryGetValue(id.Name, out var asmRef))
+        {
+            asmRef = Builder.AddAssemblyReference(
+                Builder.GetOrAddString(id.Name), id.Version,
+                string.IsNullOrEmpty(id.Culture) ? default : Builder.GetOrAddString(id.Culture),
+                id.PublicKeyToken.Length == 0 ? default : Builder.GetOrAddBlob(id.PublicKeyToken),
+                default, default);
+            _assemblyRefByName[id.Name] = asmRef;
+        }
+        var typeKey = (id.Name, ns, typeName);
+        if (!_externTypeRefs.TryGetValue(typeKey, out var typeRef))
+        {
+            typeRef = Builder.AddTypeReference(asmRef, Builder.GetOrAddString(ns), Builder.GetOrAddString(typeName));
+            _externTypeRefs[typeKey] = typeRef;
+        }
+        // The MemberRef signature is the call-site's own signature, token-remapped.
+        var sigB = new BlobBuilder();
+        EcmaSignatureRewriter.RewriteMethodSignature(sigReader, MapFor(of), sigB);
+        var mr = Builder.AddMemberReference(typeRef, Builder.GetOrAddString(method), Builder.GetOrAddBlob(sigB));
+        return MetadataTokens.GetToken(mr);
     }
 
     /// <summary>Local-variable signature for the data-import initializer: a single
