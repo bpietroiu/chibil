@@ -21,6 +21,7 @@ namespace Chibil
         const long SYS_madvise = 28;
         const long SYS_exit = 60;
         const long SYS_exit_group = 231;
+        const long SYS_getrandom = 318;
 
         const long ENOSYS = 38;
         const long MAP_ANONYMOUS = 0x20;
@@ -55,6 +56,13 @@ namespace Chibil
                     return 0;   // advisory only — safe no-op
                 case SYS_mprotect:
                     return 0;   // managed memory has no page protection — no-op (mallocng hardening)
+                case SYS_getrandom:
+                {
+                    // ssize_t getrandom(void *buf, size_t buflen, unsigned int flags)
+                    var dst = new Span<byte>((void*)a1, (int)a2);
+                    System.Security.Cryptography.RandomNumberGenerator.Fill(dst);
+                    return a2;
+                }
                 case SYS_exit:
                 case SYS_exit_group:
                     Environment.Exit((int)a1);
@@ -65,12 +73,14 @@ namespace Chibil
 
         /// <summary>musl's thread pointer (TLS base). L2 stub: one zeroed control block
         /// per thread — enough for the cancel/errno reads on the simple paths.</summary>
+        // Returns uintptr_t (UInt64) to match the C `__chibil_get_tp` extern exactly —
+        // the bind resolves by signature, so the return type must agree.
         [ThreadStatic] static IntPtr _tcb;
-        public static long GetTp()
+        public static ulong GetTp()
         {
             if (_tcb == IntPtr.Zero)
                 _tcb = (IntPtr)System.Runtime.InteropServices.NativeMemory.AllocZeroed(4096);
-            return (long)_tcb;
+            return (ulong)_tcb;
         }
     }
 }

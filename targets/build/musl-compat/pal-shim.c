@@ -16,3 +16,21 @@ long __syscall_cp(long n, long a, long b, long c, long d, long e, long f)
  * threading lands, back these with a managed Monitor. */
 void __lock(volatile int *l)   { (void)l; }
 void __unlock(volatile int *l) { (void)l; }
+
+/* Managed-crt startup init. Natively __init_libc sets __libc.auxv from the program
+ * stack; the managed PAL has no auxv, so code that walks it (e.g. mallocng's
+ * get_random_secret) would deref a null pointer. Build a minimal auxv with a real
+ * AT_RANDOM (16 bytes from getrandom). Call this once before any libc use. */
+#include "libc.h"
+#define AT_RANDOM 25
+#define SYS_getrandom 318
+static unsigned long __chibil_auxv[3];
+static unsigned char  __chibil_random16[16];
+void __chibil_pal_init(void)
+{
+    __chibil_syscall(SYS_getrandom, (long)__chibil_random16, 16, 0, 0, 0, 0);
+    __chibil_auxv[0] = AT_RANDOM;
+    __chibil_auxv[1] = (unsigned long)__chibil_random16;
+    __chibil_auxv[2] = 0;
+    __libc.auxv = (size_t *)__chibil_auxv;
+}

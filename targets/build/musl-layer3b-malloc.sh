@@ -35,7 +35,9 @@ done
 cat > "$OUT/main.c" <<'EOF'
 typedef unsigned long size_t;
 void *malloc(size_t); void free(void *);
+extern void __chibil_pal_init(void);   /* managed-crt startup (auxv) */
 int main(void){
+    __chibil_pal_init();
     char *p = (char*)malloc(100);
     for (int i = 0; i < 100; i++) p[i] = (char)i;
     int r = p[42];
@@ -44,7 +46,7 @@ int main(void){
 }
 EOF
 $CH -c --target=coreclr -mlp64 "$OUT/main.c" -o "$OUT/main.obj" 2>&1 | tail -3
-$CH -c --target=coreclr -mlp64 "$ROOT/targets/build/musl-compat/pal-shim.c" -o "$OUT/pal-shim.obj" 2>&1 | tail -3
+$CH $CFLAGS "$ROOT/targets/build/musl-compat/pal-shim.c" -o "$OUT/pal-shim.obj" 2>&1 | tail -3
 
 echo "=== link (print-imports, no -l) ==="
 $LINK --print-imports -o "$OUT/l3b.dll" "$OUT/main.obj" "${muslobjs[@]}" "$OUT/pal-shim.obj" \
