@@ -224,7 +224,40 @@ compile. `hidden` is not involved. The only non-parser residual is 1 asm barrier
 (`explicit_bzero`).
 
 **So the next lever is one small chibil parser feature** — support multiple
-function declarators in one declaration — which would take this sample from 74%
-to ~99.7% (only `explicit_bzero`'s barrier asm remains, trivially shimmed). After
-that: implement the managed `__chibil_syscall` PAL + fd table, and rewire
-chibil-link's resolver to treat `musl.dll` as internal libc (imports → ~0).
+function declarators in one declaration.
+
+## Parser fixed + pthread shadow (2026-06-05) — 98%
+
+- **chibil parser fix** (`Parser.cs` + `ParserDeclListTests.cs`, TDD): a top-level
+  declaration whose first declarator is a function prototype followed by `,` now
+  parses the remaining declarators as prototypes/globals (`FunctionDeclaratorTail`)
+  instead of mis-routing them into function-DEFINITION handling. Full suite green
+  (+2 tests, no regressions). Lift: **74% → 88%**.
+- Clearing `syscall.h:26` exposed a **third seam asm header** I'd missed:
+  `arch/x86_64/pthread_arch.h` reads the thread pointer via `mov %fs:0` asm
+  (`__get_tp`). Added `musl-compat/pthread_arch.h` forwarding to a PAL extern
+  `__chibil_get_tp`. Lift: **88% → 98%**.
+
+Full progression on the 308-TU sample:
+
+| stage | ok / fail | rate |
+|---|---|---|
+| baseline | 178 / 130 | 58% |
+| + compat shim (syscall/atomic/weak_alias) | 228 / 80 | 74% |
+| + parser fix (comma declarators) | 272 / 36 | 88% |
+| + pthread_arch shadow | **302 / 6** | **98%** |
+
+Subsystems now fully clean: `ctype` 37/37, `multibyte` 20/20, `stdlib`/`malloc`/
+`math`/`time`/`locale`/`network`/`signal` all N/N.
+
+**The 6 residuals are diverse and small** (no longer a single lever):
+- 2 chibil internal crashes (a `NullReferenceException`, an internal assertion) —
+  real chibil bugs, worth separate `systematic-debugging`;
+- 1 `explicit_bzero` asm memory barrier (`__asm__("":::"memory")`);
+- 1 `__scc` cast edge (`((long)(X))` in a syscall macro) + a couple misc.
+
+**Verdict: managed musl is ~98% compilable with chibil today.** The blockers were
+exactly the platform seam (three arch asm headers — `syscall_arch`, `atomic_arch`,
+`pthread_arch` — all PAL territory) plus one real parser gap (now fixed). Next:
+implement the managed `__chibil_syscall` PAL + fd table + `__chibil_get_tp`, and
+rewire chibil-link's resolver to treat `musl.dll` as internal libc (imports → ~0).
