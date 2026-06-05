@@ -45,6 +45,8 @@ public sealed class LinkOptions
     public string Output = "a.dll";               // -o
     public string ExportClass = null;             // --export-class=<Namespace.Name>
     public Dictionary<string, string> PinvokeMap = new();   // --pinvoke=name=lib,...
+    public Dictionary<string, string> BindMap = new();      // --bind=sym=Ns.Type.Method,...
+    public List<string> References = new();                 // -r/--reference managed assemblies
     public bool Debug = false;                    // -g       mark assembly debuggable
     public bool Shared = false;                   // -shared  emit a library (no entry point)
     public string Entry = "main";                 // -e/--entry  C entry symbol
@@ -68,6 +70,8 @@ public sealed class LinkOptions
         "  --export-class=<N.T>     emit a public static facade class N.T forwarding\n" +
         "                           to exported C functions (callable from C#)\n" +
         "  --pinvoke=<n=lib,...>    pin unresolved symbol <n> to native library <lib>\n" +
+        "  --bind=<s=N.T.M,...>     resolve C symbol <s> to managed method N.T.M in a -r assembly\n" +
+        "  -r, --reference <dll>    reference a managed assembly (for --bind targets)\n" +
         "  --print-imports          also list the native imports (functions + data) to stdout\n" +
         "  @<file>                  read further options from <file>\n" +
         "  --help                   show this help and exit\n" +
@@ -76,7 +80,7 @@ public sealed class LinkOptions
         "Short options take attached or separated values (-ofoo or -o foo); long\n" +
         "options take --opt=val or --opt val. '--' ends option processing.\n" +
         "Unsupported in the managed model (accepted and ignored): -static, -s,\n" +
-        "-r/--relocatable, -pie/-no-pie, -rpath, -soname.\n";
+        "--relocatable, -pie/-no-pie, -rpath, -soname.\n";
 
     public static LinkOptions Parse(string[] argv)
     {
@@ -112,6 +116,8 @@ public sealed class LinkOptions
                     case "--entry": o.Entry = Val(); break;
                     case "--export-class": o.ExportClass = Val(); break;
                     case "--pinvoke": ParsePinvoke(o, Val()); break;
+                    case "--bind": ParseBind(o, Val()); break;
+                    case "--reference": o.References.Add(Val()); break;
                     case "--print-imports": o.PrintImports = true; break;
                     case "--relocatable": break;                  // accepted/ignored
                     default:
@@ -125,7 +131,6 @@ public sealed class LinkOptions
             {
                 case "-shared": o.Shared = true; continue;
                 case "-g": o.Debug = true; continue;
-                case "-r": o.Shared = false; continue;            // accepted/ignored shape
                 case "-static": case "-s": case "-pie": case "-no-pie":
                     continue;                                     // accepted/ignored
             }
@@ -135,6 +140,7 @@ public sealed class LinkOptions
             if (TryValue(a, "-e", args, ref i, out var ev)) { o.Entry = ev; continue; }
             if (TryValue(a, "-l", args, ref i, out var lv)) { o.Libraries.Add(lv); continue; }
             if (TryValue(a, "-L", args, ref i, out var Lv)) { o.LibSearchPaths.Add(Lv); continue; }
+            if (TryValue(a, "-r", args, ref i, out var rv)) { o.References.Add(rv); continue; }
 
             // GNU long opts also accepted with a single dash for a few names.
             if (a == "-help") { o.ShowHelp = true; continue; }
@@ -156,6 +162,18 @@ public sealed class LinkOptions
             if (eq <= 0 || eq == pair.Length - 1)
                 throw new LinkException($"bad --pinvoke entry: {pair}");
             o.PinvokeMap[pair[..eq]] = pair[(eq + 1)..];
+        }
+    }
+
+    // --bind=sym=Ns.Type.Method[,sym=Ns.Type.Method...]
+    private static void ParseBind(LinkOptions o, string spec)
+    {
+        if (string.IsNullOrEmpty(spec)) throw new LinkException("--bind requires sym=Ns.Type.Method entries");
+        foreach (var pair in spec.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0 || eq == pair.Length - 1) throw new LinkException($"bad --bind entry: {pair}");
+            o.BindMap[pair[..eq]] = pair[(eq + 1)..];
         }
     }
 

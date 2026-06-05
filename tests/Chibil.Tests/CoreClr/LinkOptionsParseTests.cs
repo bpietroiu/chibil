@@ -127,4 +127,22 @@ public class LinkOptionsParseTests
         }
         finally { File.Delete(rsp); }
     }
+
+    [Fact]
+    public void Bind_parses_comma_separated_pairs()
+    {
+        var o = LinkOptions.Parse(new[] { "--bind=__chibil_syscall=Chibil.Pal.Syscall,__chibil_get_tp=Chibil.Pal.GetTp", "a.obj" });
+        Assert.Equal("Chibil.Pal.Syscall", o.BindMap["__chibil_syscall"]);
+        Assert.Equal("Chibil.Pal.GetTp", o.BindMap["__chibil_get_tp"]);
+    }
+
+    [Theory]
+    [InlineData("-r Chibil.Pal.dll a.obj")]
+    [InlineData("--reference Chibil.Pal.dll a.obj")]
+    [InlineData("--reference=Chibil.Pal.dll a.obj")]
+    public void Reference_accepts_forms(string cmd)
+    {
+        var o = LinkOptions.Parse(cmd.Split(' ', System.StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal(new[] { "Chibil.Pal.dll" }, o.References);
+    }
 }
