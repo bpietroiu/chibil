@@ -241,7 +241,8 @@ public static class Linker
 
         var imports = opts.PrintImports ? new List<ImportRecord>() : null;
         byte[] pe = LinkPipeline.LinkToBytes(objs, opts.Libraries, opts.ExportClass,
-            opts.PinvokeMap, opts.Debug, opts.Shared, asmName, opts.Entry, opts.LibSearchPaths, imports);
+            opts.PinvokeMap, opts.Debug, opts.Shared, asmName, opts.Entry, opts.LibSearchPaths, imports,
+            opts.BindMap, opts.References);
         File.WriteAllBytes(opts.Output, pe);
 
         WriteRuntimeConfig(opts.Output);

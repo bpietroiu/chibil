@@ -29,18 +29,27 @@ public struct EcmaSignatureRewriter
     // not bleed into a nested FNPTR's own parameter slots.
     private ISignatureModifierInjector _injector;
 
-    private EcmaSignatureRewriter(BlobReader blobReader, TokenMap tokenMap, ISignatureModifierInjector injector = null)
+    // When true, custom modifiers (modopt/modreq) are consumed from the input but
+    // NOT re-emitted, and the method calling convention is forced to Default. Used by
+    // the --bind path to turn a C call-site signature — which carries C-ABI markers
+    // like modopt(CallConvCdecl)/modopt(IsLong)/modopt(IsSignUnspecifiedByte) — into a
+    // clean managed signature that matches the bound target method's own signature.
+    private readonly bool _stripModifiers;
+
+    private EcmaSignatureRewriter(BlobReader blobReader, TokenMap tokenMap,
+        ISignatureModifierInjector injector = null, bool stripModifiers = false)
     {
         _blobReader = blobReader;
         _tokenMap = tokenMap;
         _injector = injector;
+        _stripModifiers = stripModifiers;
     }
 
     private void RewriteCustomModifier(SignatureTypeCode typeCode, CustomModifiersEncoder encoder)
     {
-        encoder.AddModifier(
-            _tokenMap.MapEntity(_blobReader.ReadTypeHandle()),
-            typeCode == SignatureTypeCode.OptionalModifier);
+        var modifier = _blobReader.ReadTypeHandle();
+        if (_stripModifiers) return;   // drop C-ABI markers on the --bind clean-signature path
+        encoder.AddModifier(_tokenMap.MapEntity(modifier), typeCode == SignatureTypeCode.OptionalModifier);
     }
 
     private void RewriteType(SignatureTypeEncoder encoder)
@@ -376,8 +385,25 @@ public struct EcmaSignatureRewriter
     {
         int arity = header.IsGeneric ? _blobReader.ReadCompressedInteger() : 0;
         var encoder = new BlobEncoder(blobBuilder);
-        var sigEncoder = encoder.MethodSignature(header.CallingConvention, arity, header.IsInstance);
+        // On the strip path force a Default managed calling convention: a C extern's
+        // call-site may encode an unmanaged convention that the bound managed method
+        // does not have.
+        var conv = _stripModifiers ? SignatureCallingConvention.Default : header.CallingConvention;
+        var sigEncoder = encoder.MethodSignature(conv, arity, header.IsInstance);
         RewriteMethodSignature(sigEncoder);
+    }
+
+    /// <summary>
+    /// Rewrite a method signature for a managed --bind target: like
+    /// <see cref="RewriteMethodSignature(BlobReader, TokenMap, BlobBuilder)"/> but drops
+    /// every custom modifier and forces a Default calling convention, so a C call-site's
+    /// C-ABI markers (CallConvCdecl, IsLong, IsSignUnspecifiedByte) don't make the
+    /// resulting MemberRef diverge from the bound method's clean managed signature.
+    /// </summary>
+    public static void RewriteMethodSignatureStrippingModifiers(BlobReader signatureReader, TokenMap tokenMap, BlobBuilder blobBuilder)
+    {
+        new EcmaSignatureRewriter(signatureReader, tokenMap, injector: null, stripModifiers: true)
+            .RewriteMethodSignature(blobBuilder);
     }
 
     private void RewriteMethodSignature(MethodSignatureEncoder sigEncoder)

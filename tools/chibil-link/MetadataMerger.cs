@@ -1440,9 +1440,12 @@ public sealed class MetadataMerger
             typeRef = Builder.AddTypeReference(asmRef, Builder.GetOrAddString(ns), Builder.GetOrAddString(typeName));
             _externTypeRefs[typeKey] = typeRef;
         }
-        // The MemberRef signature is the call-site's own signature, token-remapped.
+        // The MemberRef signature is the call-site's own signature, token-remapped, but
+        // with C-ABI custom modifiers (CallConvCdecl/IsLong/IsSignUnspecifiedByte) and the
+        // unmanaged calling convention stripped — a direct managed call must match the
+        // bound method's clean managed signature, not the C interop signature.
         var sigB = new BlobBuilder();
-        EcmaSignatureRewriter.RewriteMethodSignature(sigReader, MapFor(of), sigB);
+        EcmaSignatureRewriter.RewriteMethodSignatureStrippingModifiers(sigReader, MapFor(of), sigB);
         var mr = Builder.AddMemberReference(typeRef, Builder.GetOrAddString(method), Builder.GetOrAddBlob(sigB));
         return MetadataTokens.GetToken(mr);
     }

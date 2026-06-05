@@ -40,4 +40,29 @@ public class BindManagedTests
         Assert.NotEmpty(pe);                                            // linked (not "unresolved symbol")
         Assert.DoesNotContain(imports, i => i.Name == "__chibil_echo"); // not a native import
     }
+
+    [Fact]
+    public void Bound_call_invokes_managed_System_Math_Abs()
+    {
+        // bind `my_abs` to System.Math.Abs(long); abs(-42) == 42 proves the managed call ran.
+        // C `long long` -> Int64 cleanly (C `long` is LLP64 int32 modopt(IsLong) on Windows,
+        // which would carry a custom modifier the corelib overload doesn't have), so the
+        // bound MemberRef matches the real Int64 overload of System.Math.Abs.
+        if (!DotnetHostRunner.DotnetAvailable()) return; // need the dotnet host to run the dll
+
+        const string src =
+            "long long my_abs(long long);\n" +
+            "int main(void){ return (int)my_abs(-42); }\n";
+        byte[] obj = TestCompiler.CompileToObj(src, Chibil.TargetProfile.CoreClr);
+        var of = ObjectFile.Load(obj, "t.obj");
+        string corelib = typeof(object).Assembly.Location;
+
+        byte[] pe = LinkPipeline.LinkToBytes(new[] { of }, new System.Collections.Generic.List<string>(),
+            null, null, false, false, "boundabs", "main", null, null,
+            new System.Collections.Generic.Dictionary<string, string> { ["my_abs"] = "System.Math.Abs" },
+            new System.Collections.Generic.List<string> { corelib });
+
+        int exit = DotnetHostRunner.RunPeViaDotnetHost(pe, out string stdout);
+        Assert.True(exit == 42, $"expected exit 42, got {exit}; host output: {stdout}");
+    }
 }
