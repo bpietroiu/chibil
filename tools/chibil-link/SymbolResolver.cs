@@ -46,10 +46,17 @@ public static class SymbolResolver
         // in-module. If a target is not a defined function — e.g. a data symbol or
         // a cross-object reference — warn, since the alias would otherwise silently
         // fall through to a P/Invoke stub that fails at run time.)
+        // A weak_alias is a WEAK definition: it must yield to a strong definition of
+        // the same name. musl relies on this — e.g. lite_malloc.c does
+        // `weak_alias(__simple_malloc, __libc_malloc_impl)` while mallocng defines a
+        // STRONG __libc_malloc_impl; the strong one must win, or malloc() and free()
+        // use different allocators. So skip an alias whose name is already defined.
         foreach (var of in objs)
             if (of.TryReadAliasManifest(out var aliases))
                 foreach (var kv in aliases)
-                    if (table.DefinedMethodToken.TryGetValue(kv.Value, out int tok))
+                    if (table.DefinedMethodToken.ContainsKey(kv.Key))
+                        continue;   // strong definition wins over the weak alias
+                    else if (table.DefinedMethodToken.TryGetValue(kv.Value, out int tok))
                         table.DefinedMethodToken[kv.Key] = tok;
                     else
                         Console.Error.WriteLine(
