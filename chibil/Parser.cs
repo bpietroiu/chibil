@@ -1961,6 +1961,11 @@ public class Parser
         }
         fn.IsRoot = !(fn.IsStatic && fn.IsInline);
         if (Util.Consume(ref tok, tok, ";")) return tok;
+        // A comma here means this is a multi-declarator DECLARATION (e.g. musl's
+        // `hidden long __syscall_ret(unsigned long), __syscall_cp(...);`): the first
+        // declarator was a function prototype, not a definition. Register the
+        // remaining declarators (function prototypes or globals) and finish at ';'.
+        if (Util.Equal(tok, ",")) return FunctionDeclaratorTail(tok, basety, attr);
         _currentFn = fn; _locals = null; _staticLocalScope = 0; EnterScope();
         CreateParamLvars(ty.Params);
         fn.Params = _locals;
@@ -1982,6 +1987,43 @@ public class Parser
         fn.Body = CompoundStmt(ref tok, tok);
         fn.Locals = _locals; LeaveScope(); ResolveGotoLabels();
         return tok;
+    }
+
+    // Parse the 2nd..Nth declarators of a top-level declaration whose FIRST
+    // declarator was a function prototype (so the whole statement is a declaration,
+    // not a definition). Each remaining declarator is itself a function prototype or
+    // a global variable. `tok` is positioned on the ',' after the first declarator.
+    private Token FunctionDeclaratorTail(Token tok, CType basety, VarAttr attr)
+    {
+        while (Util.Consume(ref tok, tok, ","))
+        {
+            CType ty = Declarator(ref tok, tok, basety, attr.PendingCallConv);
+            if (ty.Name == null)
+                Util.ErrorTok(ty.NamePos, ty.Kind == TypeKind.Func ? "function name omitted" : "variable name omitted");
+            string name = GetIdent(ty.Name);
+            if (ty.Kind == TypeKind.Func)
+            {
+                Obj fn = FindFunc(name);
+                if (fn == null)
+                {
+                    fn = NewGvar(name, ty);
+                    fn.IsFunction = true; fn.IsDefinition = false;
+                    fn.IsStatic = attr.IsStatic || (attr.IsInline && !attr.IsExtern);
+                    fn.IsInline = attr.IsInline;
+                }
+                else if (!fn.IsFunction) Util.ErrorTok(ty.Name, "redeclared as a different kind of symbol");
+                fn.IsRoot = !(fn.IsStatic && fn.IsInline);
+            }
+            else
+            {
+                Obj v = NewGvar(name, ty);
+                v.IsDefinition = !attr.IsExtern; v.IsStatic = attr.IsStatic; v.IsTls = attr.IsTls;
+                if (attr.Align != 0) v.Align = attr.Align;
+                if (Util.Equal(tok, "=")) GvarInitializer(ref tok, tok.Next, v);
+                else if (!attr.IsExtern && !attr.IsTls) v.IsTentative = true;
+            }
+        }
+        return Util.Skip(tok, ";");
     }
 
     private Token GlobalVariable(Token tok, CType basety, VarAttr attr)
