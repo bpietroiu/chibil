@@ -47,8 +47,8 @@ dotnet build tools/chibil-link/ChibilLink.csproj -c Debug
 ```
 
 This produces:
-- `chibil/bin/Debug/net10.0/chibil.dll` — the C→MSIL compiler (`--target=coreclr`).
-- `tools/chibil-link/bin/Debug/net10.0/chibil-link.dll` — the linker that merges
+- `build/bin/Chibil/debug/chibil.dll` — the C→MSIL compiler (`--target=coreclr`).
+- `build/bin/ChibilLink/debug/chibil-link.dll` — the linker that merges
   the per-TU COFF objects into one PE and synthesizes the P/Invokes to `libc`.
 
 ---

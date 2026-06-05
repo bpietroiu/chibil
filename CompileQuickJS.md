@@ -14,6 +14,27 @@ or in chibil-side compat headers.
 
 ---
 
+## 0. Build & run (Windows or Linux, no WSL required)
+
+The managed-musl pipeline is now MSBuild-driven and cross-platform:
+
+```
+dotnet build build.proj -t:QuickJs
+```
+
+This builds the toolchain (`chibil`, `chibil-link`, `Chibil.Pal`, the build tasks),
+compiles the managed-musl object set (`ManagedMusl.proj`), links `qjs.dll` against it
++ the managed PAL (`QuickJsManaged.proj`), and runs the C# consumer asserting
+`JS_Eval("40+2") == 42`. All output lands under `./build/` (the .NET artifacts
+layout). To rebuild just `qjs.dll` (then F5 the consumer in VS):
+`dotnet build targets/quickjs/QuickJsManaged.proj`.
+
+The native-libc oracle (`targets/build/quickjs-api-run.sh`) and the historical
+`*.sh` harnesses below remain for Linux/WSL; they now resolve the toolchain through
+`targets/build/env.sh` under the same `./build/` layout.
+
+---
+
 ## 1. Recipe
 
 The `qjs` interpreter is `cutils.c dtoa.c libregexp.c libunicode.c quickjs.c
