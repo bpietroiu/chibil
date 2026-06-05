@@ -1,0 +1,33 @@
+<Project DefaultTargets="Build">
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.props" />
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.targets" />
+
+  <PropertyGroup>
+    <MuslRoot>$(MSBuildThisFileDirectory)..\musl-1.2.6</MuslRoot>
+    <BuildInfra>$(MSBuildThisFileDirectory)..\build</BuildInfra>
+    <MuslObjDir>$(ChibilArtifacts)\managed-musl</MuslObjDir>
+  </PropertyGroup>
+
+  <Target Name="Build">
+    <ItemGroup>
+      <!-- The subsystem set from build-managed-musl.sh DIRS. -->
+      <MuslSrc Include="$(MuslRoot)\src\string\**\*.c;$(MuslRoot)\src\ctype\**\*.c;$(MuslRoot)\src\errno\**\*.c;$(MuslRoot)\src\stdlib\**\*.c;$(MuslRoot)\src\stdio\**\*.c;$(MuslRoot)\src\math\**\*.c;$(MuslRoot)\src\malloc\**\*.c;$(MuslRoot)\src\mman\**\*.c;$(MuslRoot)\src\internal\**\*.c;$(MuslRoot)\src\locale\**\*.c;$(MuslRoot)\src\multibyte\**\*.c;$(MuslRoot)\src\prng\**\*.c;$(MuslRoot)\src\exit\**\*.c;$(MuslRoot)\src\env\**\*.c;$(MuslRoot)\src\misc\**\*.c;$(MuslRoot)\src\time\**\*.c;$(MuslRoot)\src\fenv\**\*.c;$(MuslRoot)\src\complex\**\*.c;$(MuslRoot)\src\fcntl\**\*.c;$(MuslRoot)\src\unistd\**\*.c;$(MuslRoot)\src\stat\**\*.c;$(MuslRoot)\src\dirent\**\*.c;$(MuslRoot)\src\select\**\*.c;$(MuslRoot)\src\signal\**\*.c;$(MuslRoot)\src\process\**\*.c;$(MuslRoot)\src\random\**\*.c;$(MuslRoot)\src\linux\**\*.c" />
+      <MuslInc Include="$(BuildInfra)\musl-compat;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\src\include;$(MuslRoot)\src\internal;$(MuslRoot)\include;$(MuslRoot)\obj\include" />
+    </ItemGroup>
+
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="@(MuslSrc)"
+                   SourceRoot="$(MuslRoot)"
+                   OutputDir="$(MuslObjDir)"
+                   IncludeDirs="@(MuslInc)"
+                   Defines="_GNU_SOURCE;_XOPEN_SOURCE=700"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraInputs="$(BuildInfra)\musl-compat\syscall_arch.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64"
+                   ContinueOnError="true">
+      <Output TaskParameter="Objects" ItemName="ManagedMuslObj" />
+    </ChibilCompile>
+
+    <Message Importance="high" Text="managed-musl objects: @(ManagedMuslObj->Count()) -> $(MuslObjDir)" />
+  </Target>
+</Project>
