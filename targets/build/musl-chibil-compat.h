@@ -1,14 +1,9 @@
 /* chibil compat shim for compiling musl SOURCE to MSIL (force-included with
  * -include). Companion to the shadow arch headers in musl-compat/.
  *
- * Pull in musl's real src/include/features.h FIRST — it sets the FEATURES_H
- * guard and defines weak/hidden/weak_alias. Then override weak_alias: chibil has
- * no __attribute__((__alias__)), so we neutralize it for the compile spike (real
- * symbol aliasing — emitting `new` as a forwarder to `old` — is a link-time
- * concern, to be handled by chibil-link or a chibil __alias__ feature). Because
- * features.h is now guarded, later #include <features.h> from the TU are no-ops,
- * so this override persists. */
+ * musl's real weak_alias (`extern __typeof(old) new __attribute__((weak,
+ * alias(#old)))`) is now supported by chibil: __typeof of a function declares a
+ * function-typed symbol, and __attribute__((alias("old"))) emits an alias that
+ * chibil-link binds to old's token. So we no longer neutralize it — including
+ * <features.h> for the weak/hidden macros is enough. */
 #include <features.h>
-
-#undef weak_alias
-#define weak_alias(old, new) /* dropped for compile-only spike */
