@@ -192,8 +192,27 @@ public sealed class PeWriter
         // .cctor (a type may have only one). It has no trailing ret.
         byte[] dataInitIl = merger.BuildDataImportInitIl();
 
+        // Managed-PAL startup: if the link defines __chibil_pal_init (the shim that
+        // seeds __libc.auxv with AT_RANDOM so mallocng's get_random_secret has a
+        // valid auxv), call it FIRST in the <Module> .cctor — before any reloc/field
+        // init and, crucially, before the first malloc. Without a native crt there is
+        // no other place to run it, and JS_NewRuntime mallocs before any syscall. The
+        // call is prepended only when the symbol is actually defined in the image, so
+        // native-libc links (and unit tests) are unaffected. Forces a .cctor to exist
+        // even when there are no relocations.
+        int palInitTok = 0;
+        foreach (var o in _objs)
+        {
+            foreach (var m in o.Methods)
+                if (m.Name == "__chibil_pal_init") { palInitTok = merger.MapToken(o, m.OriginalToken); break; }
+            if (palInitTok != 0) break;
+        }
+        byte[] palInitIl = palInitTok != 0
+            ? new byte[] { 0x28, (byte)palInitTok, (byte)(palInitTok >> 8), (byte)(palInitTok >> 16), (byte)(palInitTok >> 24) } // call
+            : System.Array.Empty<byte>();
+
         MetadataMerger.SynthMethod cctorSynth = null;
-        if (fieldRelocs.Count > 0 || fieldInits.Count > 0 || dataInitIl.Length > 0)
+        if (fieldRelocs.Count > 0 || fieldInits.Count > 0 || dataInitIl.Length > 0 || palInitIl.Length > 0)
         {
             // void .cctor() — default calling convention, no params, returns void.
             var cctorSig = new BlobBuilder();
@@ -206,9 +225,11 @@ public sealed class PeWriter
             byte[] tail = (fieldRelocs.Count > 0 || fieldInits.Count > 0)
                 ? FieldDataRelocator.BuildCctorIl(fieldRelocs, fieldInits)   // ends in ret
                 : new byte[] { 0x2A };                                       // ret
-            byte[] body = new byte[dataInitIl.Length + tail.Length];
-            System.Buffer.BlockCopy(dataInitIl, 0, body, 0, dataInitIl.Length);
-            System.Buffer.BlockCopy(tail, 0, body, dataInitIl.Length, tail.Length);
+            // body = [call __chibil_pal_init] + [data-import init] + [relocs/init … ret]
+            byte[] body = new byte[palInitIl.Length + dataInitIl.Length + tail.Length];
+            System.Buffer.BlockCopy(palInitIl, 0, body, 0, palInitIl.Length);
+            System.Buffer.BlockCopy(dataInitIl, 0, body, palInitIl.Length, dataInitIl.Length);
+            System.Buffer.BlockCopy(tail, 0, body, palInitIl.Length + dataInitIl.Length, tail.Length);
 
             cctorSynth = new MetadataMerger.SynthMethod
             {
