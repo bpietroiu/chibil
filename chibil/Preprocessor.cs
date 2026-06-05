@@ -1072,6 +1072,7 @@ public class Preprocessor
         DefineMacro("__linux", "1");
         DefineMacro("__linux__", "1");
         DefineMacro("__signed__", "signed");
+        DefineMacro("__typeof", "typeof");
         DefineMacro("__typeof__", "typeof");
         DefineMacro("__unix", "1");
         DefineMacro("__unix__", "1");
