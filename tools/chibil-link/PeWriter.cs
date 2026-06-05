@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
@@ -17,7 +18,9 @@ public static class LinkPipeline
     public static byte[] LinkToBytes(IReadOnlyList<ObjectFile> objs, List<string> libs,
         string exportClass = null, Dictionary<string, string> pinvokeMap = null, bool debuggable = false,
         bool shared = false, string assemblyName = "a", string entrySymbol = "main",
-        List<string> libSearchPaths = null, List<ImportRecord> importsOut = null)
+        List<string> libSearchPaths = null, List<ImportRecord> importsOut = null,
+        IReadOnlyDictionary<string, string> bindMap = null,
+        IReadOnlyList<string> references = null)
     {
         if (objs == null || objs.Count == 0)
             throw new LinkException("no input objects.");
@@ -63,7 +66,7 @@ public static class LinkPipeline
 
         var writer = new PeWriter(objs, libs ?? new List<string>(), effectiveExportClass, pinvokeMap, debuggable,
             shared, assemblyName, entrySymbol, libSearchPaths ?? new List<string>(), apiFns,
-            apiTypes, apiNs, apiEnums, apiEnumUsages);
+            apiTypes, apiNs, apiEnums, apiEnumUsages, bindMap, references);
         byte[] pe = writer.Write();
         importsOut?.AddRange(writer.Imports);
         return pe;
@@ -108,6 +111,8 @@ public sealed class PeWriter
     private readonly string _apiNamespace;
     private readonly List<ApiEnum> _apiEnums;           // null = no enum synthesis
     private readonly List<ApiEnumUse> _apiEnumUsages;  // null = no enum usage threading
+    private readonly IReadOnlyDictionary<string, string> _bindMap;   // --bind sym -> Ns.Type.Method
+    private readonly IReadOnlyList<string> _references;              // -r managed assembly paths
     private int _firstForwarderRow;   // first MethodDef row owned by the export class
 
     /// <summary>The external native symbols the output imports (function P/Invoke stubs
@@ -119,7 +124,9 @@ public sealed class PeWriter
         bool shared = false, string assemblyName = "a", string entrySymbol = "main",
         List<string> libSearchPaths = null, HashSet<string> apiFunctionNames = null,
         HashSet<string> apiTypeNames = null, string apiNamespace = null,
-        List<ApiEnum> apiEnums = null, List<ApiEnumUse> apiEnumUsages = null)
+        List<ApiEnum> apiEnums = null, List<ApiEnumUse> apiEnumUsages = null,
+        IReadOnlyDictionary<string, string> bindMap = null,
+        IReadOnlyList<string> references = null)
     {
         _objs = objs;
         _libs = libs;
@@ -135,6 +142,8 @@ public sealed class PeWriter
         _apiNamespace = apiNamespace;
         _apiEnums = apiEnums;
         _apiEnumUsages = apiEnumUsages;
+        _bindMap = bindMap;
+        _references = references;
     }
 
     private static string ValidateExportClass(string name)
@@ -151,6 +160,11 @@ public sealed class PeWriter
     {
         var merger = new MetadataMerger(_objs, _exportClass, _libs, _entrySymbol, _apiFunctionNames,
             _apiTypeNames, _apiNamespace, _apiEnums, _apiEnumUsages);
+        // --bind: resolve listed C symbols to managed methods in -r assemblies. Read
+        // each referenced assembly's identity once here (the method name is trusted).
+        merger.BindMap = _bindMap ?? new Dictionary<string, string>();
+        merger.ReferenceIdentities = (_references ?? new List<string>())
+            .Select(ManagedReference.Read).ToList();
         merger.MergeAndPredict();
         merger.ApplyApiTypeNamespacing();
 
