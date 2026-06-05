@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="../build/Chibil.Pal/Chibil.Pal.csproj" />
+  <Project Path="qjsconsumer.csproj" />
+</Solution>

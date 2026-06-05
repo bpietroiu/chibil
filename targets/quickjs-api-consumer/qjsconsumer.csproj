@@ -5,19 +5,25 @@
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>qjsconsumer</AssemblyName>
+    <!-- qjs.dll is pure MSIL and the PAL is portable .NET (no native libc), so the
+         same build runs and debugs on Windows (Visual Studio, F5), Linux and macOS. -->
   </PropertyGroup>
   <ItemGroup>
-    <!-- qjs.dll is the chibil-built facade assembly (built by quickjs-api.sh). -->
+    <!-- qjs.dll is the chibil-built facade assembly, linked against the MANAGED musl
+         + Chibil.Pal (built by targets/build/qjs-on-musl-api.sh). It is a pure-MSIL
+         (ILOnly) assembly with NO native dependencies, so it loads and JITs on any
+         .NET 10 host. CopyLocal brings it next to the consumer. -->
     <Reference Include="qjs">
       <HintPath>../quickjs-2025-09-13/qjs.dll</HintPath>
+      <Private>true</Private>
     </Reference>
-    <!-- Managed-PAL run (qjs-on-musl-api.sh sets PalRun=1): the facade is linked
-         against managed musl + Chibil.Pal, so the runtime must resolve Chibil.Pal
-         (qjs.dll's <Module> .cctor calls into it). Listing it as a reference puts it
-         in the consumer's deps.json so the loader finds it. The native-libc oracle
-         leaves PalRun unset and is unaffected. -->
-    <Reference Include="Chibil.Pal" Condition="'$(PalRun)' == '1'">
-      <HintPath>$(PalDll)</HintPath>
-    </Reference>
+    <!-- The managed PAL implements the Linux syscall seam (write/mmap/getrandom/exit…)
+         over portable .NET APIs (Console, NativeMemory, RandomNumberGenerator). qjs.dll's
+         <Module> .cctor calls __chibil_pal_init, which lands in Chibil.Pal, so the loader
+         must resolve it. A ProjectReference (not a bare HintPath) guarantees it is built,
+         copied local, AND listed in qjsconsumer.deps.json — without which the host won't
+         probe for it even though the file sits beside the exe. This is what makes F5 in
+         Visual Studio work out of the box. -->
+    <ProjectReference Include="../build/Chibil.Pal/Chibil.Pal.csproj" />
   </ItemGroup>
 </Project>
