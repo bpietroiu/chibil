@@ -13,7 +13,8 @@ public class BindManagedTests
         var id = ManagedReference.Read(corelib);
         Assert.Equal("System.Private.CoreLib", id.Name);
         Assert.True(id.Version.Major >= 8);
-        Assert.NotEmpty(id.PublicKeyToken);   // corelib is strong-named
+        // The well-known corelib public-key TOKEN — guards the SHA-1/last-8/reversed algo.
+        Assert.Equal("7CEC85D7BEA7798E", System.Convert.ToHexString(id.PublicKeyToken));
     }
 
     [Fact]
