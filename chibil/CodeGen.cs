@@ -3631,6 +3631,10 @@ public class CodeGen
         if (api != null)
             coffBuilder.SetChiapiData(api);
 
+        var aliasBlob = BuildChiAliasBlob(prog);
+        if (aliasBlob != null)
+            coffBuilder.SetChiAliasData(aliasBlob);
+
         var output = new BlobBuilder();
         coffBuilder.Serialize(output);
 
@@ -3746,6 +3750,30 @@ public class CodeGen
             b.WriteInt32(u.Position);
             byte[] et = System.Text.Encoding.UTF8.GetBytes(u.EnumTag);
             b.WriteUInt16((ushort)et.Length); b.WriteBytes(et);
+        }
+        return b;
+    }
+
+    // Serialize the .chialias manifest: for each __attribute__((alias("target")))
+    // symbol, emit the alias name and its target. chibil-link consumes this to bind
+    // each alias symbol to its target's token. Payload format:
+    //   uint32 count
+    //   repeat count: uint32 aliasLen, aliasName(utf8), uint32 targetLen, targetName(utf8)
+    private BlobBuilder BuildChiAliasBlob(Obj prog)
+    {
+        var aliases = new System.Collections.Generic.List<(string alias, string target)>();
+        for (Obj o = prog; o != null; o = o.Next)
+            if (o.AliasTarget != null) aliases.Add((o.Name, o.AliasTarget));
+        if (aliases.Count == 0) return null;
+        aliases.Sort((x, y) => System.StringComparer.Ordinal.Compare(x.alias, y.alias)); // deterministic output
+        var b = new BlobBuilder();
+        b.WriteUInt32((uint)aliases.Count);
+        foreach (var (alias, target) in aliases)
+        {
+            byte[] a = System.Text.Encoding.UTF8.GetBytes(alias);
+            b.WriteUInt32((uint)a.Length); b.WriteBytes(a);
+            byte[] t = System.Text.Encoding.UTF8.GetBytes(target);
+            b.WriteUInt32((uint)t.Length); b.WriteBytes(t);
         }
         return b;
     }

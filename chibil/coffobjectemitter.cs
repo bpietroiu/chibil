@@ -2393,6 +2393,7 @@ namespace System.Reflection.PortableExecutable
         private const string CodeViewSymbolsSectionName = ".debug$S";
         private const string ChibilDbgSectionName = ".chidbg";   // chibil managed-PDB side-stream (<=8 chars: inline COFF name)
         private const string ChiapiSectionName = ".chiapi";    // chibil public-API manifest (<=8 chars: inline COFF name)
+        private const string ChiAliasSectionName = ".chialias"; // chibil symbol-alias manifest (<=8 chars after dot)
 
         private BlobBuilder _chibilDbg;
         /// <summary>Attach the serialized per-method line side-stream (consumed by
@@ -2403,6 +2404,11 @@ namespace System.Reflection.PortableExecutable
         /// <summary>Attach the serialized public-API manifest (consumed by chibil-link
         /// to build the per-header Api facade). Null = no export-api headers.</summary>
         public void SetChiapiData(BlobBuilder data) => _chiapi = data;
+
+        private BlobBuilder _chiAlias;
+        /// <summary>Attach the serialized symbol-alias manifest (consumed by chibil-link
+        /// to bind each __attribute__((alias)) symbol to its target). Null = no aliases.</summary>
+        public void SetChiAliasData(BlobBuilder data) => _chiAlias = data;
 
         private readonly CodeViewSymbolBuilder _codeViewSymbols;
         private readonly MetadataRootBuilder _metadataRootBuilder;
@@ -2566,6 +2572,10 @@ namespace System.Reflection.PortableExecutable
             {
                 builder.Add(new Section(ChiapiSectionName, SectionCharacteristics.ContainsInitializedData | SectionCharacteristics.MemDiscardable | SectionCharacteristics.MemRead | SectionCharacteristics.Align1Bytes));
             }
+            if (_chiAlias != null && _chiAlias.Count > 0)
+            {
+                builder.Add(new Section(ChiAliasSectionName, SectionCharacteristics.ContainsInitializedData | SectionCharacteristics.MemDiscardable | SectionCharacteristics.MemRead | SectionCharacteristics.Align1Bytes));
+            }
 
             return builder.ToImmutable();
         }
@@ -2582,6 +2592,7 @@ namespace System.Reflection.PortableExecutable
                 NepSectionName => _nepStream,
                 ChibilDbgSectionName => _chibilDbg,
                 ChiapiSectionName => _chiapi,
+                ChiAliasSectionName => _chiAlias,
                 _ => throw new ArgumentException(),
             };
 

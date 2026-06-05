@@ -663,6 +663,15 @@ public class Parser
                 {
                     tok = Util.Skip(tok, "("); ty.Align = (int)ConstExpr(ref tok, tok); tok = Util.Skip(tok, ")"); continue;
                 }
+                if (Util.Consume(ref tok, tok, "alias") || Util.Consume(ref tok, tok, "__alias__"))
+                {
+                    tok = Util.Skip(tok, "(");
+                    // the target symbol name (a string literal); strip the trailing NUL.
+                    ty.AliasTarget = Encoding.UTF8.GetString(tok.Str, 0, tok.Str.Length - 1);
+                    tok = tok.Next;
+                    tok = Util.Skip(tok, ")");
+                    continue;
+                }
                 // Unknown attribute (noreturn, weak, used, format, section, …): none
                 // affect MSIL layout/codegen, so skip the name and any (arg list).
                 tok = tok.Next;
@@ -1967,6 +1976,7 @@ public class Parser
             fn.IsFunction = true; fn.IsDefinition = Util.Equal(tok, "{");
             fn.IsStatic = attr.IsStatic || (attr.IsInline && !attr.IsExtern);
             fn.IsInline = attr.IsInline;
+            if (ty.AliasTarget != null) { fn.AliasTarget = ty.AliasTarget; fn.IsDefinition = false; }
         }
         fn.IsRoot = !(fn.IsStatic && fn.IsInline);
         if (Util.Consume(ref tok, tok, ";")) return tok;
@@ -2048,6 +2058,15 @@ public class Parser
             v.IsDefinition = !attr.IsExtern; v.IsStatic = attr.IsStatic;
             v.IsTls = attr.IsTls;
             if (attr.Align != 0) v.Align = attr.Align;
+            // __attribute__((alias("target"))): an alias declares no storage/body — it
+            // simply binds this symbol to its target. A function-typed alias (typedef'd
+            // FT) reaches GlobalVariable rather than Function, so capture it here too.
+            if (ty.AliasTarget != null)
+            {
+                v.AliasTarget = ty.AliasTarget;
+                v.IsDefinition = false;
+                if (ty.Kind == TypeKind.Func) v.IsFunction = true;
+            }
             if (Util.Equal(tok, "=")) GvarInitializer(ref tok, tok.Next, v);
             else if (!attr.IsExtern && !attr.IsTls) v.IsTentative = true;
         }

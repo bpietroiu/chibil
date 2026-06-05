@@ -119,6 +119,7 @@ public class CType
     public Token Name;
     public Token NamePos;
     public string TagName; // struct/union/enum tag name, preserved across declarator rewrites
+    public string AliasTarget;   // __attribute__((alias("target"))) — GCC symbol alias
 
     // Array
     public int ArrayLen;
@@ -190,6 +191,7 @@ public class Obj
     public bool IsFunction;
     public bool IsDefinition;
     public bool IsStatic;
+    public string AliasTarget;   // non-null => this symbol is an alias of AliasTarget
 
     // Global variable
     public bool IsTentative;
