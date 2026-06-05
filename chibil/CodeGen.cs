@@ -2956,6 +2956,35 @@ public class CodeGen
     //  Statement code generation (GenStmt)
     // ═══════════════════════════════════════════════════════════════
 
+    /// <summary>True if control can never fall off the end of <paramref name="n"/> —
+    /// it always returns or branches away (return, goto, and break/continue which the
+    /// parser lowers to goto). Conservative: only the cases certain to transfer return
+    /// true, so a needed branch is never suppressed. Used to drop dead merge branches
+    /// (notably the if/else merge that would otherwise branch into the setjmp try).</summary>
+    private static bool StmtAlwaysTransfers(Node n)
+    {
+        if (n == null) return false;
+        switch (n.Kind)
+        {
+            case NodeKind.Return:
+            case NodeKind.Goto:        // break/continue are lowered to goto
+            case NodeKind.GotoExpr:
+                return true;
+            case NodeKind.Block:
+            {
+                Node last = null;
+                for (Node s = n.Body; s != null; s = s.Next) last = s;
+                return StmtAlwaysTransfers(last);
+            }
+            case NodeKind.If:
+                return n.Els != null && StmtAlwaysTransfers(n.Then) && StmtAlwaysTransfers(n.Els);
+            case NodeKind.Label:
+                return StmtAlwaysTransfers(n.Lhs);
+            default:
+                return false;
+        }
+    }
+
     private void GenStmt(Node node)
     {
         if (node.Tok?.File != null)
@@ -2974,7 +3003,14 @@ public class CodeGen
                 NormalizeToBranchable(node.Cond.Ty);
                 _enc.Branch(ILOpCode.Brfalse, elseLabel); Pop();
                 GenStmt(node.Then);
-                _enc.Branch(ILOpCode.Br, endLabel);
+                // The merge branch to endLabel is dead when the then-branch can't fall
+                // through (it ends in return/goto). Emitting it anyway is normally just
+                // dead code, but under the setjmp wrap the then-branch can sit OUTSIDE the
+                // try while endLabel sits INSIDE it (the setjmp lives in the else-branch),
+                // making `br endLabel` an illegal branch-INTO-the-try -> the JIT rejects
+                // the whole method (InvalidProgramException). Suppress it when unreachable.
+                if (!StmtAlwaysTransfers(node.Then))
+                    _enc.Branch(ILOpCode.Br, endLabel);
                 _enc.MarkLabel(elseLabel);
                 if (node.Els != null) GenStmt(node.Els);
                 _enc.MarkLabel(endLabel);
