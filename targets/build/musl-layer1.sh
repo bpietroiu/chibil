@@ -4,8 +4,7 @@
 # so this needs NO PAL — the minimal proof that managed musl links + runs.
 set -u
 ROOT=/mnt/d/sandbox/chibil
-CH="dotnet $ROOT/chibil/bin/Debug/net10.0/chibil.dll"
-LINK="dotnet $ROOT/tools/chibil-link/bin/Debug/net10.0/chibil-link.dll"
+source "$ROOT/targets/build/env.sh"
 M=$ROOT/targets/musl-1.2.6
 INCS="-I$ROOT/targets/build/musl-compat -Iarch/x86_64 -Iarch/generic -Isrc/include -Isrc/internal -Iinclude -Iobj/include"
 CFLAGS="-c --target=coreclr -nostdinc -mlp64 -D_GNU_SOURCE -D_XOPEN_SOURCE=700 -include $ROOT/targets/build/musl-chibil-compat.h $INCS"

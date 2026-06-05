@@ -6,8 +6,7 @@
 #   wsl bash /mnt/d/sandbox/chibil/targets/build/micropython-chibil-inc.sh parse.c
 set -u
 ROOT=/mnt/d/sandbox/chibil
-CH="dotnet $ROOT/chibil/bin/Debug/net10.0/chibil.dll"
-LINK="dotnet $ROOT/tools/chibil-link/bin/Debug/net10.0/chibil-link.dll"
+source "$ROOT/targets/build/env.sh"
 M=$ROOT/targets/musl-1.2.6
 MUSLINC="-I$M/arch/x86_64 -I$M/arch/generic -I$M/obj/include -I$M/include"
 PORT=$ROOT/targets/micropython/ports/minimal

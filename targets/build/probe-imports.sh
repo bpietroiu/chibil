@@ -4,8 +4,8 @@
 # whole native frontier at once. NOT part of the real build.
 set -u
 ROOT=/mnt/d/sandbox/chibil
-LINK="dotnet $ROOT/tools/chibil-link/bin/Debug/net10.0/chibil-link.dll"
-PAL=$(ls "$ROOT/targets/build/Chibil.Pal/bin/Release/net10.0/Chibil.Pal.dll")
+source "$ROOT/targets/build/env.sh"
+# PAL from env.sh (build/bin/Chibil.Pal/release/Chibil.Pal.dll)
 MM=/tmp/managed_musl
 OUT=/tmp/qjs_musl
 $LINK --print-imports -shared -o "$OUT/qjs_probe.dll" \

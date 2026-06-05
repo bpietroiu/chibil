@@ -4,14 +4,13 @@
 # stdout. Proves the seam: managed musl's bottom edge reaches managed code.
 set -u
 ROOT=/mnt/d/sandbox/chibil
-CH="dotnet $ROOT/chibil/bin/Debug/net10.0/chibil.dll"
-LINK="dotnet $ROOT/tools/chibil-link/bin/Debug/net10.0/chibil-link.dll"
+source "$ROOT/targets/build/env.sh"
 PALDIR=$ROOT/targets/build/Chibil.Pal
 OUT=/tmp/musl_layer2; mkdir -p "$OUT"
 
 echo "=== build Chibil.Pal.dll ==="
 dotnet build "$PALDIR/Chibil.Pal.csproj" -c Release -v q --nologo 2>&1 | grep -E "error|Build succeeded" | head -1
-PAL=$(ls "$PALDIR"/bin/Release/net10.0/Chibil.Pal.dll)
+# PAL from env.sh
 
 echo "=== compile program (calls __chibil_syscall directly) ==="
 cat > "$OUT/main.c" <<'EOF'

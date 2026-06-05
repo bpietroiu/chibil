@@ -3,8 +3,7 @@
 # closure + a malloc/free test, follow unresolved symbols, then run.
 set -u
 ROOT=/mnt/d/sandbox/chibil
-CH="dotnet $ROOT/chibil/bin/Debug/net10.0/chibil.dll"
-LINK="dotnet $ROOT/tools/chibil-link/bin/Debug/net10.0/chibil-link.dll"
+source "$ROOT/targets/build/env.sh"
 M=$ROOT/targets/musl-1.2.6
 INCS="-I$ROOT/targets/build/musl-compat -Iarch/x86_64 -Iarch/generic -Isrc/include -Isrc/internal -Iinclude -Iobj/include"
 CFLAGS="-c --target=coreclr -nostdinc -mlp64 -D_GNU_SOURCE -D_XOPEN_SOURCE=700 -include $ROOT/targets/build/musl-chibil-compat.h $INCS"
@@ -13,7 +12,7 @@ cd "$M" || exit 1
 
 echo "=== build Chibil.Pal (with mmap/munmap) ==="
 dotnet build "$ROOT/targets/build/Chibil.Pal/Chibil.Pal.csproj" -c Release -v q --nologo 2>&1 | grep -E "error|Build succeeded" | head -1
-PAL=$(ls "$ROOT/targets/build/Chibil.Pal/bin/Release/net10.0/Chibil.Pal.dll")
+# PAL comes from env.sh (build/bin/Chibil.Pal/release/Chibil.Pal.dll)
 
 # malloc closure. mallocng/malloc.c defines __libc_malloc_impl (glue.h renames
 # `malloc`); the PUBLIC malloc + __libc_malloc come from lite_malloc.c (which

@@ -4,7 +4,7 @@
 # Run: wsl bash /mnt/d/sandbox/chibil/targets/build/musl-spike.sh
 set -u
 ROOT=/mnt/d/sandbox/chibil
-CH="dotnet $ROOT/chibil/bin/Debug/net10.0/chibil.dll"
+source "$ROOT/targets/build/env.sh"
 M=$ROOT/targets/musl-1.2.6
 cd "$M" || exit 1
 
@@ -39,7 +39,7 @@ for d in $SAMPLE_DIRS; do while read -r f; do files+=("$f"); done < <(find "src/
 # it is always retried (cheap to re-check after a fix). INCREMENTAL=0 forces a full
 # rebuild.
 INCREMENTAL="${INCREMENTAL:-1}"
-deps=("$ROOT/chibil/bin/Debug/net10.0/chibil.dll")
+deps=("$ROOT/build/bin/Chibil/debug/chibil.dll")
 [ "$SHIM" = "1" ] && deps+=("$ROOT/targets/build/musl-chibil-compat.h" \
     "$ROOT/targets/build/musl-compat/syscall_arch.h" \
     "$ROOT/targets/build/musl-compat/atomic_arch.h" \

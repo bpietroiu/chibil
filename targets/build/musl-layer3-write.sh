@@ -4,10 +4,9 @@
 # it pulls in, then link+run against the PAL.
 set -u
 ROOT=/mnt/d/sandbox/chibil
-CH="dotnet $ROOT/chibil/bin/Debug/net10.0/chibil.dll"
-LINK="dotnet $ROOT/tools/chibil-link/bin/Debug/net10.0/chibil-link.dll"
+source "$ROOT/targets/build/env.sh"
 M=$ROOT/targets/musl-1.2.6
-PAL=$(ls $ROOT/targets/build/Chibil.Pal/bin/Release/net10.0/Chibil.Pal.dll)
+# PAL from env.sh
 INCS="-I$ROOT/targets/build/musl-compat -Iarch/x86_64 -Iarch/generic -Isrc/include -Isrc/internal -Iinclude -Iobj/include"
 CFLAGS="-c --target=coreclr -nostdinc -mlp64 -D_GNU_SOURCE -D_XOPEN_SOURCE=700 -include $ROOT/targets/build/musl-chibil-compat.h $INCS"
 OUT=/tmp/musl_layer3; mkdir -p "$OUT"
