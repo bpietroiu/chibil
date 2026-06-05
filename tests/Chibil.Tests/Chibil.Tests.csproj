@@ -32,6 +32,7 @@
     <Compile Include="..\..\tools\chibil-link\LinkSymbolTable.cs" />
     <Compile Include="..\..\tools\chibil-link\SymbolResolver.cs" />
     <Compile Include="..\..\tools\chibil-link\FieldDataRelocator.cs" />
+    <Compile Include="..\..\tools\chibil-link\ManagedReference.cs" />
     <!-- LinkOptions / CLI parser (also defines an unused top-level Program.Main,
          harmless in this library test assembly). Needed by LinkOptionsParseTests. -->
     <Compile Include="..\..\tools\chibil-link\Program.cs" />
