@@ -11,5 +11,13 @@
     <Reference Include="qjs">
       <HintPath>../quickjs-2025-09-13/qjs.dll</HintPath>
     </Reference>
+    <!-- Managed-PAL run (qjs-on-musl-api.sh sets PalRun=1): the facade is linked
+         against managed musl + Chibil.Pal, so the runtime must resolve Chibil.Pal
+         (qjs.dll's <Module> .cctor calls into it). Listing it as a reference puts it
+         in the consumer's deps.json so the loader finds it. The native-libc oracle
+         leaves PalRun unset and is unaffected. -->
+    <Reference Include="Chibil.Pal" Condition="'$(PalRun)' == '1'">
+      <HintPath>$(PalDll)</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>

@@ -46,15 +46,41 @@ public static class SymbolResolver
         // in-module. If a target is not a defined function — e.g. a data symbol or
         // a cross-object reference — warn, since the alias would otherwise silently
         // fall through to a P/Invoke stub that fails at run time.)
+        // A weak_alias is a WEAK definition: it must yield to a strong definition of
+        // the same name. musl relies on this — e.g. lite_malloc.c does
+        // `weak_alias(__simple_malloc, __libc_malloc_impl)` while mallocng defines a
+        // STRONG __libc_malloc_impl; the strong one must win, or malloc() and free()
+        // use different allocators. So skip an alias whose name is already defined.
         foreach (var of in objs)
             if (of.TryReadAliasManifest(out var aliases))
+            {
+                // A weak_alias target is ALWAYS defined in the SAME translation unit, so
+                // resolve it within THIS object first. The global DefinedMethodToken table
+                // is keyed by bare name with "last wins", which collapses file-local
+                // `static` functions of the same name from different objects (musl has 20+
+                // distinct `static dummy`s — dummy(void), dummy(char*,char*), dummy(int)…).
+                // Resolving an alias target through that global table can bind it to a
+                // same-named static from another object with a DIFFERENT signature,
+                // corrupting every call site of the alias (e.g. __mmap's __vm_wait() →
+                // mmap.c's dummy(void) was hijacked by clearenv.c's dummy(char*,char*),
+                // throwing InvalidProgramException at __mmap). Build the defining object's
+                // own name→token map and prefer it.
+                var localDefs = new Dictionary<string, int>();
+                foreach (var m in of.Methods)
+                    localDefs[m.Name] = merger.MapToken(of, m.OriginalToken);
+
                 foreach (var kv in aliases)
-                    if (table.DefinedMethodToken.TryGetValue(kv.Value, out int tok))
-                        table.DefinedMethodToken[kv.Key] = tok;
+                    if (table.DefinedMethodToken.ContainsKey(kv.Key))
+                        continue;   // strong definition wins over the weak alias
+                    else if (localDefs.TryGetValue(kv.Value, out int localTok))
+                        table.DefinedMethodToken[kv.Key] = localTok;   // same-TU target (correct)
+                    else if (table.DefinedMethodToken.TryGetValue(kv.Value, out int tok))
+                        table.DefinedMethodToken[kv.Key] = tok;        // fallback: cross-object
                     else
                         Console.Error.WriteLine(
                             $"chibil-link: warning: alias '{kv.Key}' targets '{kv.Value}', " +
                             "which is not a defined function — the alias will not resolve.");
+            }
 
         // Synthesized P/Invoke methods, deduped by (native name + concrete
         // signature blob) across all objects. A native variadic callee (e.g.

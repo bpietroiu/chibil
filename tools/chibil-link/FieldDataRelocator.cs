@@ -82,6 +82,21 @@ public static class FieldDataRelocator
         foreach (var cf in merger.CopiedFields)
             if (cf.Name != null) fieldByName[cf.Name] = cf.PredictedRow;
 
+        // DATA aliases (musl weak_alias on globals, e.g. environ→__environ, or
+        // fork.c's __sem_open_lockptr→dummy_lockptr fallback). A static initializer
+        // that bakes &alias resolves to the target's row. A STRONG definition of the
+        // alias name wins (don't overwrite a real field). Mirrors the function-alias
+        // path in SymbolResolver and the data-ref path in ResolveCrossObjectFields.
+        foreach (var o in objs)
+            if (o.TryReadAliasManifest(out var aliases))
+                foreach (var kv in aliases)
+                {
+                    if (fieldByName.ContainsKey(kv.Key)) continue;        // strong def wins
+                    if (methodByName.ContainsKey(kv.Key)) continue;       // function alias
+                    if (fieldByName.TryGetValue(kv.Value, out int trow))
+                        fieldByName[kv.Key] = trow;                       // alias → target field
+                }
+
         // Index copied fields by their SOURCE location so a reloc offset maps to
         // its owning field. Two indices per object: an exact-start lookup (for a
         // reloc whose offset equals a field start) and a sorted list (for offsets
