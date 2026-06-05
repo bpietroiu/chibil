@@ -1,0 +1,71 @@
+<Project DefaultTargets="Build">
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.props" />
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.targets" />
+
+  <PropertyGroup>
+    <QjsRoot>$(MSBuildThisFileDirectory)..\quickjs-2025-09-13</QjsRoot>
+    <MuslRoot>$(MSBuildThisFileDirectory)..\musl-1.2.6</MuslRoot>
+    <BuildInfra>$(MSBuildThisFileDirectory)..\build</BuildInfra>
+    <MuslObjDir>$(ChibilArtifacts)\managed-musl</MuslObjDir>
+    <QjsOut>$(ChibilArtifacts)\bin\qjs</QjsOut>
+    <QjsDll>$(QjsOut)\qjs.dll</QjsDll>
+    <Consumer>$(MSBuildThisFileDirectory)..\quickjs-api-consumer\qjsconsumer.csproj</Consumer>
+  </PropertyGroup>
+
+  <Target Name="Build">
+    <ItemGroup>
+      <MuslInc Include="$(BuildInfra)\musl-compat;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\src\include;$(MuslRoot)\src\internal;$(MuslRoot)\include;$(MuslRoot)\obj\include" />
+      <QjsInc Include="$(BuildInfra)\qjs-compat;$(QjsRoot);@(MuslInc)" />
+      <EngineSrc Include="$(QjsRoot)\cutils.c;$(QjsRoot)\dtoa.c;$(QjsRoot)\libregexp.c;$(QjsRoot)\libunicode.c;$(QjsRoot)\quickjs.c" />
+    </ItemGroup>
+
+    <!-- Engine TUs: facade (export-api) + managed-musl headers. -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="@(EngineSrc)"
+                   SourceRoot="$(QjsRoot)"
+                   OutputDir="$(QjsOut)\obj"
+                   IncludeDirs="@(QjsInc)"
+                   Defines="EMSCRIPTEN;_GNU_SOURCE;CONFIG_VERSION=&quot;2025-09-13&quot;"
+                   ForceInclude="$(BuildInfra)\quickjs-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64 --export-api=quickjs.h">
+      <Output TaskParameter="Objects" ItemName="EngineObj" />
+    </ChibilCompile>
+
+    <!-- The PAL shim (musl arch shadows). -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(BuildInfra)\musl-compat\pal-shim.c"
+                   OutputDir="$(QjsOut)\obj"
+                   IncludeDirs="@(MuslInc)"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="ShimObj" />
+    </ChibilCompile>
+
+    <ItemGroup>
+      <!-- Managed-musl objects, minus oldmalloc (mallocng is the proven allocator). -->
+      <MuslObj Include="$(MuslObjDir)\*.obj" Exclude="$(MuslObjDir)\*oldmalloc*" />
+    </ItemGroup>
+
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)"
+                Output="$(QjsDll)"
+                Shared="true" Debug="true"
+                Objects="@(EngineObj);@(MuslObj);@(ShimObj)"
+                Binds="__chibil_syscall=Chibil.Pal.Syscall;__chibil_get_tp=Chibil.Pal.GetTp"
+                References="$(ChibilPalDll)" />
+
+    <!-- The consumer references ..\quickjs-2025-09-13\qjs.dll (stable HintPath). -->
+    <Copy SourceFiles="$(QjsDll)" DestinationFiles="$(QjsRoot)\qjs.dll" />
+    <Message Importance="high" Text="qjs.dll -> $(QjsDll) (copied to consumer HintPath)" />
+  </Target>
+
+  <!-- Behavioral oracle: build + run the C# consumer, assert exit 0 (JS_Eval==42). -->
+  <Target Name="Oracle" DependsOnTargets="Build">
+    <MSBuild Projects="$(Consumer)" Targets="Restore" />
+    <MSBuild Projects="$(Consumer)" Properties="Configuration=Debug" Targets="Build" />
+    <Exec Command="dotnet &quot;$(ChibilArtifacts)\bin\qjsconsumer\debug\qjsconsumer.dll&quot;" IgnoreExitCode="true">
+      <Output TaskParameter="ExitCode" PropertyName="OracleExit" />
+    </Exec>
+    <Error Condition="'$(OracleExit)' != '0'" Text="oracle FAILED: qjsconsumer exit $(OracleExit) (expected 0 / JS_Eval==42)" />
+    <Message Importance="high" Text="ORACLE OK: JS_Eval(&quot;40+2&quot;) == 42" />
+  </Target>
+</Project>

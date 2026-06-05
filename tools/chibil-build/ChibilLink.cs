@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Utilities;
 
@@ -27,7 +28,12 @@ namespace Chibil.Build
             if (Debug) a.Add("-g");
             if (Shared) a.Add("-shared");
             a.Add("-o"); a.Add(Output);
-            foreach (var o in Objects) a.Add(o.GetMetadata("FullPath"));
+            // Object paths can number in the thousands; Windows caps a process command
+            // line at ~32K chars, so pass them through a chibil-link @response file
+            // (whitespace/newline separated). Non-object args stay inline.
+            string rsp = Path.GetFullPath(Output) + ".rsp";
+            File.WriteAllLines(rsp, Objects.Select(o => o.GetMetadata("FullPath")));
+            a.Add("@" + rsp);
             if (Binds.Length > 0) a.Add("--bind=" + string.Join(",", Binds));
             foreach (var r in References) { a.Add("-r"); a.Add(r); }
             foreach (var e in ExtraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries)) a.Add(e);

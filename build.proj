@@ -1,0 +1,33 @@
+<Project DefaultTargets="QuickJs">
+  <!--
+    One-command driver for the managed pipeline. Tools are built first (the port
+    .proj UsingTask the freshly-built Chibil.Build.Tasks.dll, so it must exist before
+    those projects load - a separate MSBuild invocation guarantees that).
+      dotnet build build.proj -t:QuickJs     (default; builds qjs.dll + runs oracle)
+      dotnet build build.proj -t:ManagedMusl (just the musl object set)
+      dotnet build build.proj -t:Tools       (just the toolchain)
+  -->
+  <PropertyGroup>
+    <ToolConfig Condition="'$(ToolConfig)' == ''">Debug</ToolConfig>
+  </PropertyGroup>
+
+  <Target Name="Tools">
+    <ItemGroup>
+      <DebugTool Include="chibil\Chibil.csproj;tools\chibil-link\ChibilLink.csproj;tools\chibil-build\Chibil.Build.Tasks.csproj" />
+      <ReleaseTool Include="targets\build\Chibil.Pal\Chibil.Pal.csproj" />
+    </ItemGroup>
+    <!-- The MSBuild task does not auto-restore; restore explicitly so a fresh
+         ./build obj tree gets its project.assets.json before Build. -->
+    <MSBuild Projects="@(DebugTool);@(ReleaseTool)" Targets="Restore" />
+    <MSBuild Projects="@(DebugTool)" Targets="Build" Properties="Configuration=$(ToolConfig);Platform=AnyCPU" />
+    <MSBuild Projects="@(ReleaseTool)" Targets="Build" Properties="Configuration=Release" />
+  </Target>
+
+  <Target Name="ManagedMusl" DependsOnTargets="Tools">
+    <MSBuild Projects="targets\managed-musl\ManagedMusl.proj" />
+  </Target>
+
+  <Target Name="QuickJs" DependsOnTargets="ManagedMusl">
+    <MSBuild Projects="targets\quickjs\QuickJsManaged.proj" Targets="Oracle" />
+  </Target>
+</Project>
