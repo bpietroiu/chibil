@@ -840,11 +840,19 @@ public class Parser
 
     private long EvalRval(Node node, out Func<string> label)
     {
-        label = null;
+        // `label` may be a null-ref sink (when reached via Eval, e.g. through a
+        // pointer-difference Div/Sub): writing to it would NRE. The offsetof idiom
+        // `&((T*)0)->m - (char*)0` is a pure constant (null base, no symbol), so it
+        // never needs a label and evaluates fine; a real symbol address does.
+        Unsafe.SkipInit(out label);
+        if (!Unsafe.IsNullRef(ref label)) label = null;
         switch (node.Kind)
         {
             case NodeKind.Var:
                 if (node.Var.IsLocal) Util.ErrorTok(node.Tok, "not a compile-time constant");
+                // A symbol address is a relocation, not a pure integer constant: if the
+                // caller cannot receive a label, this is not a compile-time constant.
+                if (Unsafe.IsNullRef(ref label)) Util.ErrorTok(node.Tok, "not a compile-time constant");
                 { Obj v = node.Var; label = () => v.Name; }
                 return 0;
             case NodeKind.Deref: return Eval2(node.Lhs, out label);

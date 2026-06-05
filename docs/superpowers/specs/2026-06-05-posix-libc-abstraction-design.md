@@ -256,6 +256,38 @@ Subsystems now fully clean: `ctype` 37/37, `multibyte` 20/20, `stdlib`/`malloc`/
 - 1 `explicit_bzero` asm memory barrier (`__asm__("":::"memory")`);
 - 1 `__scc` cast edge (`((long)(X))` in a syscall macro) + a couple misc.
 
+## Gap covered: offsetof const-eval crash fixed (2026-06-05)
+
+Root-caused the `NullReferenceException`: it was the **offsetof idiom**
+`(char*)&((T*)0)->m - (char*)0` (musl's `offsetof` when `__GNUC__` is undefined,
+used by `errno/strerror.c`). Pointer subtraction lowers to `Div(Sub(a,b), size)`;
+`Eval2(Div)` evaluated operands through `Eval()` — a **null-ref label sink** — and
+the address operand reached `EvalRval`, whose unconditional `label = null` wrote
+through the null-ref → crash. Even though the value is a pure constant (null base,
+no relocation).
+
+Fix (`Parser.cs` `EvalRval` + `ParserConstEvalTests`, TDD): guard the label
+writes against a null-ref sink — the pure-constant path needs no label and now
+evaluates correctly (verified end-to-end: the idiom returns the real offset `8`,
+not a silent `0`); a genuine symbol address under `Eval` is correctly reported
+"not a compile-time constant" instead of crashing. Full suite green (306 pass).
+`strerror.c` now compiles → 303/308.
+
+**Final residual (5), all non-blocking:**
+- `__libc_start_main.c`, `exit.c` (`_init`/`_fini`) — these are crt/**startup**
+  TUs (the managed PAL provides entry + atexit), and the failures are anyway an
+  artifact of the spike neutralizing `weak_alias` (which is what declares
+  `_init`/`_fini`); real `weak_alias` support resolves them. Not a chibil gap.
+- `explicit_bzero.c` — empty `__asm__("":::"memory")` compiler barrier (a no-op
+  for chibil; supportable as an empty-asm no-op, or shimmed).
+- `__stdio_seek.c` — a `__scc((long)(X))` cast edge (1 niche TU).
+- `abort.c` — internal assertion on `&(struct k_sigaction){…}` (address of a
+  compound literal as a syscall arg) — a real but niche chibil codegen edge.
+
+So the two **real, general chibil bugs** the spike surfaced (comma-declarator
+parse, offsetof const-eval crash) are both fixed with tests; the rest is PAL/crt
+territory or niche edges. Managed musl compiles ~99% once `weak_alias` is real.
+
 **Verdict: managed musl is ~98% compilable with chibil today.** The blockers were
 exactly the platform seam (three arch asm headers — `syscall_arch`, `atomic_arch`,
 `pthread_arch` — all PAL territory) plus one real parser gap (now fixed). Next:
