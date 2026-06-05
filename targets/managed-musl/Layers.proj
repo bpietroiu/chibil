@@ -1,0 +1,134 @@
+<Project DefaultTargets="All">
+  <!--
+    Layer bring-up regression tests for the managed musl + PAL, converted from the
+    musl-layer*.sh scripts. Cross-platform (Windows/Linux, no WSL):
+      dotnet build targets/managed-musl/Layers.proj            (all 5)
+      dotnet build targets/managed-musl/Layers.proj -t:Layer3bMalloc
+    L1 (pure strlen) and L2 (raw syscall seam) link minimal closures. L3a/3b/3c link
+    the full managed-musl object set (minus oldmalloc) + the PAL shim - same as the
+    QuickJS build - because the shim now depends on much of musl; each runs a tiny
+    main and asserts the exit code.
+  -->
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.props" />
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.targets" />
+
+  <PropertyGroup>
+    <MuslRoot>$(MSBuildThisFileDirectory)..\musl-1.2.6</MuslRoot>
+    <BuildInfra>$(MSBuildThisFileDirectory)..\build</BuildInfra>
+    <Layers>$(MSBuildThisFileDirectory)layers</Layers>
+    <MuslObjDir>$(ChibilArtifacts)\managed-musl</MuslObjDir>
+    <Out>$(ChibilArtifacts)\layers</Out>
+    <ObjDir>$(Out)\obj</ObjDir>
+    <Bind>__chibil_syscall=Chibil.Pal.Syscall;__chibil_get_tp=Chibil.Pal.GetTp</Bind>
+    <Compat>$(BuildInfra)\musl-chibil-compat.h</Compat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <MuslInc Include="$(BuildInfra)\musl-compat;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\src\include;$(MuslRoot)\src\internal;$(MuslRoot)\include;$(MuslRoot)\obj\include" />
+  </ItemGroup>
+
+  <!-- Pal.dll beside the layer dlls so the runtime resolves the bound Chibil.Pal
+       AssemblyRef from the app base. -->
+  <Target Name="_Prep">
+    <MakeDir Directories="$(Out)" />
+    <Copy SourceFiles="$(ChibilPalDll)" DestinationFiles="$(Out)\Chibil.Pal.dll" />
+  </Target>
+
+  <!-- Full managed-musl object set + the PAL shim, shared by the L3* layers. -->
+  <Target Name="_Musl" DependsOnTargets="_Prep">
+    <MSBuild Projects="$(MSBuildThisFileDirectory)ManagedMusl.proj" />
+    <ChibilCompile ChibilDll="$(ChibilDll)" Sources="$(BuildInfra)\musl-compat\pal-shim.c"
+                   OutputDir="$(ObjDir)" IncludeDirs="@(MuslInc)" ForceInclude="$(Compat)"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="ShimObj" />
+    </ChibilCompile>
+    <ItemGroup>
+      <MuslObj Include="$(MuslObjDir)\*.obj" Exclude="$(MuslObjDir)\*oldmalloc*" />
+    </ItemGroup>
+  </Target>
+
+  <!-- Layer 1: pure musl (strlen), no PAL. Expect 5. -->
+  <Target Name="Layer1">
+    <ChibilCompile ChibilDll="$(ChibilDll)" Sources="$(MuslRoot)\src\string\strlen.c"
+                   SourceRoot="$(MuslRoot)" OutputDir="$(MuslObjDir)" IncludeDirs="@(MuslInc)"
+                   Defines="_GNU_SOURCE;_XOPEN_SOURCE=700" ForceInclude="$(Compat)"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="L1Closure" />
+    </ChibilCompile>
+    <ChibilCompile ChibilDll="$(ChibilDll)" Sources="$(Layers)\layer1-main.c"
+                   OutputDir="$(ObjDir)" ExtraArgs="--target=coreclr -mlp64">
+      <Output TaskParameter="Objects" ItemName="L1Main" />
+    </ChibilCompile>
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)" Output="$(Out)\l1.dll"
+                Objects="@(L1Main);@(L1Closure)" />
+    <Exec Command="dotnet &quot;$(Out)\l1.dll&quot;" IgnoreExitCode="true">
+      <Output TaskParameter="ExitCode" PropertyName="L1Exit" />
+    </Exec>
+    <Error Condition="'$(L1Exit)' != '5'" Text="Layer1 FAILED: expected exit 5, got $(L1Exit)" />
+    <Message Importance="high" Text="Layer1 OK: pure musl strlen -> 5" />
+  </Target>
+
+  <!-- Layer 2 (seam): direct __chibil_syscall(SYS_write) -> Pal.Syscall. Expect 0. -->
+  <Target Name="Layer2" DependsOnTargets="_Prep">
+    <ChibilCompile ChibilDll="$(ChibilDll)" Sources="$(Layers)\layer2-main.c"
+                   OutputDir="$(ObjDir)" ExtraArgs="--target=coreclr -mlp64">
+      <Output TaskParameter="Objects" ItemName="L2Main" />
+    </ChibilCompile>
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)" Output="$(Out)\l2.dll"
+                Objects="@(L2Main)" Binds="$(Bind)" References="$(ChibilPalDll)" />
+    <Exec Command="dotnet &quot;$(Out)\l2.dll&quot;" IgnoreExitCode="true">
+      <Output TaskParameter="ExitCode" PropertyName="L2Exit" />
+    </Exec>
+    <Error Condition="'$(L2Exit)' != '0'" Text="Layer2 FAILED: expected exit 0, got $(L2Exit)" />
+    <Message Importance="high" Text="Layer2 OK: PAL seam (__chibil_syscall write)" />
+  </Target>
+
+  <!-- Layer 3a: real musl write() over the PAL. Expect 0. -->
+  <Target Name="Layer3Write" DependsOnTargets="_Musl">
+    <ChibilCompile ChibilDll="$(ChibilDll)" Sources="$(Layers)\layer3-write-main.c"
+                   OutputDir="$(ObjDir)" ExtraArgs="--target=coreclr -mlp64">
+      <Output TaskParameter="Objects" ItemName="L3wMain" />
+    </ChibilCompile>
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)" Output="$(Out)\l3.dll"
+                Objects="@(L3wMain);@(MuslObj);@(ShimObj)" Binds="$(Bind)" References="$(ChibilPalDll)" />
+    <Exec Command="dotnet &quot;$(Out)\l3.dll&quot;" IgnoreExitCode="true">
+      <Output TaskParameter="ExitCode" PropertyName="L3wExit" />
+    </Exec>
+    <Error Condition="'$(L3wExit)' != '0'" Text="Layer3Write FAILED: expected exit 0, got $(L3wExit)" />
+    <Message Importance="high" Text="Layer3Write OK: real musl write()" />
+  </Target>
+
+  <!-- Layer 3b: mallocng malloc()+free() over the PAL (mmap). Expect 42. -->
+  <Target Name="Layer3bMalloc" DependsOnTargets="_Musl">
+    <ChibilCompile ChibilDll="$(ChibilDll)" Sources="$(Layers)\layer3b-malloc-main.c"
+                   OutputDir="$(ObjDir)" ExtraArgs="--target=coreclr -mlp64">
+      <Output TaskParameter="Objects" ItemName="L3bMain" />
+    </ChibilCompile>
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)" Output="$(Out)\l3b.dll"
+                Objects="@(L3bMain);@(MuslObj);@(ShimObj)" Binds="$(Bind)" References="$(ChibilPalDll)" />
+    <Exec Command="dotnet &quot;$(Out)\l3b.dll&quot;" IgnoreExitCode="true">
+      <Output TaskParameter="ExitCode" PropertyName="L3bExit" />
+    </Exec>
+    <Error Condition="'$(L3bExit)' != '42'" Text="Layer3bMalloc FAILED: expected exit 42, got $(L3bExit)" />
+    <Message Importance="high" Text="Layer3bMalloc OK: mallocng malloc/free -> 42" />
+  </Target>
+
+  <!-- Layer 3c: printf to stdout (stdio FILE + writev) over the PAL. Expect 0. -->
+  <Target Name="Layer3cPrintf" DependsOnTargets="_Musl">
+    <ChibilCompile ChibilDll="$(ChibilDll)" Sources="$(Layers)\layer3c-printf-main.c"
+                   OutputDir="$(ObjDir)" ExtraArgs="--target=coreclr -mlp64">
+      <Output TaskParameter="Objects" ItemName="L3cMain" />
+    </ChibilCompile>
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)" Output="$(Out)\l3c.dll"
+                Objects="@(L3cMain);@(MuslObj);@(ShimObj)" Binds="$(Bind)" References="$(ChibilPalDll)" />
+    <Exec Command="dotnet &quot;$(Out)\l3c.dll&quot;" IgnoreExitCode="true">
+      <Output TaskParameter="ExitCode" PropertyName="L3cExit" />
+    </Exec>
+    <Error Condition="'$(L3cExit)' != '0'" Text="Layer3cPrintf FAILED: expected exit 0, got $(L3cExit)" />
+    <Message Importance="high" Text="Layer3cPrintf OK: managed printf" />
+  </Target>
+
+  <Target Name="All" DependsOnTargets="Layer1;Layer2;Layer3Write;Layer3bMalloc;Layer3cPrintf">
+    <Message Importance="high" Text="All layer tests passed (L1 strlen, L2 seam, L3a write, L3b malloc, L3c printf)." />
+  </Target>
+</Project>

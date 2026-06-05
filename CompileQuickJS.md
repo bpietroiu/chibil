@@ -29,6 +29,10 @@ compiles the managed-musl object set (`ManagedMusl.proj`), links `qjs.dll` again
 layout). To rebuild just `qjs.dll` (then F5 the consumer in VS):
 `dotnet build targets/quickjs/QuickJsManaged.proj`.
 
+Regression suite (the 5 managed musl/PAL layer tests + the JS_Eval oracle):
+`dotnet build build.proj -t:Test` (or just the layers:
+`dotnet build targets/managed-musl/Layers.proj`).
+
 The native-libc oracle (`targets/build/quickjs-api-run.sh`) and the historical
 `*.sh` harnesses below remain for Linux/WSL; they now resolve the toolchain through
 `targets/build/env.sh` under the same `./build/` layout.

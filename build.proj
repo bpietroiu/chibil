@@ -4,6 +4,7 @@
     .proj UsingTask the freshly-built Chibil.Build.Tasks.dll, so it must exist before
     those projects load - a separate MSBuild invocation guarantees that).
       dotnet build build.proj -t:QuickJs     (default; builds qjs.dll + runs oracle)
+      dotnet build build.proj -t:Test        (managed musl/PAL regression suite)
       dotnet build build.proj -t:ManagedMusl (just the musl object set)
       dotnet build build.proj -t:Tools       (just the toolchain)
   -->
@@ -28,6 +29,13 @@
   </Target>
 
   <Target Name="QuickJs" DependsOnTargets="ManagedMusl">
+    <MSBuild Projects="targets\quickjs\QuickJsManaged.proj" Targets="Oracle" />
+  </Target>
+
+  <!-- Cross-platform regression suite for the managed musl + PAL: the 5 layer
+       bring-up tests (L1 strlen ... L3c printf) + the QuickJS JS_Eval oracle. -->
+  <Target Name="Test" DependsOnTargets="Tools">
+    <MSBuild Projects="targets\managed-musl\Layers.proj" Targets="All" />
     <MSBuild Projects="targets\quickjs\QuickJsManaged.proj" Targets="Oracle" />
   </Target>
 </Project>
