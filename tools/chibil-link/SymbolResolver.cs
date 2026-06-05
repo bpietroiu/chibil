@@ -140,6 +140,16 @@ public static class SymbolResolver
                     continue;
                 }
 
+                // Managed bind (--bind): resolve this C symbol to a managed method in a
+                // referenced assembly (a direct call), not a native P/Invoke stub.
+                if (merger.BindMap.TryGetValue(name, out string dotted))
+                {
+                    var sr = md.GetBlobReader(mr.Signature);
+                    int bindTok = merger.ResolveManagedBind(name, dotted, sr, of);
+                    map.RecordExternal(originalToken, bindTok);
+                    continue;
+                }
+
                 // Native import: synthesize (or reuse) a P/Invoke stub keyed on
                 // this MemberRef's OWN concrete signature, so distinct vararg
                 // shapes get distinct stubs.
