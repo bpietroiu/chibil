@@ -388,6 +388,39 @@ public sealed class PeWriter
             MetadataTokens.MethodDefinitionHandle(1));
         AssertRow(MetadataMerger.ModuleTypeDefRow, MetadataTokens.GetRowNumber(moduleTypeDef), "TypeDef <Module>");
 
+        // ── Global-field container TypeDefs (rows 2..1+k) ─────────────────────
+        // <Module> can hold at most MaxFieldsPerType static fields (CLR per-type
+        // limit). The overflow global fields spill onto these synthesized static
+        // classes, each owning a contiguous chunk of the field rows. <Module> keeps
+        // the first chunk: it owns fields [1, container[0].FieldList) and methods
+        // [1, FirstForwarderRow) — both unchanged from the no-container case, so the
+        // entry method (in <Module>) and the export class's forwarders are unaffected.
+        if (merger.GlobalFieldContainerRows.Count > 0)
+        {
+            int totalGlobals = merger.TotalGlobalFieldRows;
+            int methodListPastModule = FirstForwarderRow(merger);   // <Module> owns methods below this
+            int next = MetadataMerger.MaxFieldsPerType + 1;          // first field row of container[0]
+            int ci = 0;
+            foreach (int row in merger.GlobalFieldContainerRows)
+            {
+                int fieldStart = Math.Min(next, totalGlobals + 1);   // surplus container => empty range
+                var ctd = mdBuilder.AddTypeDefinition(
+                    System.Reflection.TypeAttributes.NotPublic
+                        | System.Reflection.TypeAttributes.Sealed
+                        | System.Reflection.TypeAttributes.Abstract
+                        | System.Reflection.TypeAttributes.Class
+                        | System.Reflection.TypeAttributes.BeforeFieldInit,
+                    default,
+                    mdBuilder.GetOrAddString($"$GlobalFields${ci}"),
+                    merger.GetOrAddCoreObjectRef(),
+                    MetadataTokens.FieldDefinitionHandle(fieldStart),
+                    MetadataTokens.MethodDefinitionHandle(methodListPastModule));
+                AssertRow(row, MetadataTokens.GetRowNumber(ctd), $"TypeDef $GlobalFields${ci}");
+                next += MetadataMerger.MaxFieldsPerType;
+                ci++;
+            }
+        }
+
         // ── Export class TypeDef (row 2), public static class owning the forwarder
         //    tail. With zero forwarders, MethodList points past the end (empty).
         if (merger.ExportTypeDefRow != 0)
