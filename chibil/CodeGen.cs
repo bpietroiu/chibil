@@ -1357,33 +1357,53 @@ public class CodeGen
     }
 
     /// <summary>Count setjmp call sites in a tree and whether any is lexically inside a
-    /// <em>cond loop</em> — a `for`/`while` with a condition. Such a loop emits a forward
-    /// exit (`brfalse brkLabel`) from before the body to a label after the loop; with the
-    /// resume-at-site try starting inside the loop body, that label is inside the try and
-    /// the exit would be an illegal branch INTO the protected region. `for(;;)` (no cond)
-    /// and `do/while` (cond at the back-edge) have no such forward exit and are safe for
-    /// resume-at-site (their back-edges become `leave` via trampolines).</summary>
-    private static (int count, bool insideCondLoop) CountSetjmp(Node n, bool inCondLoop = false)
+    /// <em>cond loop</em> or a <em>conditional branch</em>. Both make the resume-at-site
+    /// try region (which runs from the setjmp site to body-end) unsafe:
+    /// <list type="bullet">
+    /// <item><b>cond loop</b> — a `for`/`while` with a condition emits a forward exit
+    /// (`brfalse brkLabel`) from before the body to a label after the loop; that label is
+    /// inside the try, so the exit is an illegal branch INTO the protected region.
+    /// `for(;;)`/`do-while` have no such forward exit and stay resume-at-site (back-edges
+    /// become `leave` via trampolines).</item>
+    /// <item><b>conditional branch</b> — a setjmp inside the THEN/ELSE arm of an enclosing
+    /// `if`/`switch` (mp_iternext nests it 2 deep). The enclosing test branches (emitted
+    /// before the setjmp site, hence outside the try) target the sibling arm / merge, which
+    /// the body-end try swallows — another illegal branch INTO the try. Inherited through
+    /// branch arms, NOT through `if`-conditions or loop bodies, so the plain `if(setjmp())`
+    /// idiom and `for(;;){ if(setjmp())… }` stay resume-at-site.</item>
+    /// </list>
+    /// When either holds, the caller falls back to whole-body re-from-top (everything
+    /// inside the try → no branch crosses in).</summary>
+    private static (int count, bool insideCondLoop, bool insideCondBranch) CountSetjmp(
+        Node n, bool inCondLoop = false, bool inCondBranch = false)
     {
         int count = 0;
-        bool condHit = false;
+        bool condLoop = false, condBranch = false;
         for (; n != null; n = n.Next)
         {
             if (n.Kind == NodeKind.FunCall && n.Lhs != null && n.Lhs.Kind == NodeKind.Var
                 && n.Lhs.Var != null && n.Lhs.Var.IsFunction && IsSetjmpName(n.Lhs.Var.Name))
             {
                 count++;
-                if (inCondLoop) condHit = true;
+                if (inCondLoop) condLoop = true;
+                if (inCondBranch) condBranch = true;
             }
             bool childInCondLoop = inCondLoop || (n.Kind == NodeKind.For && n.Cond != null);
-            foreach (var c in new[] { n.Lhs, n.Rhs, n.Cond, n.Then, n.Els, n.Init, n.Inc, n.Body, n.Args })
+            // Then/Els are conditional ARMS for if/switch (not for loops, whose Then/Body
+            // is the loop body); Cond and the other slots are not arms.
+            bool armsAreBranches = n.Kind == NodeKind.If || n.Kind == NodeKind.Switch;
+            void Walk(Node c, bool branch)
             {
-                var (cc, cl) = CountSetjmp(c, childInCondLoop);
-                count += cc;
-                condHit |= cl;
+                var (cc, cl, cb) = CountSetjmp(c, childInCondLoop, branch);
+                count += cc; condLoop |= cl; condBranch |= cb;
             }
+            Walk(n.Lhs, inCondBranch); Walk(n.Rhs, inCondBranch); Walk(n.Cond, inCondBranch);
+            Walk(n.Init, inCondBranch); Walk(n.Inc, inCondBranch); Walk(n.Args, inCondBranch);
+            Walk(n.Body, inCondBranch);
+            Walk(n.Then, inCondBranch || armsAreBranches);
+            Walk(n.Els, inCondBranch || armsAreBranches);
         }
-        return (count, condHit);
+        return (count, condLoop, condBranch);
     }
 
     // Default-convention MemberRef signatures for the linker-synthesized helpers.
@@ -1457,8 +1477,12 @@ public class CodeGen
         // Resume-at-site for a single setjmp, including inside for(;;)/do-while loops
         // (back-edges become `leave`). Excludes cond loops (for/while with a cond), whose
         // forward exit would branch into the try; those keep the re-from-top strategy.
-        var (sjCount, sjInCondLoop) = CountSetjmp(fn.Body);
-        _setjmpDeferStart = sjCount == 1 && !sjInCondLoop;
+        var (sjCount, sjInCondLoop, sjInCondBranch) = CountSetjmp(fn.Body);
+        // Resume-at-site only for a single setjmp that is NOT inside a cond loop or a
+        // conditional branch arm — either would create an illegal branch INTO the
+        // body-end try region. Otherwise wrap the whole body (re-from-top), where every
+        // branch stays inside the try. (mp_iternext nests its setjmp in if-arms.)
+        _setjmpDeferStart = sjCount == 1 && !sjInCondLoop && !sjInCondBranch;
         _setjmpOuterLabels.Clear();
         _setjmpLeaveTrampolines.Clear();
 
@@ -2956,6 +2980,35 @@ public class CodeGen
     //  Statement code generation (GenStmt)
     // ═══════════════════════════════════════════════════════════════
 
+    /// <summary>True if control can never fall off the end of <paramref name="n"/> —
+    /// it always returns or branches away (return, goto, and break/continue which the
+    /// parser lowers to goto). Conservative: only the cases certain to transfer return
+    /// true, so a needed branch is never suppressed. Used to drop dead merge branches
+    /// (notably the if/else merge that would otherwise branch into the setjmp try).</summary>
+    private static bool StmtAlwaysTransfers(Node n)
+    {
+        if (n == null) return false;
+        switch (n.Kind)
+        {
+            case NodeKind.Return:
+            case NodeKind.Goto:        // break/continue are lowered to goto
+            case NodeKind.GotoExpr:
+                return true;
+            case NodeKind.Block:
+            {
+                Node last = null;
+                for (Node s = n.Body; s != null; s = s.Next) last = s;
+                return StmtAlwaysTransfers(last);
+            }
+            case NodeKind.If:
+                return n.Els != null && StmtAlwaysTransfers(n.Then) && StmtAlwaysTransfers(n.Els);
+            case NodeKind.Label:
+                return StmtAlwaysTransfers(n.Lhs);
+            default:
+                return false;
+        }
+    }
+
     private void GenStmt(Node node)
     {
         if (node.Tok?.File != null)
@@ -2974,7 +3027,14 @@ public class CodeGen
                 NormalizeToBranchable(node.Cond.Ty);
                 _enc.Branch(ILOpCode.Brfalse, elseLabel); Pop();
                 GenStmt(node.Then);
-                _enc.Branch(ILOpCode.Br, endLabel);
+                // The merge branch to endLabel is dead when the then-branch can't fall
+                // through (it ends in return/goto). Emitting it anyway is normally just
+                // dead code, but under the setjmp wrap the then-branch can sit OUTSIDE the
+                // try while endLabel sits INSIDE it (the setjmp lives in the else-branch),
+                // making `br endLabel` an illegal branch-INTO-the-try -> the JIT rejects
+                // the whole method (InvalidProgramException). Suppress it when unreachable.
+                if (!StmtAlwaysTransfers(node.Then))
+                    _enc.Branch(ILOpCode.Br, endLabel);
                 _enc.MarkLabel(elseLabel);
                 if (node.Els != null) GenStmt(node.Els);
                 _enc.MarkLabel(endLabel);

@@ -321,6 +321,39 @@ int main(void){
     }
 
     [Fact]
+    public void Setjmp_in_one_branch_with_sibling_branch_merge_jits()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // A function whose setjmp lives in ONE branch (the else), while a SIBLING branch
+        // (the if) returns via an indirect call, must JIT. chibil wraps the setjmp branch
+        // in a try region; the bug placed the shared epilogue `leave` INSIDE that try, so
+        // the if-branch's merge emitted `br <addr-inside-try>` — a branch from outside
+        // INTO the try region, which is illegal IL -> InvalidProgramException for the
+        // whole method. This is exactly MicroPython's mp_iternext shape:
+        //   if (TYPE_HAS_ITERNEXT(t)) return type_get_iternext(t)(o); else { ...nlr... }
+        // which crashed sorted([3,1,2]) with InvalidProgram at mp_iternext.
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "typedef long (*fn1_t)(long);\n" +
+            "static long impl(long x){ return x + 1; }\n" +
+            "static fn1_t get_fn(void){ return impl; }\n" +
+            "static jmp_buf jb;\n" +
+            "static long dispatch(long cond, long x){\n" +
+            "    if (cond) {\n" +
+            "        return get_fn()(x);\n" +              // if-branch: indirect call + ret
+            "    } else {\n" +
+            "        if (setjmp(jb) == 0) { longjmp(jb, 7); }\n" +   // else-branch: setjmp/longjmp
+            "        return 99;\n" +
+            "    }\n" +
+            "}\n" +
+            "int main(void){ return (int)dispatch(1, 41); }\n",   // 41 + 1 = 42
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (method JITs, no branch-into-try), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Small_storage_bitfield_read_masks_other_bits()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;
