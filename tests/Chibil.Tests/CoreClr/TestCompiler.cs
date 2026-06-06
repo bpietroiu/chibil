@@ -35,7 +35,7 @@ static class TestCompiler
             ?? throw new InvalidOperationException($"Failed to tokenize {path}");
         tok = preprocessor.Preprocess(tok);
         Obj prog = parser.Parse(tok);
-        var codegen = new CodeGen(opts, tokenizer, types);
+        var codegen = new MsilObjectEmitter(opts, tokenizer, types);
         return codegen.Generate(prog, Path.GetFileNameWithoutExtension(path) + ".obj", Path.GetFullPath(path));
     }
 
@@ -60,7 +60,7 @@ static class TestCompiler
         Obj prog = parser.Parse(tok);
 
         if (!generate) return null;
-        var codegen = new CodeGen(opts, tokenizer, types);
+        var codegen = new MsilObjectEmitter(opts, tokenizer, types);
         return codegen.Generate(prog, "t.obj", Path.GetFullPath(opts.BaseFile));
     }
 
