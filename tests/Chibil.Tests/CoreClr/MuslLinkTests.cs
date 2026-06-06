@@ -321,6 +321,40 @@ int main(void){
     }
 
     [Fact]
+    public void Setjmp_rearmed_in_loop_returns_zero_again()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // A setjmp in `for(;;)` whose CAUGHT (else) branch continues the loop and
+        // RE-ARMS the setjmp must return 0 on the re-arm — exactly MicroPython's
+        // mp_execute_bytecode: `for(;;){ if(setjmp()==0){dispatch} else {handle; continue} }`.
+        // The setjmp value is held in a scratch local; the handler stores the longjmp
+        // value into it, and without resetting it to 0 on the re-arm path the re-armed
+        // setjmp keeps returning the stale nonzero value -> the else branch loops forever
+        // (in MicroPython a runtime exception caught by try/except escaped uncaught).
+        // First pass longjmps; the re-armed second pass must see setjmp()==0 and return 42.
+        int exit = LinkRun(new[]
+        {
+            "typedef long jmp_buf[16];\n" +
+            "extern int setjmp(jmp_buf); extern void longjmp(jmp_buf, int);\n" +
+            "static jmp_buf jb;\n" +
+            "static void raiser(void){ longjmp(jb, 1); }\n" +
+            "static int vm(void){\n" +
+            "    int caught = 0;\n" +
+            "    for (;;) {\n" +
+            "        if (setjmp(jb) == 0) {\n" +
+            "            if (!caught) raiser();\n" +
+            "            return 42;\n" +
+            "        } else {\n" +
+            "            caught = 1;\n" +
+            "        }\n" +
+            "    }\n" +
+            "}\n" +
+            "int main(void){ return vm(); }\n",
+        }, out string o);
+        Assert.True(exit == 42, $"expected 42 (re-armed setjmp returns 0), got {exit}. {o}");
+    }
+
+    [Fact]
     public void Setjmp_in_one_branch_with_sibling_branch_merge_jits()
     {
         if (!DotnetHostRunner.DotnetAvailable()) return;

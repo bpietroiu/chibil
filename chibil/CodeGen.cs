@@ -2493,6 +2493,17 @@ public class CodeGen
                 {
                     System.Diagnostics.Debug.Assert(_stackDepth == 0,
                         "setjmp call site must have an empty eval stack for the try boundary");
+                    // Re-arm reset: when this setjmp is re-entered on a loop back-edge —
+                    // e.g. mp_execute_bytecode's `for(;;){ if(setjmp()==0){…} else {…} }`,
+                    // which catches an exception in the else and continues the loop — the
+                    // re-armed setjmp must return 0 again. sjval still holds the PRIOR
+                    // longjmp value (the handler stored it), so zero it here. This sits
+                    // BEFORE Lhead, so a longjmp RESUME (which `leave`s to Lhead) skips the
+                    // reset and keeps the stored value, while the direct call and every
+                    // loop re-arm fall through it. (Without this, the re-armed setjmp keeps
+                    // returning the stale nonzero value → the else branch loops forever.)
+                    EmitConstI4(0);
+                    _enc.StoreLocal(sjval); Pop();
                     _enc.MarkLabel(_setjmpLhead);
                     _enc.OpCode(ILOpCode.Nop);
                     _enc.MarkLabel(_setjmpTryStartLabel);
