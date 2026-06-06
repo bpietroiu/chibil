@@ -282,11 +282,28 @@ P/Invokes bind to at run time:
 
 ## 7. Reproduce
 
+### Managed musl (runs on Windows, zero native libc) — preferred
+
+```bash
+# 1. native baseline once (generates QSTR/codegen headers + the .o tree the source
+#    list is derived from). Unix-only (mpy-cross + Python build tooling).
+wsl bash -c "cd targets/micropython/ports/minimal && make -j4"
+# 2. build micropython.dll on the managed musl + PAL and run Python (cross-platform):
+dotnet build build.proj -t:MicroPython
+#    (or just the port: dotnet build targets/micropython-managed/MicroPythonManaged.proj -t:Run)
+```
+
+`MicroPythonManaged.proj` compiles the 138 TUs (source list derived from the native
+`.o` tree), links a runnable `micropython.dll` against `build/managed-musl` + the PAL,
+and runs a Python snippet. Output lands at `build/bin/mpy/micropython.dll`; run it with
+`dotnet build/bin/mpy/micropython.dll` (feed Python on stdin; end with `raise SystemExit`
+since the minimal port's UART stdin stub never reports EOF).
+
+### Native libc (Linux/WSL only)
+
 ```bash
 # 1. clone + native baseline (generates QSTR headers)
 cd targets/micropython/ports/minimal && make -j4
-# 2. capture the source list once (from a verbose build) into /tmp/mpy_srcs.txt
-#    (the harness expects it; see micropython-chibil.sh header)
-# 3. chibil compile + link
+# 2. chibil compile + link against libc.so.6 (mpy-on-musl.sh regenerates the source list)
 wsl bash targets/build/micropython-chibil.sh
 ```

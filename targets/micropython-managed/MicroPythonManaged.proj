@@ -1,0 +1,107 @@
+<Project DefaultTargets="Build">
+  <!--
+    Build a RUNNABLE micropython.dll against the MANAGED musl + PAL (no native libc),
+    cross-platform. Like QuickJsManaged.proj but MicroPython has a `main`, so it links
+    as an executable (no -shared) and runs directly.
+
+    PREREQUISITE: the native MicroPython build must have run once under WSL/Linux to
+    generate the QSTR/codegen headers and frozen content (and the .o tree this derives
+    the source list from):
+        wsl bash -c "cd targets/micropython/ports/minimal && make"
+    After that this .proj runs on Windows or Linux (chibil/chibil-link are .NET):
+        dotnet build targets/micropython-managed/MicroPythonManaged.proj -t:Run
+  -->
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.props" />
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.targets" />
+
+  <PropertyGroup>
+    <MpyRoot>$(MSBuildThisFileDirectory)..\micropython</MpyRoot>
+    <MpyPort>$(MpyRoot)\ports\minimal</MpyPort>
+    <MuslRoot>$(MSBuildThisFileDirectory)..\musl-1.2.6</MuslRoot>
+    <BuildInfra>$(MSBuildThisFileDirectory)..\build</BuildInfra>
+    <MuslObjDir>$(ChibilArtifacts)\managed-musl</MuslObjDir>
+    <MpyOut>$(ChibilArtifacts)\bin\mpy</MpyOut>
+    <MpyDll>$(MpyOut)\micropython.dll</MpyDll>
+  </PropertyGroup>
+
+  <Target Name="Build">
+    <!-- Ensure the managed-musl object set exists. -->
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\managed-musl\ManagedMusl.proj" />
+
+    <!-- Derive the 138-TU source list from the native build's .o tree (the authoritative
+         set `make` compiled): py/* and shared/** live at the MicroPython root; main,
+         uart_core and the generated frozen content live under the port dir. -->
+    <ItemGroup>
+      <_PyObj Include="$(MpyPort)\build\py\*.o" />
+      <_SharedObj Include="$(MpyPort)\build\shared\**\*.o" />
+    </ItemGroup>
+    <Error Condition="'@(_PyObj)' == ''"
+           Text="No MicroPython .o tree under $(MpyPort)\build — run the native build first: wsl bash -c &quot;cd targets/micropython/ports/minimal &amp;&amp; make&quot;" />
+    <ItemGroup>
+      <MpySrc Include="@(_PyObj->'$(MpyRoot)\py\%(Filename).c')" />
+      <MpySrc Include="@(_SharedObj->'$(MpyRoot)\shared\%(RecursiveDir)%(Filename).c')" />
+      <MpySrc Include="$(MpyPort)\main.c;$(MpyPort)\uart_core.c;$(MpyPort)\build\_frozen_mpy.c" />
+
+      <!-- MicroPython compile include set (port + root + generated headers + musl public
+           headers). NLR via setjmp, no computed goto (chibil can't emit goto *ptr). -->
+      <MpyInc Include="$(MpyPort);$(MpyRoot);$(MpyPort)\build;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\obj\include;$(MuslRoot)\include" />
+      <!-- Fuller musl include set for the PAL shim (it pulls musl-internal headers). -->
+      <ShimInc Include="$(BuildInfra)\musl-compat;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\src\include;$(MuslRoot)\src\internal;$(MuslRoot)\include;$(MuslRoot)\obj\include" />
+    </ItemGroup>
+
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="@(MpySrc)"
+                   SourceRoot="$(MpyRoot)"
+                   OutputDir="$(MpyOut)\obj"
+                   IncludeDirs="@(MpyInc)"
+                   Defines="MICROPY_ROM_TEXT_COMPRESSION=1;MICROPY_NLR_SETJMP=1;MICROPY_OPT_COMPUTED_GOTO=0"
+                   ForceInclude="$(MpyPort)\chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="MpyObj" />
+    </ChibilCompile>
+
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(BuildInfra)\musl-compat\pal-shim.c"
+                   OutputDir="$(MpyOut)\obj"
+                   IncludeDirs="@(ShimInc)"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="ShimObj" />
+    </ChibilCompile>
+
+    <ItemGroup>
+      <MuslObj Include="$(MuslObjDir)\*.obj" Exclude="$(MuslObjDir)\*oldmalloc*" />
+    </ItemGroup>
+
+    <!-- Runnable (no -shared): main is the entry point. -->
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)"
+                Output="$(MpyDll)"
+                Debug="true"
+                Objects="@(MpyObj);@(MuslObj);@(ShimObj)"
+                Binds="__chibil_syscall=Chibil.Pal.Syscall;__chibil_get_tp=Chibil.Pal.GetTp"
+                References="$(ChibilPalDll)" />
+
+    <Copy SourceFiles="$(ChibilPalDll)" DestinationFiles="$(MpyOut)\Chibil.Pal.dll" />
+    <Message Importance="high" Text="micropython.dll -> $(MpyDll) (managed musl + PAL, no native libc)" />
+  </Target>
+
+  <!-- Run a short Python program through the REPL (stdin via the PAL's SYS_read) and
+       assert the output. Proves MicroPython runs on managed musl with zero native deps.
+       The minimal port's UART stdin stub never reports EOF (it's written for an embedded
+       UART), so a piped script that just ends would leave the REPL spinning on read()==0;
+       end with `raise SystemExit` to stop pyexec cleanly. Timeout is a hang backstop. -->
+  <Target Name="Run" DependsOnTargets="Build">
+    <WriteLinesToFile File="$(MpyOut)\smoke.py" Overwrite="true"
+                      Lines="print(40 + 2)%0Aprint(sorted([3, 1, 2]))%0Aprint('MPY-MANAGED-OK')%0Araise SystemExit" />
+    <Exec Command="dotnet &quot;$(MpyDll)&quot; &lt; &quot;$(MpyOut)\smoke.py&quot;"
+          ConsoleToMSBuild="true" IgnoreExitCode="true" Timeout="60000">
+      <Output TaskParameter="ConsoleOutput" ItemName="_MpyRunOut" />
+    </Exec>
+    <PropertyGroup>
+      <_MpyOut>@(_MpyRunOut)</_MpyOut>
+    </PropertyGroup>
+    <Error Condition="!$([System.String]::Copy('$(_MpyOut)').Contains('MPY-MANAGED-OK'))"
+           Text="MicroPython run FAILED. Output: $(_MpyOut)" />
+    <Message Importance="high" Text="MICROPYTHON OK: print(40+2)=42, sorted([3,1,2])=[1,2,3] on managed musl (no native libc)" />
+  </Target>
+</Project>

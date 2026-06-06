@@ -4,6 +4,7 @@
     .proj UsingTask the freshly-built Chibil.Build.Tasks.dll, so it must exist before
     those projects load - a separate MSBuild invocation guarantees that).
       dotnet build build.proj -t:QuickJs     (default; builds qjs.dll + runs oracle)
+      dotnet build build.proj -t:MicroPython (builds micropython.dll + runs Python)
       dotnet build build.proj -t:Test        (managed musl/PAL regression suite)
       dotnet build build.proj -t:ManagedMusl (just the musl object set)
       dotnet build build.proj -t:Tools       (just the toolchain)
@@ -30,6 +31,13 @@
 
   <Target Name="QuickJs" DependsOnTargets="ManagedMusl">
     <MSBuild Projects="targets\quickjs\QuickJsManaged.proj" Targets="Oracle" />
+  </Target>
+
+  <!-- MicroPython on managed musl (runnable). Requires the native MicroPython build
+       to have generated its headers/.o tree once:
+         wsl bash -c "cd targets/micropython/ports/minimal && make" -->
+  <Target Name="MicroPython" DependsOnTargets="ManagedMusl">
+    <MSBuild Projects="targets\micropython-managed\MicroPythonManaged.proj" Targets="Run" />
   </Target>
 
   <!-- Cross-platform regression suite for the managed musl + PAL: the 5 layer
