@@ -17,11 +17,12 @@ public class Parser
     private int _staticLocalScope;
     private Node _gotos;
     private Node _labels;
-    private string _brkLabel;
-    private string _contLabel;
+    private int _brkLabel;
+    private int _contLabel;
     private Node _currentSwitch;
     private Obj _builtinAlloca;
     private int _uniqueId;
+    private int _labelCount;
     private Dictionary<string, bool> _typenameMap;
     private readonly Tokenizer _tokenizer;
     private readonly CompilerOptions _options;
@@ -46,8 +47,20 @@ public class Parser
     {
         string name = Util.GetTokenText(tok);
         for (Scope sc = _scope; sc != null; sc = sc.Next)
+        {
             if (sc.Vars.TryGetValue(name, out VarScope vs))
                 return vs;
+
+            if (sc.Next?.Next == null
+                && _currentFn != null
+                && name is "__func__" or "__FUNCTION__")
+            {
+                byte[] nameBytesWithNul = new byte[Encoding.UTF8.GetByteCount(_currentFn.Name) + 1];
+                Encoding.UTF8.GetBytes(_currentFn.Name, nameBytesWithNul);
+                return sc.Vars[name] = new VarScope { Var = NewStringLiteral(nameBytesWithNul, TypeSystem.ArrayOf(_types.TyChar, nameBytesWithNul.Length)) };
+            }
+        }
+
         return null;
     }
 
@@ -85,7 +98,8 @@ public class Parser
     private static Node NewVarNode(Obj var, Token tok) => new() { Kind = NodeKind.Var, Var = var, Tok = tok };
     private static Node NewVlaPtr(Obj var, Token tok) => new() { Kind = NodeKind.VlaPtr, Var = var, Tok = tok };
 
-    private string NewUniqueName() => $".L..{_uniqueId++}";
+    private const int NoLabel = 0;
+    private int NewLabelId() => ++_labelCount;
     private string GetIdent(Token tok) { if (tok.Kind != TokenKind.Ident) Util.ErrorTok(tok, "expected an identifier"); return Util.GetTokenText(tok); }
 
     // ═══════════════════════════════════════════════════════════════
@@ -767,9 +781,9 @@ public class Parser
     // ═══════════════════════════════════════════════════════════════
 
     // C's eval(node) passes NULL for label → labels not allowed
-    private long Eval(Node node) => Eval2(node, out Unsafe.NullRef<Func<string>>());
+    private long Eval(Node node) => Eval2(node, out Unsafe.NullRef<string>());
 
-    private long Eval2(Node node, out Func<string> label)
+    private long Eval2(Node node, out string label)
     {
         Unsafe.SkipInit(out label);
         _types.AddType(node);
@@ -823,9 +837,6 @@ public class Parser
                 return val;
             }
             case NodeKind.Addr: return EvalRval(node.Lhs, out label);
-            case NodeKind.LabelVal:
-                label = () => node.UniqueLabel;
-                return 0;
             case NodeKind.Member:
                 if (Unsafe.IsNullRef(ref label)) Util.ErrorTok(node.Tok, "not a compile-time constant");
                 if (node.Ty.Kind != TypeKind.Array) Util.ErrorTok(node.Tok, "invalid initializer");
@@ -833,7 +844,7 @@ public class Parser
             case NodeKind.Var:
                 if (Unsafe.IsNullRef(ref label)) Util.ErrorTok(node.Tok, "not a compile-time constant");
                 if (node.Var.Ty.Kind != TypeKind.Array && node.Var.Ty.Kind != TypeKind.Func) Util.ErrorTok(node.Tok, "invalid initializer");
-                { Obj v = node.Var; label = () => v.Name; }
+                label = node.Var.Name;
                 return 0;
             case NodeKind.Deref:
                 // Array subscript on global: *(arr + i) where result is array type (decays to pointer)
@@ -848,22 +859,20 @@ public class Parser
         return 0;
     }
 
-    private long EvalRval(Node node, out Func<string> label)
+    private long EvalRval(Node node, out string label)
     {
-        // `label` may be a null-ref sink (when reached via Eval, e.g. through a
-        // pointer-difference Div/Sub): writing to it would NRE. The offsetof idiom
-        // `&((T*)0)->m - (char*)0` is a pure constant (null base, no symbol), so it
-        // never needs a label and evaluates fine; a real symbol address does.
         Unsafe.SkipInit(out label);
-        if (!Unsafe.IsNullRef(ref label)) label = null;
         switch (node.Kind)
         {
             case NodeKind.Var:
                 if (node.Var.IsLocal) Util.ErrorTok(node.Tok, "not a compile-time constant");
                 // A symbol address is a relocation, not a pure integer constant: if the
-                // caller cannot receive a label, this is not a compile-time constant.
+                // caller cannot receive a label (a null-ref sink, e.g. reached via a
+                // pointer-difference Div/Sub), this is not a compile-time constant. The
+                // offsetof idiom `&((T*)0)->m - (char*)0` never reaches here (null base,
+                // no symbol); a real symbol address does.
                 if (Unsafe.IsNullRef(ref label)) Util.ErrorTok(node.Tok, "not a compile-time constant");
-                { Obj v = node.Var; label = () => v.Name; }
+                label = node.Var.Name;
                 return 0;
             case NodeKind.Deref: return Eval2(node.Lhs, out label);
             case NodeKind.Member: return EvalRval(node.Lhs, out label) + node.Member.Offset;
@@ -1104,7 +1113,7 @@ public class Parser
             cur = cur.Next = NewUnary(NodeKind.ExprStmt, NewBinary(NodeKind.Assign, NewVarNode(val, tok), binary.Rhs, tok), tok);
             cur = cur.Next = NewUnary(NodeKind.ExprStmt, NewBinary(NodeKind.Assign, NewVarNode(old, tok), NewUnary(NodeKind.Deref, NewVarNode(addr, tok), tok), tok), tok);
             var loop = NewNode(NodeKind.Do, tok);
-            loop.BrkLabel = NewUniqueName(); loop.ContLabel = NewUniqueName();
+            loop.BrkLabelId = NewLabelId(); loop.ContLabelId = NewLabelId();
             Node body = NewBinary(NodeKind.Assign, NewVarNode(@new, tok), NewBinary(binary.Kind, NewVarNode(old, tok), NewVarNode(val, tok), tok), tok);
             loop.Then = NewNode(NodeKind.Block, tok); loop.Then.Body = NewUnary(NodeKind.ExprStmt, body, tok);
             var cas = NewNode(NodeKind.Cas, tok);
@@ -1131,7 +1140,6 @@ public class Parser
         if (Util.Equal(tok, "~")) return NewUnary(NodeKind.BitNot, CastExpr(ref rest, tok.Next), tok);
         if (Util.Equal(tok, "++")) return ToAssign(NewAdd(Unary(ref rest, tok.Next), NewNum(1, tok), tok));
         if (Util.Equal(tok, "--")) return ToAssign(NewSub(Unary(ref rest, tok.Next), NewNum(1, tok), tok));
-        if (Util.Equal(tok, "&&")) { var node = NewNode(NodeKind.LabelVal, tok); node.Label = GetIdent(tok.Next); node.GotoNext = _gotos; _gotos = node; rest = tok.Next.Next; return node; }
         return Postfix(ref rest, tok);
     }
 
@@ -1313,7 +1321,7 @@ public class Parser
             var node = NewNode(NodeKind.Switch, tok);
             tok = Util.Skip(tok.Next, "("); node.Cond = Expr(ref tok, tok); tok = Util.Skip(tok, ")");
             Node sw = _currentSwitch; _currentSwitch = node;
-            string brk = _brkLabel; _brkLabel = node.BrkLabel = NewUniqueName();
+            int brk = _brkLabel; _brkLabel = node.BrkLabelId = NewLabelId();
             node.Then = Stmt(ref rest, tok);
             _currentSwitch = sw; _brkLabel = brk; return node;
         }
@@ -1325,22 +1333,22 @@ public class Parser
             long end;
             if (Util.Equal(tok, "...")) { end = ConstExpr(ref tok, tok.Next); if (end < begin) Util.ErrorTok(tok, "empty case range specified"); }
             else end = begin;
-            tok = Util.Skip(tok, ":"); node.Label = NewUniqueName(); node.Lhs = Stmt(ref rest, tok);
+            tok = Util.Skip(tok, ":"); node.LabelId = NewLabelId(); node.Lhs = Stmt(ref rest, tok);
             node.Begin = begin; node.End = end; node.CaseNext = _currentSwitch.CaseNext; _currentSwitch.CaseNext = node; return node;
         }
         if (Util.Equal(tok, "default"))
         {
             if (_currentSwitch == null) Util.ErrorTok(tok, "stray default");
             var node = NewNode(NodeKind.Case, tok); tok = Util.Skip(tok.Next, ":");
-            node.Label = NewUniqueName(); node.Lhs = Stmt(ref rest, tok); _currentSwitch.DefaultCase = node; return node;
+            node.LabelId = NewLabelId(); node.Lhs = Stmt(ref rest, tok); _currentSwitch.DefaultCase = node; return node;
         }
         if (Util.Equal(tok, "for"))
         {
             var node = NewNode(NodeKind.For, tok); tok = Util.Skip(tok.Next, "(");
             EnterScope();
             node.ScopeId = _scope.ScopeIndex;   // the for-loop's lexical scope (holds the init declaration)
-            string brk = _brkLabel, cont = _contLabel;
-            _brkLabel = node.BrkLabel = NewUniqueName(); _contLabel = node.ContLabel = NewUniqueName();
+            int brk = _brkLabel, cont = _contLabel;
+            _brkLabel = node.BrkLabelId = NewLabelId(); _contLabel = node.ContLabelId = NewLabelId();
             if (IsTypename(tok)) { CType basety = Declspec(ref tok, tok, null); node.Init = Declaration(ref tok, tok, basety, null); }
             else node.Init = ExprStmt(ref tok, tok);
             if (!Util.Equal(tok, ";")) node.Cond = Expr(ref tok, tok);
@@ -1352,16 +1360,16 @@ public class Parser
         if (Util.Equal(tok, "while"))
         {
             var node = NewNode(NodeKind.For, tok); tok = Util.Skip(tok.Next, "(");
-            string brk = _brkLabel, cont = _contLabel;
-            _brkLabel = node.BrkLabel = NewUniqueName(); _contLabel = node.ContLabel = NewUniqueName();
+            int brk = _brkLabel, cont = _contLabel;
+            _brkLabel = node.BrkLabelId = NewLabelId(); _contLabel = node.ContLabelId = NewLabelId();
             node.Cond = Expr(ref tok, tok); tok = Util.Skip(tok, ")"); node.Then = Stmt(ref rest, tok);
             _brkLabel = brk; _contLabel = cont; return node;
         }
         if (Util.Equal(tok, "do"))
         {
             var node = NewNode(NodeKind.Do, tok);
-            string brk = _brkLabel, cont = _contLabel;
-            _brkLabel = node.BrkLabel = NewUniqueName(); _contLabel = node.ContLabel = NewUniqueName();
+            int brk = _brkLabel, cont = _contLabel;
+            _brkLabel = node.BrkLabelId = NewLabelId(); _contLabel = node.ContLabelId = NewLabelId();
             node.Then = Stmt(ref tok, tok.Next);
             _brkLabel = brk; _contLabel = cont;
             tok = Util.Skip(tok, "while"); tok = Util.Skip(tok, "("); node.Cond = Expr(ref tok, tok);
@@ -1370,16 +1378,15 @@ public class Parser
         if (Util.Equal(tok, "asm")) return AsmStmt(ref rest, tok);
         if (Util.Equal(tok, "goto"))
         {
-            if (Util.Equal(tok.Next, "*")) { var node = NewNode(NodeKind.GotoExpr, tok); node.Lhs = Expr(ref tok, tok.Next.Next); rest = Util.Skip(tok, ";"); return node; }
             var gn = NewNode(NodeKind.Goto, tok); gn.Label = GetIdent(tok.Next); gn.GotoNext = _gotos; _gotos = gn;
             rest = Util.Skip(tok.Next.Next, ";"); return gn;
         }
-        if (Util.Equal(tok, "break")) { if (_brkLabel == null) Util.ErrorTok(tok, "stray break"); var node = NewNode(NodeKind.Goto, tok); node.UniqueLabel = _brkLabel; rest = Util.Skip(tok.Next, ";"); return node; }
-        if (Util.Equal(tok, "continue")) { if (_contLabel == null) Util.ErrorTok(tok, "stray continue"); var node = NewNode(NodeKind.Goto, tok); node.UniqueLabel = _contLabel; rest = Util.Skip(tok.Next, ";"); return node; }
+        if (Util.Equal(tok, "break")) { if (_brkLabel == NoLabel) Util.ErrorTok(tok, "stray break"); var node = NewNode(NodeKind.Goto, tok); node.LabelId = _brkLabel; rest = Util.Skip(tok.Next, ";"); return node; }
+        if (Util.Equal(tok, "continue")) { if (_contLabel == NoLabel) Util.ErrorTok(tok, "stray continue"); var node = NewNode(NodeKind.Goto, tok); node.LabelId = _contLabel; rest = Util.Skip(tok.Next, ";"); return node; }
         if (tok.Kind == TokenKind.Ident && Util.Equal(tok.Next, ":"))
         {
             var node = NewNode(NodeKind.Label, tok); node.Label = Util.GetTokenText(tok);
-            node.UniqueLabel = NewUniqueName(); node.Lhs = Stmt(ref rest, tok.Next.Next);
+            node.LabelId = NewLabelId(); node.Lhs = Stmt(ref rest, tok.Next.Next);
             node.GotoNext = _labels; _labels = node; return node;
         }
         if (Util.Equal(tok, "{")) return CompoundStmt(ref rest, tok.Next);
@@ -1807,7 +1814,7 @@ public class Parser
             return cur;
         }
 
-        long val = Eval2(init.Expr, out Func<string> label);
+        long val = Eval2(init.Expr, out string label);
         if (label == null) { Util.WriteBuf(buf, offset, val, ty.Size); return cur; }
         var rel = new Relocation { Offset = offset, Label = label, Addend = val };
         cur.Next = rel; return cur.Next;
@@ -1886,8 +1893,8 @@ public class Parser
         for (Node x = _gotos; x != null; x = x.GotoNext)
         {
             for (Node y = _labels; y != null; y = y.GotoNext)
-                if (x.Label == y.Label) { x.UniqueLabel = y.UniqueLabel; break; }
-            if (x.UniqueLabel == null) Util.ErrorTok(x.Tok.Next, "use of undeclared label");
+                if (x.Label == y.Label) { x.LabelId = y.LabelId; break; }
+            if (x.LabelId == NoLabel) Util.ErrorTok(x.Tok.Next, "use of undeclared label");
         }
         _gotos = _labels = null;
     }
@@ -1986,7 +1993,7 @@ public class Parser
         // declarator was a function prototype, not a definition. Register the
         // remaining declarators (function prototypes or globals) and finish at ';'.
         if (Util.Equal(tok, ",")) return FunctionDeclaratorTail(tok, basety, attr);
-        _currentFn = fn; _locals = null; _staticLocalScope = 0; EnterScope();
+        _currentFn = fn; _locals = null; _staticLocalScope = 0; _brkLabel = _contLabel = NoLabel; _labelCount = 0; EnterScope();
         CreateParamLvars(ty.Params);
         fn.Params = _locals;
         // A real C variadic function ("int f(int a, ...)") has an explicit
@@ -1995,17 +2002,11 @@ public class Parser
         // The K&R unprototyped case ("int f()") also sets IsVariadic but has
         // Params == null; that is a different mechanism and must NOT get a
         // hidden param.
-        if (ty.IsVariadic && ty.Params != null)
             fn.VaPtr = AddHiddenParam(fn, "__va", _types.TyVaList);
         fn.AllocaBottom = NewLvar("__alloca_size__", _types.PointerTo(_types.TyChar));
         tok = Util.Skip(tok, "{");
-        byte[] nameBytes = Encoding.UTF8.GetBytes(fn.Name);
-        byte[] nameBytesNul = new byte[nameBytes.Length + 1];
-        Array.Copy(nameBytes, nameBytesNul, nameBytes.Length);
-        PushScope("__func__").Var = NewStringLiteral(nameBytesNul, TypeSystem.ArrayOf(_types.TyChar, nameBytes.Length + 1));
-        PushScope("__FUNCTION__").Var = NewStringLiteral(nameBytesNul, TypeSystem.ArrayOf(_types.TyChar, nameBytes.Length + 1));
         fn.Body = CompoundStmt(ref tok, tok);
-        fn.Locals = _locals; LeaveScope(); ResolveGotoLabels();
+        fn.Locals = _locals; LeaveScope(); ResolveGotoLabels(); fn.LabelCount = _labelCount; _currentFn = null;
         return tok;
     }
 

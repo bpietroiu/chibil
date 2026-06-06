@@ -78,6 +78,30 @@ public class AuditBugTests : ChibiTestBase
     }
 
     [Fact]
+    public void LabelsAsValuesRejected()
+    {
+        CompileExpectingError("""
+            int main() {
+            label:
+                return &&label != 0;
+            }
+            """)
+        .AssertErrorContains("expected an expression");
+    }
+
+    [Fact]
+    public void ComputedGotoRejected()
+    {
+        CompileExpectingError("""
+            int main() {
+                void *p = 0;
+                goto *p;
+            }
+            """)
+        .AssertErrorContains("expected an identifier");
+    }
+
+    [Fact]
     public void CastToVoid()
     {
         Compile("""
@@ -178,5 +202,88 @@ public class AuditBugTests : ChibiTestBase
             }
             int main() { return 0; }
             """);
+    }
+
+    [Fact]
+    public void NestedStructMemberAssignment()
+    {
+        Compile("""
+            struct Outer {
+                struct {
+                    int x;
+                    int y;
+                } inner;
+            };
+
+            int main(void) {
+                struct Outer a;
+                struct Outer b;
+                a.inner.x = 1;
+                a.inner.y = 2;
+                b.inner = a.inner;
+                return b.inner.x + b.inner.y;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 3);
+    }
+
+    [Fact]
+    public void NestedStructMemberAssignmentAfterForwardTypeRef()
+    {
+        Compile("""
+            struct inner;
+            struct inner *extern_ref(struct inner *p) { return p; }
+
+            struct Outer {
+                struct {
+                    int x;
+                    int y;
+                } inner;
+            };
+
+            int main(void) {
+                struct Outer a;
+                struct Outer b;
+                extern_ref(0);
+                a.inner.x = 1;
+                a.inner.y = 2;
+                b.inner = a.inner;
+                return b.inner.x + b.inner.y;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 3);
+    }
+
+    [Fact]
+    public void FuncAndFunctionTest()
+    {
+        Compile("""
+            char* f1() {
+                return __func__;
+            }
+
+            char* f2() {
+                return __FUNCTION__;
+            }
+
+            int main(void) {
+                char* r1 = f1();
+                char* r2 = f2();
+                if (r1[0] != 'f' || r1[1] != '1' || r1[2] != 0
+                  || r2[0] != 'f' || r2[1] != '2' || r2[2] != 0)
+                {
+                    return 99;
+                }
+
+                if (sizeof(__func__) != 5)
+                    return 98;
+
+                return 100;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 100);
     }
 }

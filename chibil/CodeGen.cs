@@ -53,6 +53,8 @@ public class CodeGen
 
     // Lazy TypeRef handles (created on first use), keyed by type name (without namespace)
     private readonly Dictionary<string, TypeReferenceHandle> _lazyTypeRefs = new();
+    // Lazy MemberRef handles (created on first use), keyed by "TypeName.MemberName"
+    private readonly Dictionary<string, MemberReferenceHandle> _lazyMemberRefs = new();
 
     // Metadata row tracking
     private int _nextFieldRow = 1, _nextMethodRow = 1, _nextParamRow = 1;
@@ -86,10 +88,8 @@ public class CodeGen
     private readonly Dictionary<string, FieldDefinitionHandle> _unepFields = new();
 
     // __CxxPureMSILEntry state
-    private MethodDefinitionHandle _mainMethod;
     private Obj _mainObj;
     private MethodDefinitionHandle _cxxPureMsilEntry;
-    private bool _hasMain;
 
     // Architecture helpers derived from DataModel
     private int PtrSize => _dm.PointerSize;
@@ -142,9 +142,7 @@ public class CodeGen
     private readonly List<(LabelHandle tramp, LabelHandle target)> _setjmpLeaveTrampolines = new();
     private readonly Dictionary<string, MemberReferenceHandle> _runtimeHelperRefs = new();
     private int _maxStack, _stackDepth;
-    private Dictionary<string, LabelHandle> _labels;
-    private int _labelCount;
-    private StandaloneSignatureHandle _localsSigHandle;
+    private LabelHandle[] _labels;
 
     public CodeGen(CompilerOptions options, Tokenizer tokenizer, TypeSystem types)
     {
@@ -153,8 +151,6 @@ public class CodeGen
         _types = types;
         _dm = options.DataModel;
     }
-
-    private int Count() => _labelCount++;
 
     // ═══════════════════════════════════════════════════════════════
     //  Stack tracking
@@ -190,6 +186,16 @@ public class CodeGen
     private TypeReferenceHandle GetNativeCppClassAttrRef() => GetLazyTypeRef("System.Runtime.CompilerServices", "NativeCppClassAttribute");
     private TypeReferenceHandle GetValueTypeRef() => GetLazyTypeRef("System", "ValueType");
     private TypeReferenceHandle GetInterlockedRef() => GetLazyTypeRef("System.Threading", "Interlocked");
+
+    private MemberReferenceHandle GetLazyMemberRef(string key, EntityHandle parent, string memberName, Func<BlobBuilder> buildSignature)
+    {
+        if (!_lazyMemberRefs.TryGetValue(key, out var handle))
+        {
+            handle = _md.AddMemberReference(parent, _md.GetOrAddString(memberName), _md.GetOrAddBlob(buildSignature()));
+            _lazyMemberRefs[key] = handle;
+        }
+        return handle;
+    }
 
     // ═══════════════════════════════════════════════════════════════
     //  Type encoding: CType → MSIL signature bytes
@@ -303,17 +309,9 @@ public class CodeGen
                 {
                     // Fixed-size array → ValueType of array TypeDef
                     string arrayName = NameMangler.MangleArrayTypeName(_types, ty);
-                    if (_arrayTypeDefs.TryGetValue(arrayName, out var arrayTd))
-                    {
-                        sig.WriteByte((byte)(SignatureTypeCode)0x11);
-                        sig.WriteCompressedInteger(CodedIndex.TypeDefOrRefOrSpec(arrayTd));
-                    }
-                    else
-                    {
-                        // Shouldn't happen if PreAllocate ran correctly
-                        sig.WriteByte((byte)SignatureTypeCode.Pointer);
-                        EncodeType(sig, ty.Base);
-                    }
+                    TypeDefinitionHandle arrayTd = _arrayTypeDefs[arrayName];
+                    sig.WriteByte((byte)(SignatureTypeCode)0x11);
+                    sig.WriteCompressedInteger(CodedIndex.TypeDefOrRefOrSpec(arrayTd));
                 }
                 break;
             case TypeKind.Struct:
@@ -324,24 +322,21 @@ public class CodeGen
                 if (canonical.IsNestedMember)
                     throw new InvalidOperationException(
                         $"Internal error: nested member type '{_types.GetStructName(canonical)}' reached signature encoding (in function '{_currentFn?.Name}')");
-                int typeId = _types.GetTypeId(ty);
-                if (_structTypeDefs.TryGetValue(typeId, out var structTd))
+                EntityHandle structHandle = GetStructTypeHandle(ty);
+                if (structHandle.IsNil)
                 {
-                    sig.WriteByte((byte)(SignatureTypeCode)0x11);
-                    sig.WriteCompressedInteger(CodedIndex.TypeDefOrRefOrSpec(structTd));
-                }
-                else
-                {
-                    // Forward-declared struct → TypeRef
+                    // Forward-declared struct in a signature.
                     string name = _types.GetStructName(ty);
                     if (!_forwardDeclTypeRefs.TryGetValue(name, out var typeRef))
                     {
                         typeRef = _md.AddTypeReference(default, default, _md.GetOrAddString(name));
                         _forwardDeclTypeRefs[name] = typeRef;
                     }
-                    sig.WriteByte((byte)(SignatureTypeCode)0x11);
-                    sig.WriteCompressedInteger(CodedIndex.TypeDefOrRefOrSpec(typeRef));
+                    structHandle = typeRef;
                 }
+
+                sig.WriteByte((byte)(SignatureTypeCode)0x11);
+                sig.WriteCompressedInteger(CodedIndex.TypeDefOrRefOrSpec(structHandle));
                 break;
             }
             case TypeKind.Func:
@@ -357,9 +352,7 @@ public class CodeGen
                 EncodeType(sig, ty.Base);
                 break;
             default:
-                // Native int for anything else (shouldn't happen)
-                sig.WriteByte((byte)SignatureTypeCode.IntPtr);
-                break;
+                throw new InvalidOperationException("Internal error");
         }
     }
 
@@ -380,7 +373,12 @@ public class CodeGen
                 CallConv.Stdcall => (byte)SignatureCallingConvention.StdCall,
                 _ => (byte)SignatureCallingConvention.CDecl,
             });
-        sig.WriteByte(conv);
+        EncodeFunctionSignature(sig, funcTy, conv);
+    }
+
+    private void EncodeFunctionSignature(BlobBuilder sig, CType funcTy, byte callConv = 0)
+    {
+        sig.WriteByte(callConv);
 
         // Count parameters
         int paramCount = 0;
@@ -395,25 +393,22 @@ public class CodeGen
             EncodeType(sig, p);
     }
 
-    /// <summary>Encode the return type for a function, with modopt(CallConvCdecl) for cdecl.</summary>
+    /// <summary>Encode the return type for a function, with modopt(CallConvCdecl) for unmanaged calling conventions.</summary>
     private void EncodeReturnType(BlobBuilder sig, CType funcTy)
     {
-        // For cdecl functions: modopt(CallConvCdecl) on return type
-        if (funcTy.CallConv == CallConv.Cdecl)
+        if (funcTy.CallConv != CallConv.Clrcall)
         {
             sig.WriteByte((byte)SignatureTypeCode.OptionalModifier);
-            sig.WriteCompressedInteger(CodedIndex.TypeDefOrRefOrSpec(GetCallConvCdeclRef()));
-        }
-        else if (funcTy.CallConv == CallConv.Stdcall)
-        {
-            sig.WriteByte((byte)SignatureTypeCode.OptionalModifier);
-            sig.WriteCompressedInteger(CodedIndex.TypeDefOrRefOrSpec(GetCallConvStdcallRef()));
+            sig.WriteCompressedInteger(CodedIndex.TypeDefOrRefOrSpec(funcTy.CallConv switch
+            {
+                CallConv.Cdecl => GetCallConvCdeclRef(),
+                CallConv.Stdcall => GetCallConvStdcallRef(),
+                _ => throw new UnreachableException()
+            }
+            ));
         }
 
-        if (funcTy.ReturnTy.Kind == TypeKind.Void)
-            sig.WriteByte((byte)SignatureTypeCode.Void);
-        else
-            EncodeType(sig, funcTy.ReturnTy);
+        EncodeType(sig, funcTy.ReturnTy);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -617,7 +612,7 @@ public class CodeGen
     private void RegisterFunction(Obj fn)
     {
         CType funcTy = fn.Ty;
-        bool isCdecl = funcTy.CallConv != CallConv.Clrcall;
+        bool isUnmanaged = funcTy.CallConv != CallConv.Clrcall;
 
         // Build method signature
         var sig = new BlobBuilder();
@@ -644,7 +639,7 @@ public class CodeGen
 
         // Method attributes
         MethodAttributes attrs = MethodAttributes.Assembly | MethodAttributes.Static;
-        if (isCdecl && !fn.IsStatic)
+        if (isUnmanaged && !fn.IsStatic)
             attrs |= (MethodAttributes)0x0008; // UnmanagedExport
 
         var methodDef = _md.AddMethodDefinition(
@@ -684,10 +679,26 @@ public class CodeGen
         // .text$mn.
         if (fn.Name == "main" && _options.Target == TargetProfile.Ijw)
         {
-            _hasMain = true;
-            _mainMethod = methodDef;
             _mainObj = fn;
             RegisterCxxPureMSILEntry(fn);
+        }
+    }
+
+    private EntityHandle GetFunctionToken(Obj fn)
+    {
+        if (_methodDefs.TryGetValue(fn, out var methodDef))
+        {
+            return methodDef;
+        }
+        else if (_externalFuncRefs.TryGetValue(fn.Name, out var memberRef))
+        {
+            return memberRef;
+        }
+        else
+        {
+            // Register on the fly (might be a forward reference)
+            RegisterExternalFunction(fn);
+            return _externalFuncRefs[fn.Name];
         }
     }
 
@@ -837,13 +848,15 @@ public class CodeGen
         var decoratedNameRef = GetLazyTypeRef("System.Runtime.CompilerServices", "DecoratedNameAttribute");
 
         // MemberRef for .ctor(string)
-        var ctorSig = new BlobBuilder();
-        ctorSig.WriteByte(0x20); // HASTHIS
-        ctorSig.WriteCompressedInteger(1); // 1 param
-        ctorSig.WriteByte((byte)SignatureTypeCode.Void); // return void
-        ctorSig.WriteByte((byte)SignatureTypeCode.String); // param: string
-
-        var ctorRef = _md.AddMemberReference(decoratedNameRef, _md.GetOrAddString(".ctor"), _md.GetOrAddBlob(ctorSig));
+        var ctorRef = GetLazyMemberRef("DecoratedNameAttribute..ctor", decoratedNameRef, ".ctor", () =>
+        {
+            var ctorSig = new BlobBuilder();
+            ctorSig.WriteByte(0x20); // HASTHIS
+            ctorSig.WriteCompressedInteger(1); // 1 param
+            ctorSig.WriteByte((byte)SignatureTypeCode.Void); // return void
+            ctorSig.WriteByte((byte)SignatureTypeCode.String); // param: string
+            return ctorSig;
+        });
 
         _md.AddCustomAttribute(target, ctorRef, _md.GetOrAddBlob(attrBlob));
     }
@@ -940,10 +953,7 @@ public class CodeGen
             _md.GetOrAddString(fieldName), _md.GetOrAddBlob(fieldSig));
         _nextFieldRow++;
 
-        // FieldRVA table entry required when HasFieldRVA is set.
-        // Actual RVA is 0 — resolved via COFF relocations at link time.
-        if ((fieldAttrs & FieldAttributes.HasFieldRVA) != 0)
-            _md.AddFieldRelativeVirtualAddress(fieldDef, 0);
+        _md.AddFieldRelativeVirtualAddress(fieldDef, 0);
 
         _fieldDefs[g] = fieldDef;
         _globalFieldsByName[g.Name] = fieldDef;
@@ -1084,12 +1094,14 @@ public class CodeGen
         var attrRef = GetNativeCppClassAttrRef();
 
         // MemberRef for .ctor()
-        var ctorSig = new BlobBuilder();
-        ctorSig.WriteByte(0x20); // HASTHIS
-        ctorSig.WriteCompressedInteger(0);
-        ctorSig.WriteByte((byte)SignatureTypeCode.Void);
-
-        var ctorRef = _md.AddMemberReference(attrRef, _md.GetOrAddString(".ctor"), _md.GetOrAddBlob(ctorSig));
+        var ctorRef = GetLazyMemberRef("NativeCppClassAttribute..ctor", attrRef, ".ctor", () =>
+        {
+            var ctorSig = new BlobBuilder();
+            ctorSig.WriteByte(0x20); // HASTHIS
+            ctorSig.WriteCompressedInteger(0);
+            ctorSig.WriteByte((byte)SignatureTypeCode.Void);
+            return ctorSig;
+        });
 
         var attrBlob = new BlobBuilder();
         attrBlob.WriteUInt16(0x0001); // Prolog
@@ -1138,8 +1150,9 @@ public class CodeGen
         _vaArgApLocal = -1;
         _maxStack = 0;
         _stackDepth = 0;
-        _labels = new Dictionary<string, LabelHandle>();
-        _labelCount = 0;
+        _labels = new LabelHandle[fn.LabelCount];
+        for (int i = 0; i < _labels.Length; i++)
+            _labels[i] = _enc.DefineLabel();
 
         // Assign parameter slots
         int argIdx = 0;
@@ -1169,10 +1182,6 @@ public class CodeGen
         {
             GenStmt(fn.Body);
 
-            // Epilogue — fallthrough return
-            if (_labels.TryGetValue($".L.return.{fn.Name}", out var retLabel))
-                _enc.MarkLabel(retLabel);
-
             if (fn.Ty.ReturnTy.Kind != TypeKind.Void)
             {
                 EmitDefaultValue(fn.Ty.ReturnTy);
@@ -1201,7 +1210,6 @@ public class CodeGen
 
             localsSig = _md.AddStandaloneSignature(_md.GetOrAddBlob(localsSigBlob));
         }
-        _localsSigHandle = localsSig;
 
         // Build CodeView local slot info
         var localSlotList = new List<CodeViewManSlot>();
@@ -1254,7 +1262,10 @@ public class CodeGen
             _dbgMethods.Add((MetadataTokens.GetRowNumber(methodDef), ilSize, pts, scopes));
 
         _currentFn = null;
+        _labels = null;
     }
+
+    private LabelHandle GetLabel(int label) => _labels[label - 1];
 
     private void EncodeLocalType(SignatureTypeEncoder enc, CType ty)
     {
@@ -1291,10 +1302,6 @@ public class CodeGen
         int typeId = _types.GetTypeId(ty);
         if (_structTypeDefs.TryGetValue(typeId, out var handle))
             return handle;
-        // Forward-declared
-        string name = _types.GetStructName(ty);
-        if (_forwardDeclTypeRefs.TryGetValue(name, out var typeRef))
-            return typeRef;
         return default;
     }
 
@@ -1590,7 +1597,7 @@ public class CodeGen
                 if (node.Var.IsFunction || node.Var.Ty.Kind == TypeKind.Func)
                 {
                     // &func — emit function address (same as GenExpr Var for functions)
-                    EmitFunctionAddress(node.Var, node.Tok);
+                    EmitFunctionAddress(node.Var);
                     return;
                 }
                 if (node.Var.IsLocal)
@@ -1874,7 +1881,7 @@ public class CodeGen
         ty.Kind == TypeKind.Struct || ty.Kind == TypeKind.Union || ty.Kind == TypeKind.Array;
 
     /// <summary>Push a callable function address onto the evaluation stack.</summary>
-    private void EmitFunctionAddress(Obj fn, Token tok = null)
+    private void EmitFunctionAddress(Obj fn)
     {
         CType funcTy = fn.Ty;
         if (_options.Target == TargetProfile.CoreClr)
@@ -1896,26 +1903,14 @@ public class CodeGen
         }
         if (funcTy.CallConv == CallConv.Clrcall)
         {
-            if (_methodDefs.TryGetValue(fn, out var md))
-            {
-                _enc.OpCode(ILOpCode.Ldftn); _enc.Token(md); Push();
-            }
-            else
-            {
-                Util.ErrorTok(tok ?? fn.Tok, "cannot take address of external __clrcall function");
-            }
+            EntityHandle md = GetFunctionToken(fn);
+            _enc.OpCode(ILOpCode.Ldftn); _enc.Token(md); Push();
         }
         else
         {
-            // cdecl: load the native function pointer from __unep@ field
-            if (_unepFields.TryGetValue(fn.Name, out var unepField))
-            {
-                _enc.OpCode(ILOpCode.Ldsfld); _enc.Token(unepField); Push();
-            }
-            else
-            {
-                Util.ErrorTok(tok ?? fn.Tok, $"cannot take address of cdecl function '{fn.Name}' — __unep@ field not registered");
-            }
+            // unmanaged: load the native function pointer from __unep@ field
+            FieldDefinitionHandle unepField = _unepFields[fn.Name];
+            _enc.OpCode(ILOpCode.Ldsfld); _enc.Token(unepField); Push();
         }
     }
 
@@ -1984,7 +1979,7 @@ public class CodeGen
                 if (node.Ty == null) throw new InvalidOperationException($"Var node '{node.Var?.Name}' has null Ty (AddType not run)");
                 if (node.Ty.Kind == TypeKind.Func || node.Var.IsFunction)
                 {
-                    EmitFunctionAddress(node.Var, node.Tok);
+                    EmitFunctionAddress(node.Var);
                     return;
                 }
                 if (node.Var.IsLocal && !IsAggregateType(node.Ty))
@@ -2217,10 +2212,6 @@ public class CodeGen
 
             case NodeKind.FunCall:
                 GenFunCall(node);
-                return;
-
-            case NodeKind.LabelVal:
-                Util.ErrorTok(node.Tok, "labels-as-values not supported in MSIL");
                 return;
 
             case NodeKind.Cas:
@@ -2742,21 +2733,7 @@ public class CodeGen
         else
         {
             // Direct call
-            string targetName = node.Lhs.Var.Name;
-            if (_methodDefs.TryGetValue(node.Lhs.Var, out var methodDef))
-            {
-                _enc.Call(methodDef);
-            }
-            else if (_externalFuncRefs.TryGetValue(targetName, out var memberRef))
-            {
-                _enc.Call(memberRef);
-            }
-            else
-            {
-                // Register on the fly (might be a forward reference)
-                RegisterExternalFunction(node.Lhs.Var);
-                _enc.Call(_externalFuncRefs[targetName]);
-            }
+            _enc.Call(GetFunctionToken(node.Lhs.Var));
             Pop(argCount);
         }
 
@@ -2784,17 +2761,18 @@ public class CodeGen
 
         // Call Interlocked.CompareExchange(ref int, int, int)
         var interlocked = GetInterlockedRef();
-        var sig = new BlobBuilder();
-        sig.WriteByte(0x00); // DEFAULT
-        sig.WriteCompressedInteger(3);
-        sig.WriteByte((byte)SignatureTypeCode.Int32); // return
-        sig.WriteByte((byte)SignatureTypeCode.Pointer);
-        sig.WriteByte((byte)SignatureTypeCode.Int32); // ref param
-        sig.WriteByte((byte)SignatureTypeCode.Int32);
-        sig.WriteByte((byte)SignatureTypeCode.Int32);
-
-        var cxchgRef = _md.AddMemberReference(interlocked,
-            _md.GetOrAddString("CompareExchange"), _md.GetOrAddBlob(sig));
+        var cxchgRef = GetLazyMemberRef("Interlocked.CompareExchange", interlocked, "CompareExchange", () =>
+        {
+            var sig = new BlobBuilder();
+            sig.WriteByte(0x00); // DEFAULT
+            sig.WriteCompressedInteger(3);
+            sig.WriteByte((byte)SignatureTypeCode.Int32); // return
+            sig.WriteByte((byte)SignatureTypeCode.Pointer);
+            sig.WriteByte((byte)SignatureTypeCode.Int32); // ref param
+            sig.WriteByte((byte)SignatureTypeCode.Int32);
+            sig.WriteByte((byte)SignatureTypeCode.Int32);
+            return sig;
+        });
         _enc.Call(cxchgRef);
         Pop(2); // 3 args → 1 result
 
@@ -2811,16 +2789,17 @@ public class CodeGen
         GenExpr(node.Rhs); // new value
 
         var interlocked = GetInterlockedRef();
-        var sig = new BlobBuilder();
-        sig.WriteByte(0x00);
-        sig.WriteCompressedInteger(2);
-        sig.WriteByte((byte)SignatureTypeCode.Int32);
-        sig.WriteByte((byte)SignatureTypeCode.Pointer);
-        sig.WriteByte((byte)SignatureTypeCode.Int32);
-        sig.WriteByte((byte)SignatureTypeCode.Int32);
-
-        var xchgRef = _md.AddMemberReference(interlocked,
-            _md.GetOrAddString("Exchange"), _md.GetOrAddBlob(sig));
+        var xchgRef = GetLazyMemberRef("Interlocked.Exchange", interlocked, "Exchange", () =>
+        {
+            var sig = new BlobBuilder();
+            sig.WriteByte(0x00);
+            sig.WriteCompressedInteger(2);
+            sig.WriteByte((byte)SignatureTypeCode.Int32);
+            sig.WriteByte((byte)SignatureTypeCode.Pointer);
+            sig.WriteByte((byte)SignatureTypeCode.Int32);
+            sig.WriteByte((byte)SignatureTypeCode.Int32);
+            return sig;
+        });
         _enc.Call(xchgRef);
         Pop(); // 2 args → 1 result
     }
@@ -3003,7 +2982,6 @@ public class CodeGen
         {
             case NodeKind.Return:
             case NodeKind.Goto:        // break/continue are lowered to goto
-            case NodeKind.GotoExpr:
                 return true;
             case NodeKind.Block:
             {
@@ -3056,10 +3034,8 @@ public class CodeGen
             {
                 int forScopeStart = _enc.CodeBuilder.Count;
                 var beginLabel = _enc.DefineLabel();
-                var contLabel = _enc.DefineLabel();
-                var brkLabel = _enc.DefineLabel();
-                if (node.ContLabel != null) _labels[node.ContLabel] = contLabel;
-                if (node.BrkLabel != null) _labels[node.BrkLabel] = brkLabel;
+                var contLabel = GetLabel(node.ContLabelId);
+                var brkLabel = GetLabel(node.BrkLabelId);
 
                 if (node.Init != null) GenStmt(node.Init);
                 _enc.MarkLabel(beginLabel);
@@ -3087,10 +3063,8 @@ public class CodeGen
             case NodeKind.Do:
             {
                 var beginLabel = _enc.DefineLabel();
-                var contLabel = _enc.DefineLabel();
-                var brkLabel = _enc.DefineLabel();
-                if (node.ContLabel != null) _labels[node.ContLabel] = contLabel;
-                if (node.BrkLabel != null) _labels[node.BrkLabel] = brkLabel;
+                var contLabel = GetLabel(node.ContLabelId);
+                var brkLabel = GetLabel(node.BrkLabelId);
 
                 _enc.MarkLabel(beginLabel);
                 if (_setjmpDeferStart && !_setjmpTryOpen) _setjmpOuterLabels.Add(beginLabel);
@@ -3105,8 +3079,7 @@ public class CodeGen
 
             case NodeKind.Switch:
             {
-                var brkLabel = _enc.DefineLabel();
-                if (node.BrkLabel != null) _labels[node.BrkLabel] = brkLabel;
+                var brkLabel = GetLabel(node.BrkLabelId);
 
                 // x64: always if/else chain (no IL switch)
                 GenExpr(node.Cond);
@@ -3115,8 +3088,7 @@ public class CodeGen
 
                 for (Node c = node.CaseNext; c != null; c = c.CaseNext)
                 {
-                    var caseLabel = _enc.DefineLabel();
-                    _labels[c.Label] = caseLabel;
+                    var caseLabel = GetLabel(c.LabelId);
                     bool is64 = node.Cond.Ty.Size == 8;
 
                     if (c.Begin == c.End)
@@ -3138,8 +3110,7 @@ public class CodeGen
 
                 if (node.DefaultCase != null)
                 {
-                    var defaultLabel = _enc.DefineLabel();
-                    _labels[node.DefaultCase.Label] = defaultLabel;
+                    var defaultLabel = GetLabel(node.DefaultCase.LabelId);
                     _enc.Branch(ILOpCode.Br, defaultLabel);
                 }
                 else
@@ -3153,8 +3124,7 @@ public class CodeGen
             }
 
             case NodeKind.Case:
-                if (_labels.TryGetValue(node.Label, out var cLabel))
-                    _enc.MarkLabel(cLabel);
+                _enc.MarkLabel(GetLabel(node.LabelId));
                 GenStmt(node.Lhs);
                 return;
 
@@ -3168,28 +3138,19 @@ public class CodeGen
             }
 
             case NodeKind.Goto:
-                if (!_labels.TryGetValue(node.UniqueLabel, out var gotoTarget))
-                {
-                    gotoTarget = _enc.DefineLabel();
-                    _labels[node.UniqueLabel] = gotoTarget;
-                }
-                SjBranch(ILOpCode.Br, gotoTarget);
-                return;
-
-            case NodeKind.GotoExpr:
-                Util.ErrorTok(node.Tok, "computed goto not supported in MSIL");
+                // SjBranch redirects a branch that exits a setjmp try into a `leave`
+                // via a trampoline (no-op when not in a setjmp-wrapped function).
+                SjBranch(ILOpCode.Br, GetLabel(node.LabelId));
                 return;
 
             case NodeKind.Label:
-                if (!_labels.TryGetValue(node.UniqueLabel, out var labelTarget))
-                {
-                    labelTarget = _enc.DefineLabel();
-                    _labels[node.UniqueLabel] = labelTarget;
-                }
+            {
+                var labelTarget = GetLabel(node.LabelId);
                 _enc.MarkLabel(labelTarget);
                 if (_setjmpDeferStart && !_setjmpTryOpen) _setjmpOuterLabels.Add(labelTarget);
                 GenStmt(node.Lhs);
                 return;
+            }
 
             case NodeKind.Return:
                 if (_setjmpWrap && _setjmpTryOpen)
@@ -3235,7 +3196,7 @@ public class CodeGen
 
     private void EmitCxxPureMSILEntry()
     {
-        if (!_hasMain) return;
+        if (_mainObj == null) return;
 
         var enc = new RelocatableInstructionEncoder(
             new BlobBuilder(), new MethodRelocationBuilder(),
@@ -3260,7 +3221,7 @@ public class CodeGen
             enc.OpCode(ILOpCode.Ldarg_2); // envp
         }
 
-        enc.Call(_mainMethod);
+        enc.Call(_methodDefs[_mainObj]);
 
         // If main returns void, push 0
         if (_mainObj.Ty.ReturnTy.Kind == TypeKind.Void)
@@ -3301,14 +3262,6 @@ public class CodeGen
             {
                 EmitUnepSlot(fn, bareSym);
             }
-        }
-
-        // NEP for __CxxPureMSILEntry
-        if (_hasMain)
-        {
-            string mangledName = $"?__CxxPureMSILEntry@@$$J0YMHH{(Is32 ? "PAPA" : "PEAPEA")}D0@Z";
-            EmitNepForMethod(
-                MetadataTokens.GetToken(_cxxPureMsilEntry), "__CxxPureMSILEntry", mangledName);
         }
 
         // Emit ADDR relocs for extern __unep@ fields (not defined in this TU)
@@ -3492,7 +3445,7 @@ public class CodeGen
 
             for (Relocation rel = g.Rel; rel != null; rel = rel.Next)
             {
-                string targetName = rel.Label();
+                string targetName = rel.Label;
                 CoffSymbolHandle targetSym;
 
                 if (_dataCoffSymbols.TryGetValue(targetName, out targetSym))
@@ -3550,7 +3503,7 @@ public class CodeGen
                 if (g.IsFunction) continue;
                 for (Relocation rel = g.Rel; rel != null; rel = rel.Next)
                 {
-                    string label = rel.Label();
+                    string label = rel.Label;
                     _addressTakenFuncs.Add(label);
                 }
             }

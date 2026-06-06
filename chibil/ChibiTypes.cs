@@ -33,7 +33,7 @@ public enum NodeKind
     Assign, Cond, Comma, Member,
     Addr, Deref, Not, BitNot, LogAnd, LogOr,
     Return, If, For, Do, Switch, Case,
-    Block, Goto, GotoExpr, Label, LabelVal,
+    Block, Goto, Label,
     FunCall, ExprStmt, StmtExpr,
     Var, VlaPtr, Num, Cast, MemZero,
     Asm, Cas, Exch,
@@ -210,6 +210,7 @@ public class Obj
     public Obj VaPtr;
     public Obj AllocaBottom;
     public int StackSize;
+    public int LabelCount;       // upstream: number of label IDs in this function (sizes _labels[])
 
     // Static inline function
     public bool IsLive;
@@ -225,10 +226,7 @@ public class Relocation
 {
     public Relocation Next;
     public int Offset;
-    // In C, this is char **label — a pointer to a string that can be
-    // updated after the Relocation is created. We use a Func<string>
-    // to capture deferred reads (e.g., () => obj.Name).
-    public Func<string> Label;
+    public string Label;
     public long Addend;
 }
 
@@ -254,8 +252,8 @@ public class Node
     public Node Inc;
 
     // "break" and "continue" labels
-    public string BrkLabel;
-    public string ContLabel;
+    public int BrkLabelId;
+    public int ContLabelId;
 
     // Block or statement expression
     public Node Body;
@@ -268,9 +266,9 @@ public class Node
     public CType FuncTy;
     public Node Args;
 
-    // Goto or labeled statement, or labels-as-values
+    // Goto or labeled statement
     public string Label;
-    public string UniqueLabel;
+    public int LabelId;
     public Node GotoNext;
 
     // Switch
