@@ -546,6 +546,26 @@ int main(void){
         Assert.True(exit == 42, $"expected 42 (vm_wait bound to TU0's own dummy), got {exit}. {o}");
     }
 
+    [Fact]
+    public void Module_with_over_64k_global_fields_partitions_and_runs()
+    {
+        if (!DotnetHostRunner.DotnetAvailable()) return;
+        // The CLR rejects a type with more than 0xFFFF fields ("Internal limitation:
+        // too many fields"). Every C global becomes a <Module> static field, so a
+        // program with >65535 globals (MicroPython + managed musl has ~73k) overflowed
+        // that: <Module> failed to load and its entry method couldn't resolve, so
+        // `dotnet x.dll` died with "Entry point not found in assembly". chibil-link now
+        // spills the overflow onto $GlobalFields container TypeDefs — the field TOKENS
+        // are unchanged, only the declaring type's FieldList range differs. Generate
+        // 66000 globals (> the limit) and read a HIGH-numbered one (which lands in a
+        // container, not <Module>); it must load and run.
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < 66000; i++) sb.Append("int g").Append(i).Append(";\n");
+        sb.Append("int main(void){ g65999 = 207; return g65999; }\n");  // g65999 lives in a container
+        int exit = RunViaHost(sb.ToString(), out string o);
+        Assert.True(exit == 207, $"expected 207 (>64k globals partitioned across types + ran), got {exit}. {o}");
+    }
+
     static int LinkRun(string[] sources, out string output)
     {
         var objs = new List<ObjectFile>();

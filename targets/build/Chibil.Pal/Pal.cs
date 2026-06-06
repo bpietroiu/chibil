@@ -14,6 +14,7 @@ namespace Chibil
     public static unsafe class Pal
     {
         // x86-64 Linux syscall numbers (the subset implemented so far).
+        const long SYS_read = 0;
         const long SYS_write = 1;
         const long SYS_ioctl = 16;
         const long SYS_writev = 20;
@@ -28,10 +29,22 @@ namespace Chibil
         const long ENOSYS = 38;
         const long MAP_ANONYMOUS = 0x20;
 
+        // Cached stdin stream — reading from a fresh OpenStandardInput() each call would
+        // drop the host's input buffering (the REPL reads one byte at a time).
+        static System.IO.Stream _stdin;
+
         public static long Syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6)
         {
             switch (n)
             {
+                case SYS_read:
+                {
+                    // ssize_t read(int fd, void *buf, size_t count) — stdin only.
+                    if ((int)a1 != 0) return -ENOSYS;
+                    _stdin ??= Console.OpenStandardInput();
+                    var dst = new Span<byte>((void*)a2, (int)a3);
+                    return _stdin.Read(dst);   // 0 = EOF
+                }
                 case SYS_write:
                 {
                     // ssize_t write(int fd, const void *buf, size_t count)

@@ -246,6 +246,17 @@ public sealed class MetadataMerger
     private readonly HashSet<string> _apiFunctionNames; // null = no manifest restriction
     private int _exportTypeDefRow;   // 0 = no export type
 
+    // The CLR rejects a type with more than 0xFFFF fields ("Internal limitation: too
+    // many fields"). All C globals become static fields of <Module>; a large program
+    // (e.g. MicroPython + managed musl, ~73k globals) overflows that on <Module>, so
+    // its entry method (also in <Module>) can't load. We cap fields per type and spill
+    // the overflow onto synthesized container TypeDefs placed right after <Module>.
+    // Field TOKENS are unchanged - only the declaring type's FieldList range differs,
+    // which the runtime resolves transparently for ldsfld/stsfld/FieldRVA/the .cctor.
+    public const int MaxFieldsPerType = 60000;
+    // Output TypeDef rows reserved (after <Module>) for the global-field containers.
+    public readonly List<int> GlobalFieldContainerRows = new();
+
     // Output TypeDef rows of synthesized empty opaque-handle value types (e.g.
     // sqlite3_stmt) created for the export surface. PeWriter unions these into
     // the set it promotes to public.
@@ -315,6 +326,24 @@ public sealed class MetadataMerger
 
     /// <summary>Output TypeDef row reserved for the export class (row 2), or 0 if disabled.</summary>
     public int ExportTypeDefRow => _exportTypeDefRow;
+
+    /// <summary>Reserve TypeDef rows (after &lt;Module&gt;) for the global-field
+    /// containers, sized from an upper bound on the global field count. &lt;Module&gt;
+    /// itself holds the first <see cref="MaxFieldsPerType"/> fields; each reserved
+    /// container holds another chunk. The exact split is done by the writer.</summary>
+    private void ReserveGlobalFieldContainers()
+    {
+        // Upper bound: every source Field row can become a target global, and each
+        // Mutable (.data) global also appends a read-only "$init" source field — so
+        // double, plus slack for COMMON/setjmp/data-import synthesized fields.
+        long upper = 0;
+        foreach (var of in _objs)
+            upper += of.Md.GetTableRowCount(TableIndex.Field);
+        upper = upper * 2 + 4096;
+        int containers = (int)((upper + MaxFieldsPerType - 1) / MaxFieldsPerType); // field-owning types
+        for (int i = 1; i < containers; i++)   // <Module> is the first; reserve the rest
+            GlobalFieldContainerRows.Add(++_outTypeDefRow);
+    }
 
     /// <summary>Get-or-add a deduped TypeRef to a core-library type (mscorlib scope).</summary>
     private EntityHandle GetOrAddCoreTypeRef(string ns, string name)
@@ -409,8 +438,16 @@ public sealed class MetadataMerger
         //    field-data RVAs can be assigned by the writer. Must run BEFORE the
         //    StandAloneSig rewrite below so any value-type TypeDef referenced by
         //    a local-variable signature is already predicted (mapped).
-        // Reserve the export class's TypeDef row (row 2) BEFORE value-type TypeDefs
-        // so they shift to 3+ and the export type sits directly after <Module>.
+        // Reserve container TypeDef rows for the global static fields when their count
+        // would exceed the CLR per-type field limit on <Module>. Reserved right after
+        // <Module> (FieldList must stay monotonic, so containers precede the export
+        // class + value-types), from an UPPER BOUND of the field count (the exact count
+        // isn't known until the field pass below) — any surplus container is emitted as
+        // an empty type, which is harmless.
+        ReserveGlobalFieldContainers();
+
+        // Reserve the export class's TypeDef row BEFORE value-type TypeDefs so they
+        // shift up and the export type sits after <Module> + the field containers.
         if (_exportClass != null)
             _exportTypeDefRow = ++_outTypeDefRow;
 
