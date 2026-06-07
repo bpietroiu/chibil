@@ -506,6 +506,17 @@ public sealed class MetadataMerger
         foreach (var of in _objs)
             EnsureMemberRefSigTypeDefs(of);
 
+        // ── Value-type TypeDefs referenced ONLY by a method-body IL instruction
+        //    (e.g. `stobj`/`ldobj`/`initobj <struct>` for a struct assigned/copied
+        //    solely through a pointer, as in SQLite's yy_reduce / MicroPython's
+        //    do_load). With no field, local, param/return, or MemberRef signature
+        //    naming the struct, it is otherwise never copied, and RelocationFixer's
+        //    token in the IL body maps to row 0 → "no mapping" link failure. Append
+        //    them here (after all signature passes, so existing predicted rows are
+        //    unchanged). Must run BEFORE ReserveOpaqueTypeDefs (the last real pass).
+        foreach (var of in _objs)
+            EnsureIlBodyTypeDefs(of);
+
         // ── Opaque-handle TypeDefs for the export surface ─────────────────────
         //    An exported function whose signature names a forward-declared-only
         //    opaque struct (e.g. `sqlite3_stmt*` — never given a body in this
@@ -1796,6 +1807,30 @@ public sealed class MetadataMerger
     /// it in), so without this pass its token in the rewritten local sig would
     /// map to row 0 and the loader rejects the image.
     /// </summary>
+    /// <summary>
+    /// Ensure every value-type TypeDef referenced by a method-body IL token
+    /// relocation (e.g. <c>stobj</c>/<c>ldobj</c>/<c>initobj &lt;struct&gt;</c>) is
+    /// copied/predicted. A struct touched only through such an instruction — never
+    /// named by a field, local, param/return, or MemberRef signature — is otherwise
+    /// never copied, so its IL token would have no mapping at link time.
+    /// </summary>
+    private void EnsureIlBodyTypeDefs(ObjectFile of)
+    {
+        foreach (var m in of.Methods)
+        {
+            if (m.TokenRelocs == null) continue;
+            foreach (int tok in m.TokenRelocs.Values)
+            {
+                // TypeDef tokens only (table 0x02). Other tables are handled by the
+                // signature passes / SymbolResolver.
+                if (((uint)tok >> 24) != 0x02) continue;
+                int row = (int)((uint)tok & 0x00FFFFFF);
+                if (row == 0) continue;
+                EnsureTypeDefCopied(of, MetadataTokens.TypeDefinitionHandle(row));
+            }
+        }
+    }
+
     private void EnsureStandaloneSigTypeDefs(ObjectFile of)
     {
         var md = of.Md;

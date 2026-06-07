@@ -52,6 +52,24 @@ public class AuditBugTests : ChibiTestBase
     }
 
     [Fact]
+    public void ArrayAndFunctionConditions()
+    {
+        Compile("""
+            int callee(void) { return 0; }
+
+            int main() {
+                int arr[1];
+                if (!arr) return 1;
+                if (!callee) return 2;
+                if (arr && callee) return 0;
+                return 3;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 0);
+    }
+
+    [Fact]
     public void NotLongLong()
     {
         Compile("""
@@ -254,6 +272,145 @@ public class AuditBugTests : ChibiTestBase
             """)
         .Link(["/entry:main", "/subsystem:console"])
         .RunAndCheck(exitCode: 3);
+    }
+
+    [Fact]
+    public void BitfieldAssignmentExpressionValue()
+    {
+        Compile("""
+            struct Flags {
+                unsigned int a : 3;
+                unsigned int b : 5;
+            };
+
+            int id(int x) { return x; }
+
+            int main(void) {
+                struct Flags f;
+                f.a = 0;
+                f.b = 0;
+                return id(f.a = 5) + f.a;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 10);
+    }
+
+    [Fact]
+    public void BitfieldAssignmentExpressionValueIsStoredValue()
+    {
+        Compile("""
+            struct Flags {
+                unsigned int a : 3;
+            };
+
+            int main(void) {
+                struct Flags f = { 0 };
+                int assigned = (f.a = 9);
+                if (assigned != 1)
+                    return 10;
+                if (f.a != 1)
+                    return 20;
+                return 0;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 0);
+    }
+
+    [Fact]
+    public void BitfieldUnsignedInt64Storage()
+    {
+        Compile("""
+            struct S {
+                unsigned __int64 x : 40;
+                __int64 y : 40;
+                unsigned __int64 full : 64;
+            };
+            struct Offset {
+                unsigned __int64 lower : 4;
+                unsigned __int64 mid : 40;
+                unsigned __int64 upper : 20;
+            };
+
+            int main(void) {
+                struct S s = { 0 };
+                struct Offset o = { 0 };
+                unsigned __int64 assigned = (s.x = 0x100000001ULL);
+                if (assigned != 0x100000001ULL)
+                    return 10;
+                if (s.x != 0x100000001ULL)
+                    return 20;
+                __int64 signedAssigned = (s.y = -1);
+                if (signedAssigned != -1)
+                    return 30;
+                if (s.y != -1)
+                    return 40;
+                unsigned __int64 fullAssigned = (s.full = 0xFEDCBA9876543210ULL);
+                if (fullAssigned != 0xFEDCBA9876543210ULL)
+                    return 50;
+                if (s.full != 0xFEDCBA9876543210ULL)
+                    return 60;
+                o.lower = 0xFULL;
+                o.upper = 0xABCDEULL;
+                unsigned __int64 offsetAssigned = (o.mid = 0x100000002ULL);
+                if (offsetAssigned != 0x100000002ULL)
+                    return 70;
+                if (o.lower != 0xFULL)
+                    return 80;
+                if (o.mid != 0x100000002ULL)
+                    return 90;
+                if (o.upper != 0xABCDEULL)
+                    return 100;
+                return 0;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 0);
+    }
+
+    [Fact]
+    public void ScalarGlobalLoadStore()
+    {
+        Compile("""
+            int g;
+
+            int main(void) {
+                g = 41;
+                return g + 1;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 42);
+    }
+
+    [Fact]
+    public void LongLongBranchConditions()
+    {
+        Compile("""
+            int main(void) {
+                long long x = 0x100000000LL;
+                long long y = 0;
+                int r = 0;
+
+                if (x)
+                    r += 1;
+
+                while (x) {
+                    r += 2;
+                    x = 0;
+                }
+
+                if (x || y)
+                    r += 4;
+
+                if (r == 3 && !y)
+                    return 0;
+                return 1;
+            }
+            """)
+        .Link(["/entry:main", "/subsystem:console"])
+        .RunAndCheck(exitCode: 0);
     }
 
     [Fact]
