@@ -1,0 +1,186 @@
+using System.IO;
+using System.Text;
+using Chibil.Sandbox;
+using Xunit;
+
+namespace Chibil.Tests.Sandbox;
+
+/// <summary>M4.5 acceptance: real GNU bash 5.3 — chibil-compiled to MSIL and linked
+/// against the managed musl object set + SandboxPal (zero native libc) — runs as a
+/// green-process and executes a builtin with stdout captured.
+/// Build the image first:  dotnet build targets/sandbox/SandboxBash.proj -c Release</summary>
+[Collection("SandboxKernel")]
+public class BashTests
+{
+    static string BashDll() =>
+        Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", "bash.dll");
+
+    static (string stdout, int rc) RunBash(string script)
+    {
+        SandboxPal.Reset();
+        var table = new ProcessTable();
+        SandboxPal.AttachProcessTable(table);
+
+        var sink = new BufferSinkHandle();
+        var proc = table.CreateRoot(BashDll());
+        proc.Fds.Set(1, sink);
+        proc.Fds.Set(2, new BufferSinkHandle());   // swallow shell-init chatter
+
+        int rc = proc.Run(new[] { "bash", "--norc", "--noprofile", "-c", script });
+        return (Encoding.UTF8.GetString(sink.ToArray()), rc);
+    }
+
+    [Fact]
+    public void Bash_echo_runs_on_sandbox_pal()
+    {
+        if (!File.Exists(BashDll())) return;   // skip if the SandboxBash image isn't built
+        var (stdout, rc) = RunBash("echo hi");
+        Assert.Equal("hi\n", stdout);
+        Assert.Equal(0, rc);
+    }
+
+    [Fact]
+    public void Bash_word_expansion_and_arithmetic()
+    {
+        if (!File.Exists(BashDll())) return;
+        var (stdout, rc) = RunBash("x=world; echo \"hi $x $((6*7))\"");
+        Assert.Equal("hi world 42\n", stdout);
+        Assert.Equal(0, rc);
+    }
+
+    /// <summary>The M4.6 foundation: a green-process spawns the SAME bash image as a child running
+    /// `-c '<body>'` with its stdout wired to a pipe the parent reads — the in-process analog of
+    /// bash's comsub "re-exec self". Proves SpawnImage + Pipe + bash-on-bash before the bash-side
+    /// re-pointing (SYS_spawn_self) lands.</summary>
+    [Fact]
+    public void Bash_on_bash_spawn_writes_to_pipe()
+    {
+        if (!File.Exists(BashDll())) return;
+
+        SandboxPal.Reset();
+        var table = new ProcessTable();
+        SandboxPal.AttachProcessTable(table);
+
+        var parent = table.CreateRoot(BashDll());
+        var pipe = new Pipe();
+        int rfd = parent.Fds.Add(new PipeReadHandle(pipe));
+        int wfd = parent.Fds.Add(new PipeWriteHandle(pipe));
+
+        int childPid = table.SpawnImage(BashDll(),
+            new[] { "bash", "--norc", "--noprofile", "-c", "echo deep" },
+            parent, new[] { (1, wfd) });        // child stdout (fd1) -> parent's pipe write end
+
+        parent.Fds.Close(wfd);                  // parent done writing; child's copy closes on exit -> reader EOF
+        int rc = table.Wait(childPid);
+
+        var read = parent.Fds.Get(rfd);
+        var buf = new byte[256];
+        var sb = new StringBuilder();
+        int n;
+        while ((n = read.Read(buf)) > 0) sb.Append(Encoding.UTF8.GetString(buf, 0, n));
+
+        Assert.Equal("deep\n", sb.ToString());
+        Assert.Equal(0, rc);
+    }
+
+    /// <summary>Command substitution on green-processes (`$(...)` re-pointed onto SYS_spawn_self),
+    /// including nested comsub and function/var state transfer into the child. Run as a DIVERSE
+    /// SEQUENCE so it also guards the cross-run regression: a prior green-process's collectible ALC
+    /// must not be GC-unloaded mid-execution of a later one (fixed by collecting at Reset's safe
+    /// point). Without that fix this sequence corrupts and the last case NRE's in the child.</summary>
+    [Fact]
+    public void Bash_command_substitution_sequence()
+    {
+        if (!File.Exists(BashDll())) return;
+        Assert.Equal("x\n",      RunBash("echo $(echo x)").stdout);
+        Assert.Equal("deep\n",   RunBash("echo $(echo $(echo deep))").stdout);
+        Assert.Equal("abc\n",    RunBash("echo a$(echo b)c").stdout);
+        Assert.Equal("PRE-X\n",  RunBash("p=PRE; tag(){ echo $p-$1; }; echo $(tag X)").stdout);
+        Assert.Equal("hi bob\n", RunBash("greet(){ echo \"hi $1\"; }; echo $(greet bob)").stdout);
+    }
+
+    /// <summary>Subshells `( … )` on green-processes: a user subshell forks on native bash; on the
+    /// PAL it spawns a fresh bash green-process (chibil_spawn_subshell) running the deparsed body
+    /// with the parent's std fds inherited and functions/vars transferred, so output reaches the
+    /// parent's stdout while variable/cwd changes stay isolated. Exercises isolation, exit status,
+    /// function transfer, nesting, and the CMD_NO_FORK "last subshell" path.</summary>
+    [Fact]
+    public void Bash_subshells()
+    {
+        if (!File.Exists(BashDll())) return;
+        Assert.Equal("sub\n",   RunBash("( echo sub )").stdout);                       // CMD_NO_FORK (last)
+        Assert.Equal("2\n1\n",  RunBash("x=1; ( x=2; echo $x ); echo $x").stdout);     // var isolation
+        Assert.Equal("3\n",     RunBash("( exit 3 ); echo $?").stdout);                // exit status
+        Assert.Equal("hi bob\n",RunBash("greet(){ echo \"hi $1\"; }; ( greet bob )").stdout); // fn transfer
+        Assert.Equal("deep\n",  RunBash("( ( ( echo deep ) ) )").stdout);             // nesting
+        Assert.Equal("nested\n",RunBash("echo $( ( echo nested ) )").stdout);          // subshell in comsub
+    }
+
+    /// <summary>The `exit` builtin and `set -e` (ERREXIT) — both do `jump_to_top_level(top_level)`
+    /// from a top-level simple command, landing in parse_and_execute's `setjmp` cleanup. chibil's
+    /// whole-body setjmp lowering used to RE-RUN parse_and_execute's pre-loop `begin_unwind_frame`
+    /// on resume, duplicating the unwind-protect list → a double-free crash. Fixed by hoisting the
+    /// branch-free pre-setjmp prefix out of the setjmp try region (CodeGen EmitSetjmpWrappedBody).</summary>
+    [Fact]
+    public void Bash_exit_builtin_and_errexit()
+    {
+        if (!File.Exists(BashDll())) return;
+        Assert.Equal(7, RunBash("exit 7").rc);
+        Assert.Equal(0, RunBash("exit 0").rc);
+        Assert.Equal(5, RunBash("x=1; exit 5").rc);
+        var (so, rc) = RunBash("echo hi; exit 3");
+        Assert.Equal("hi\n", so);
+        Assert.Equal(3, rc);
+        var (eso, erc) = RunBash("set -e; false; echo no");   // ERREXIT longjmp, same cleanup path
+        Assert.Equal("", eso);
+        Assert.Equal(1, erc);
+    }
+
+    /// <summary>Deeply-NESTED command substitution: recursive `fact 5` (5 levels of comsub, each a
+    /// nested green-process spawned while its parent blocks waiting) and a 6-deep linear nest. This
+    /// is the stress case for the collectible-ALC lifecycle fix — many green-process ALCs alive at
+    /// once; without keeping them referenced until fully idle, a background-GC unload mid-execution
+    /// corrupts a child's heap. Run repeatedly to exercise cross-run ALC reclamation too.</summary>
+    [Fact]
+    public void Bash_deeply_nested_comsub()
+    {
+        if (!File.Exists(BashDll())) return;
+        for (int i = 0; i < 5; i++)
+        {
+            Assert.Equal("120\n", RunBash("fact(){ if [ $1 -le 1 ]; then echo 1; else echo $(($1*$(fact $(($1-1))))); fi; }; fact 5").stdout);
+            Assert.Equal("deep\n", RunBash("echo $(echo $(echo $(echo $(echo $(echo deep)))))").stdout);
+        }
+    }
+
+    /// <summary>The reap path comsub needs: a parent green-process reaps a spawned bash child via
+    /// waitpid(-1) (SandboxPal SYS_wait4 → ProcessTable.WaitPid), recovering its exit status.
+    /// WaitPid attributes the child to the caller via the kernel's current pid, so we enter the
+    /// parent's context (as bash's waitpid syscall would).</summary>
+    [Fact]
+    public void Waitpid_reaps_green_child_with_status()
+    {
+        if (!File.Exists(BashDll())) return;
+
+        SandboxPal.Reset();
+        var table = new ProcessTable();
+        SandboxPal.AttachProcessTable(table);
+
+        var parent = table.CreateRoot(BashDll());
+        // `false` exits with status 1 via main's normal return (the `exit` builtin's
+        // longjmp-unwind path has a separate musl-free bug — tracked for M4.6).
+        int child = table.SpawnImage(BashDll(),
+            new[] { "bash", "--norc", "--noprofile", "-c", "false" },
+            parent, System.Array.Empty<(int, int)>());
+
+        SandboxPal.EnterProcess(parent.Pid);     // act as the parent (as the waitpid syscall would)
+        try
+        {
+            int reaped = table.WaitPid(-1, noHang: false, out int code);
+            Assert.Equal(child, reaped);
+            Assert.Equal(1, code);
+            // second reap: no more children -> ECHILD (-1)
+            Assert.Equal(-1, table.WaitPid(-1, noHang: false, out _));
+        }
+        finally { SandboxPal.EnterProcess(0); }
+    }
+}

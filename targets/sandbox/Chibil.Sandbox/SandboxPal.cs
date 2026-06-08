@@ -44,10 +44,16 @@ namespace Chibil.Sandbox
         const long SYS_writev = 20;
         const long SYS_dup2   = 33;
         const long SYS_exit       = 60;
+        const long SYS_wait4      = 61;
         const long SYS_exit_group = 231;
+        const long WNOHANG = 1;
+        const long ECHILD  = 10;
         const long SYS_openat = 257;
+        const long SYS_pipe   = 22;
         const long SYS_pipe2  = 293;
+        const long SYS_getcwd = 79;
         const long ENOTTY = 25;
+        const long ERANGE = 34;
 
         // open() flags (x86-64 Linux)
         const long O_WRONLY = 1, O_RDWR = 2, O_CREAT = 0x40, O_TRUNC = 0x200;
@@ -55,6 +61,7 @@ namespace Chibil.Sandbox
         const long SYS_report = 0x1000;
         const long SYS_spawn  = 0x1001;
         const long SYS_wait   = 0x1002;
+        const long SYS_spawn_self = 0x1003;
         const long ENOSYS = 38;
         const long EBADF  = 9;
 
@@ -131,8 +138,16 @@ namespace Chibil.Sandbox
             return 0;
         }
 
-        /// <summary>Bind target for __chibil_get_tp (no TLS pointer needed in the spike).</summary>
-        public static ulong GetTp() => 0;
+        /// <summary>Bind target for __chibil_get_tp (musl's TLS base / thread-control block).
+        /// Returns the CURRENT green-process's own TCB so musl's thread-pointer-relative TLS
+        /// (errno, locale, tsd/dtv, …) is isolated PER PROCESS — green-processes share pooled
+        /// threads, so a per-thread TCB would bleed one process's TLS into another and corrupt
+        /// it. Falls back to Chibil.Pal's per-thread TCB when no green-process is current.</summary>
+        public static ulong GetTp()
+        {
+            var p = _table?.Get(_currentPid);
+            return p != null && p.Tcb != IntPtr.Zero ? (ulong)p.Tcb : global::Chibil.Pal.GetTp();
+        }
 
         /// <summary>The pid the calling thread is currently running as (0 if none).</summary>
         public static int CurrentPid => _currentPid;
@@ -222,11 +237,23 @@ namespace Chibil.Sandbox
                     if (h is DirHandle dh) return DoGetDents(dh, a2, a3);
                     return -EBADF;                              // -ENOTDIR would need a distinct fd kind
                 }
+                case SYS_getcwd:
+                {
+                    // long getcwd(char *buf, size_t size): write cwd + NUL, return length
+                    // INCLUDING the NUL (Linux ABI); -ERANGE if it doesn't fit.
+                    byte[] cwd = System.Text.Encoding.UTF8.GetBytes(CurrentProc().Cwd);
+                    if (cwd.Length + 1 > (long)a2) return -ERANGE;
+                    byte* buf = (byte*)a1;
+                    for (int i = 0; i < cwd.Length; i++) buf[i] = cwd[i];
+                    buf[cwd.Length] = 0;
+                    return cwd.Length + 1;
+                }
                 case SYS_close:
                     return CurrentFds().Close((int)a1);
                 case SYS_dup2:
                     return CurrentFds().Dup2((int)a1, (int)a2);
-                case SYS_pipe2:
+                case SYS_pipe:      // pipe(int[2])      — musl x86-64 uses this
+                case SYS_pipe2:     // pipe2(int[2], flags) — flags (O_CLOEXEC/O_NONBLOCK) are no-ops here
                 {
                     var pipe = new Pipe();
                     var fds = CurrentFds();
@@ -248,8 +275,34 @@ namespace Chibil.Sandbox
                     for (int i = 0; i < pairs; i++) fdMap[i] = (m[2 * i], m[2 * i + 1]);
                     return _table.Spawn((int)a1, CurrentProc(), fdMap);
                 }
+                case SYS_spawn_self:
+                {
+                    // Spawn the SAME image as the caller (bash) as a new green-process with an
+                    // explicit argv and stdout/stdin wired to pipes — bash's comsub/subshell
+                    // "re-exec self with -c <body>" on green-processes.
+                    //   a1 = char** argv (NULL-terminated); a2 = int* (childFd,parentFd) pairs; a3 = pair count.
+                    var argvList = new System.Collections.Generic.List<string>();
+                    long* av = (long*)a1;
+                    for (int i = 0; av[i] != 0; i++) argvList.Add(ReadCString(av[i]));
+                    int pairs = (int)a3;
+                    var fdMap = new (int childFd, int parentFd)[pairs];
+                    int* m = (int*)a2;
+                    for (int i = 0; i < pairs; i++) fdMap[i] = (m[2 * i], m[2 * i + 1]);
+                    var self = CurrentProc();
+                    return _table.SpawnImage(self.ToolDllPath, argvList.ToArray(), self, fdMap);
+                }
                 case SYS_wait:
                     return _table.Wait((int)a1);
+                case SYS_wait4:
+                {
+                    // wait4(pid, int *status, options, rusage*) — backs bash's waitpid/waitchld.
+                    // We honour pid (>0 or -1) + WNOHANG; other options/rusage are ignored.
+                    int reaped = _table.WaitPid((int)a1, (a3 & WNOHANG) != 0, out int code);
+                    if (reaped < 0) return -ECHILD;
+                    if (reaped == 0) return 0;                       // WNOHANG, nothing ready
+                    if (a2 != 0) *(int*)a2 = (code & 0xff) << 8;     // WIFEXITED + WEXITSTATUS(code)
+                    return reaped;
+                }
             }
             // Pure memory / random / misc syscalls (mmap, mprotect, munmap, madvise,
             // getrandom, ...) reuse the proven compute PAL. NOTE: SandboxPal handles
