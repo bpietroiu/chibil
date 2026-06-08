@@ -39,6 +39,8 @@ namespace Chibil.Sandbox
         // struct stat st_mode type bits + a default permission
         const uint S_IFREG = 0x8000, S_IFDIR = 0x4000, S_IFIFO = 0x1000;
         const long SYS_ioctl  = 16;
+        const long SYS_rt_sigaction   = 13;
+        const long SYS_rt_sigprocmask = 14;
         const long SYS_writev = 20;
         const long SYS_dup2   = 33;
         const long SYS_exit       = 60;
@@ -177,6 +179,17 @@ namespace Chibil.Sandbox
                 }
                 case SYS_ioctl:
                     return -ENOTTY;                              // sandbox fds are never ttys
+                case SYS_rt_sigaction:
+                    // Non-interactive Layer-1: accept handler installs but don't deliver yet.
+                    return 0;
+                case SYS_rt_sigprocmask:
+                    // Accept the mask change; report an empty previous mask if oldset is given.
+                    if (a3 != 0)
+                    {
+                        int n2 = (int)a4;                       // sigsetsize
+                        for (int i = 0; i < n2; i++) ((byte*)a3)[i] = 0;
+                    }
+                    return 0;
                 case SYS_exit:
                 case SYS_exit_group:
                     throw new GreenProcessExit((int)a1);        // terminate this green-process, not the host
@@ -227,7 +240,14 @@ namespace Chibil.Sandbox
                     _reports[_currentPid] = a1;
                     return 0;
                 case SYS_spawn:
-                    return _table.Spawn((int)a1);
+                {
+                    // a1 = toolId; a2 = int* of flat (childFd, parentFd) pairs; a3 = pair count.
+                    int pairs = (int)a3;
+                    var fdMap = new (int childFd, int parentFd)[pairs];
+                    int* m = (int*)a2;
+                    for (int i = 0; i < pairs; i++) fdMap[i] = (m[2 * i], m[2 * i + 1]);
+                    return _table.Spawn((int)a1, CurrentProc(), fdMap);
+                }
                 case SYS_wait:
                     return _table.Wait((int)a1);
             }

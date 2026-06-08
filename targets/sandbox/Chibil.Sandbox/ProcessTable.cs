@@ -28,11 +28,25 @@ namespace Chibil.Sandbox
 
         /// <summary>Spawn tool `toolId` as a new green-process running on a background thread.
         /// Returns the child's pid.</summary>
-        public int Spawn(int toolId)
+        public int Spawn(int toolId) => Spawn(toolId, null, null);
+
+        /// <summary>Spawn tool `toolId`, inheriting fds from <paramref name="parent"/> per
+        /// <paramref name="fdMap"/> — a list of (childFd, parentFd) the kernel duplicates into
+        /// the child's table before it runs (the posix_spawn file-actions analog). Each inherited
+        /// description is shared (ref-counted), so the child and parent see the same pipe/file.</summary>
+        public int Spawn(int toolId, GreenProcess parent, System.Collections.Generic.IReadOnlyList<(int childFd, int parentFd)> fdMap)
         {
             int pid = Interlocked.Increment(ref _nextPid);
             var gp = new GreenProcess(pid, _tools[toolId]);
             _procs[pid] = gp;
+            if (parent != null && fdMap != null)
+                foreach (var (childFd, parentFd) in fdMap)
+                {
+                    var h = parent.Fds.Get(parentFd);
+                    if (h == null) continue;        // parent fd not open — skip (child slot stays empty)
+                    h.Ref();                         // shared between parent and child
+                    gp.Fds.Set(childFd, h);          // Set consumes the ref we just took
+                }
             _running[pid] = Task.Run(() => gp.Run(new[] { "child" }));
             return pid;
         }
