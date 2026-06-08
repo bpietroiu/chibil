@@ -889,6 +889,17 @@ public class MsilObjectEmitter
         {
             fieldName = $"?A0x{_tuHash}.unnamed-global-{_anonGlobalCounter++}";
         }
+        else if (g.IsStatic)
+        {
+            // MSVC-style mangling for file-scope statics matches the COFF symbol MSVC
+            // emits, but our CoreCLR/managed linker resolves cross-object data
+            // relocations and weak aliases by the plain C name (musl's lockptr
+            // weak-alias machinery breaks under the mangled name). Keep plain names
+            // for the CoreCLR target — the pre-#35 behavior for this path.
+            fieldName = _options.Target == TargetProfile.CoreClr
+                ? g.Name
+                : NameMangler.MangleStaticGlobalName(_tuHash, g.Name);
+        }
         else
         {
             fieldName = g.Name;

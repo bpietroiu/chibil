@@ -1756,21 +1756,15 @@ public class CodeGen
 
     private void ExtractBitfieldValue(Member mem)
     {
-        // Shift-extract sign/zero-fills from the MSB of the loaded VALUE, not the
-        // storage unit: `Load` widens a sub-word storage type to a 32-bit stack int
-        // (u8/u16/u32 -> i4), 8 bytes to i8. Sizing the shifts by the storage width
-        // (Ty.Size*8) would leave the storage unit's other bits in the result and
-        // mis-sign-extend signed u8/u16 bitfields. Use the loaded container's width:
-        // 32 for Size<=4, 64 for Size==8.
-        int containerBits = mem.Ty.Size <= 4 ? 32 : 64;
-        int shift = containerBits - mem.BitWidth - mem.BitOffset;
+        int storageBits = mem.Ty.Size <= 4 ? 32 : 64;
+        int shift = storageBits - mem.BitWidth - mem.BitOffset;
         if (shift > 0)
         {
             EmitConstI4(shift);
             _enc.OpCode(ILOpCode.Shl); Pop();
         }
 
-        int rightShift = containerBits - mem.BitWidth;
+        int rightShift = storageBits - mem.BitWidth;
         if (rightShift > 0)
         {
             EmitConstI4(rightShift);
