@@ -66,4 +66,29 @@ public class GreenProcessTests
         Assert.Equal(1_000_000, SandboxPal.GetReport(childPid));
         Assert.NotEqual(spawner.Pid, childPid);
     }
+
+    [Fact]
+    public void Green_process_alc_unloads_after_run()
+    {
+        SandboxPal.Reset();
+        string dll = SandboxToolBuilder.Build("counter");
+
+        System.WeakReference weak = RunAndGetAlcWeakRef(dll);   // separate method so locals can be GC'd
+
+        for (int i = 0; i < 10 && weak.IsAlive; i++)
+        {
+            System.GC.Collect();
+            System.GC.WaitForPendingFinalizers();
+        }
+        Assert.False(weak.IsAlive, "the tool's AssemblyLoadContext did not unload");
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    static System.WeakReference RunAndGetAlcWeakRef(string dll)
+    {
+        var gp = new GreenProcess(pid: 99, toolDllPath: dll);
+        gp.Run(new[] { "counter" });
+        System.WeakReference w = gp.Unload();   // returns a weak ref to the ALC, then releases it
+        return w;
+    }
 }

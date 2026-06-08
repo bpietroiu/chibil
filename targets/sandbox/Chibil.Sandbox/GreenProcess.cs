@@ -31,9 +31,31 @@ namespace Chibil.Sandbox
         /// this thread to this pid). Returns the process exit code.</summary>
         public int Run(string[] args)
         {
+            // Save/restore the calling thread's current pid: a child green-process may run
+            // inline on this very thread (Task inlining during a parent's wait), so the
+            // per-thread context must nest, not leak.
+            int prev = SandboxPal.CurrentPid;
             SandboxPal.EnterProcess(Pid);
-            object ret = _main.Invoke(null, new object[] { args });
-            return ret is int code ? code : 0;
+            try
+            {
+                object ret = _main.Invoke(null, new object[] { args });
+                return ret is int code ? code : 0;
+            }
+            finally
+            {
+                SandboxPal.EnterProcess(prev);
+            }
+        }
+
+        /// <summary>Initiate collectible unload of this green-process's load context and
+        /// return a weak reference to it (for tests / pool reclamation). After this call the
+        /// green-process is dead.</summary>
+        public System.WeakReference Unload()
+        {
+            var weak = new System.WeakReference(_alc);
+            _main = null;
+            _alc.Unload();
+            return weak;
         }
     }
 }

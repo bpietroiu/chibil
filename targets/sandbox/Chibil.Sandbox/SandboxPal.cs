@@ -29,6 +29,9 @@ namespace Chibil.Sandbox
         /// <summary>Bind target for __chibil_get_tp (no TLS pointer needed in the spike).</summary>
         public static ulong GetTp() => 0;
 
+        /// <summary>The pid the calling thread is currently running as (0 if none).</summary>
+        public static int CurrentPid => _currentPid;
+
         /// <summary>Set the current green-process for the calling thread. Call before running a tool's Main.</summary>
         public static void EnterProcess(int pid) => _currentPid = pid;
 
