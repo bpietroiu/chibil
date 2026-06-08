@@ -18,7 +18,12 @@ namespace Chibil.Sandbox
         // Per-green-process context: which pid the calling thread is running as.
         [ThreadStatic] static int _currentPid;
 
+        // Process table, attached once by the host.
+        static ProcessTable _table;
+
         const long SYS_report = 0x1000;
+        const long SYS_spawn  = 0x1001;
+        const long SYS_wait   = 0x1002;
         const long ENOSYS = 38;
 
         /// <summary>Bind target for __chibil_get_tp (no TLS pointer needed in the spike).</summary>
@@ -26,6 +31,9 @@ namespace Chibil.Sandbox
 
         /// <summary>Set the current green-process for the calling thread. Call before running a tool's Main.</summary>
         public static void EnterProcess(int pid) => _currentPid = pid;
+
+        /// <summary>Attach the host's process table so spawn/wait syscalls can reach it.</summary>
+        public static void AttachProcessTable(ProcessTable t) => _table = t;
 
         /// <summary>Bind target for __chibil_syscall. Linux x86-64 syscall ABI.</summary>
         public static long Syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6)
@@ -35,6 +43,10 @@ namespace Chibil.Sandbox
                 case SYS_report:
                     _reports[_currentPid] = a1;
                     return 0;
+                case SYS_spawn:
+                    return _table.Spawn((int)a1);
+                case SYS_wait:
+                    return _table.Wait((int)a1);
             }
             return -ENOSYS;
         }

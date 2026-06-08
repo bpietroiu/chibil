@@ -46,4 +46,24 @@ public class GreenProcessTests
         Assert.Equal(1_000_000, SandboxPal.GetReport(2));   // isolation
         Assert.Equal(2, SandboxPal.ReportCount);            // both hit the SAME kernel dict
     }
+
+    [Fact]
+    public void Green_process_can_spawn_and_wait_a_child()
+    {
+        SandboxPal.Reset();
+        var table = new ProcessTable();
+        // Register tool id 1 = counter (built in-process).
+        table.RegisterTool(id: 1, toolDllPath: SandboxToolBuilder.Build("counter"));
+        SandboxPal.AttachProcessTable(table);
+
+        string spawnerDll = SandboxToolBuilder.Build("spawner");
+        var spawner = table.CreateRoot(spawnerDll);   // gets pid, registers in table
+        int rc = spawner.Run(new[] { "spawner" });
+
+        Assert.Equal(0, rc);
+        // counter (the child) reported 1,000,000 under its own pid; spawner reported the child's pid.
+        int childPid = (int)SandboxPal.GetReport(spawner.Pid);
+        Assert.Equal(1_000_000, SandboxPal.GetReport(childPid));
+        Assert.NotEqual(spawner.Pid, childPid);
+    }
 }

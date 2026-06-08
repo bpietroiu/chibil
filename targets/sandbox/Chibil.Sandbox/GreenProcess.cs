@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Reflection;
 
 namespace Chibil.Sandbox
@@ -17,7 +18,11 @@ namespace Chibil.Sandbox
         {
             Pid = pid;
             _alc = new ToolLoadContext($"green-{pid}");
-            Assembly asm = _alc.LoadFromAssemblyPath(toolDllPath);
+            // Load from memory (not LoadFromAssemblyPath) so the ALC never holds a file
+            // handle: the dll stays overwritable by the next build, and the context can
+            // unload cleanly (Task 5) without a lingering file lock.
+            byte[] bytes = File.ReadAllBytes(toolDllPath);
+            Assembly asm = _alc.LoadFromStream(new MemoryStream(bytes));
             _main = asm.EntryPoint
                 ?? throw new InvalidOperationException($"tool '{toolDllPath}' has no entry point");
         }
