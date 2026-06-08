@@ -72,6 +72,21 @@ namespace Chibil.Sandbox
             lock (_lock) { var c = Split(path, "/"); return ResolveNode(c, c.Length) != null; }
         }
 
+        /// <summary>Metadata for <paramref name="path"/>: returns false if it does not exist;
+        /// otherwise sets whether it is a directory and its size (0 for dirs).</summary>
+        public bool Stat(string path, string cwd, out bool isDir, out long size)
+        {
+            lock (_lock)
+            {
+                var comps = Split(path, cwd);
+                var node = ResolveNode(comps, comps.Length);
+                if (node == null) { isDir = false; size = 0; return false; }
+                isDir = node.IsDir;
+                size = node.IsDir ? 0 : node.File.Length;
+                return true;
+            }
+        }
+
         public int Mkdir(string path, string cwd)
         {
             lock (_lock)
@@ -84,6 +99,20 @@ namespace Chibil.Sandbox
                 if (!parent.Children.ContainsKey(name))
                     parent.Children[name] = new Node { IsDir = true, Children = new Dictionary<string, Node>() };
                 return 0;
+            }
+        }
+
+        /// <summary>Entries of a directory (name, isDir), or null if not a directory.</summary>
+        public (string name, bool isDir)[] ListDir(string path, string cwd)
+        {
+            lock (_lock)
+            {
+                var comps = Split(path, cwd);
+                var node = ResolveNode(comps, comps.Length);
+                if (node == null || !node.IsDir) return null;
+                var list = new System.Collections.Generic.List<(string, bool)>();
+                foreach (var kv in node.Children) list.Add((kv.Key, kv.Value.IsDir));
+                return list.ToArray();
             }
         }
 

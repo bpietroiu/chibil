@@ -69,6 +69,9 @@ namespace Chibil.Sandbox
             _file = file; _readable = readable; _writable = writable;
         }
 
+        /// <summary>The underlying file (for fstat).</summary>
+        public VfsFile File => _file;
+
         public override int Read(Span<byte> dst)
         {
             if (!_readable) return -EBADF;
@@ -90,5 +93,22 @@ namespace Chibil.Sandbox
         }
 
         protected override void OnLastClose() { }   // the VfsFile persists in the tree
+    }
+
+    /// <summary>An open directory: a snapshot of its entries with a per-fd read cursor, for
+    /// getdents64. Reading/writing bytes is invalid (a directory is not a byte stream).</summary>
+    public sealed class DirHandle : FileHandle
+    {
+        /// <summary>The directory's entries (name, isDir), snapshotted at open.</summary>
+        public (string name, bool isDir)[] Entries { get; }
+
+        /// <summary>How many entries getdents64 has already emitted.</summary>
+        public int Pos;
+
+        public DirHandle((string name, bool isDir)[] entries) => Entries = entries;
+
+        public override int Read(Span<byte> dst) => -EBADF;     // use getdents64, not read
+        public override int Write(ReadOnlySpan<byte> src) => -EBADF;
+        protected override void OnLastClose() { }
     }
 }

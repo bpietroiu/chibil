@@ -30,7 +30,14 @@ namespace Chibil.Sandbox
         const long SYS_write  = 1;
         const long SYS_open   = 2;
         const long SYS_close  = 3;
+        const long SYS_stat   = 4;
+        const long SYS_fstat  = 5;
+        const long SYS_lstat  = 6;
         const long SYS_lseek  = 8;
+        const long SYS_getdents64 = 217;
+        const long SYS_newfstatat = 262;
+        // struct stat st_mode type bits + a default permission
+        const uint S_IFREG = 0x8000, S_IFDIR = 0x4000, S_IFIFO = 0x1000;
         const long SYS_ioctl  = 16;
         const long SYS_writev = 20;
         const long SYS_dup2   = 33;
@@ -63,6 +70,9 @@ namespace Chibil.Sandbox
         static long DoOpen(string path, long flags)
         {
             var proc = CurrentProc();
+            // A directory open (e.g. opendir) returns a DirHandle for getdents64.
+            if (_vfs.Stat(path, proc.Cwd, out bool isDir, out _) && isDir)
+                return proc.Fds.Add(new DirHandle(_vfs.ListDir(path, proc.Cwd)));
             bool create = (flags & O_CREAT) != 0;
             bool trunc  = (flags & O_TRUNC) != 0;
             long acc = flags & 3;                       // O_RDONLY=0 / O_WRONLY=1 / O_RDWR=2
@@ -71,6 +81,52 @@ namespace Chibil.Sandbox
             VfsFile file = _vfs.Open(path, proc.Cwd, create, trunc, out int err);
             if (file == null) return err;               // negative errno
             return proc.Fds.Add(new VfsFileHandle(file, readable, writable));
+        }
+
+        /// <summary>getdents64: fill <paramref name="bufptr"/> with linux_dirent64 records from
+        /// the directory <paramref name="dh"/>, advancing its cursor. Returns bytes written, or 0
+        /// at end of directory. Layout: d_ino@0(8) d_off@8(8) d_reclen@16(2) d_type@18(1) d_name@19.</summary>
+        static long DoGetDents(DirHandle dh, long bufptr, long bufsize)
+        {
+            byte* buf = (byte*)bufptr;
+            long written = 0;
+            while (dh.Pos < dh.Entries.Length)
+            {
+                var (name, isDir) = dh.Entries[dh.Pos];
+                byte[] nameBytes = System.Text.Encoding.UTF8.GetBytes(name);
+                int reclen = (19 + nameBytes.Length + 1 + 7) & ~7;   // 8-byte aligned, NUL-terminated
+                if (written + reclen > bufsize) break;               // no room — stop (caller calls again)
+                byte* rec = buf + written;
+                *(long*)(rec + 0)  = dh.Pos + 1;                     // d_ino (any nonzero)
+                *(long*)(rec + 8)  = dh.Pos + 1;                     // d_off (next cursor)
+                *(ushort*)(rec + 16) = (ushort)reclen;              // d_reclen
+                rec[18] = (byte)(isDir ? 4 : 8);                    // d_type: DT_DIR=4 / DT_REG=8
+                for (int i = 0; i < nameBytes.Length; i++) rec[19 + i] = nameBytes[i];
+                rec[19 + nameBytes.Length] = 0;                     // NUL
+                written += reclen;
+                dh.Pos++;
+            }
+            return written;
+        }
+
+        /// <summary>Fill an x86-64 Linux `struct stat` (144 bytes): st_mode@24, st_size@48
+        /// are what bash/ls actually read; the rest is zeroed with sane st_ino/nlink/blksize.</summary>
+        static void FillStat(byte* buf, uint mode, long size)
+        {
+            for (int i = 0; i < 144; i++) buf[i] = 0;
+            *(long*)(buf + 8)  = 1;        // st_ino
+            *(long*)(buf + 16) = 1;        // st_nlink
+            *(uint*)(buf + 24) = mode;     // st_mode
+            *(long*)(buf + 48) = size;     // st_size
+            *(long*)(buf + 56) = 4096;     // st_blksize
+        }
+
+        static long DoStat(string path, long bufptr)
+        {
+            if (!_vfs.Stat(path, CurrentProc().Cwd, out bool isDir, out long size))
+                return -2;                                  // -ENOENT
+            FillStat((byte*)bufptr, (isDir ? S_IFDIR : S_IFREG) | (isDir ? 0x1EDu : 0x1A4u), size);
+            return 0;
         }
 
         /// <summary>Bind target for __chibil_get_tp (no TLS pointer needed in the spike).</summary>
@@ -128,11 +184,30 @@ namespace Chibil.Sandbox
                     return DoOpen(ReadCString(a1), a2);
                 case SYS_openat:
                     return DoOpen(ReadCString(a2), a3);     // a1 = dirfd (treated as AT_FDCWD)
+                case SYS_stat:
+                case SYS_lstat:
+                    return DoStat(ReadCString(a1), a2);
+                case SYS_newfstatat:
+                    return DoStat(ReadCString(a2), a3);     // a1 = dirfd (AT_FDCWD)
+                case SYS_fstat:
+                {
+                    var h = CurrentFds().Get((int)a1);
+                    if (h == null) return -EBADF;
+                    if (h is VfsFileHandle vf) FillStat((byte*)a2, S_IFREG | 0x1A4u, vf.File.Length);
+                    else FillStat((byte*)a2, S_IFIFO | 0x1A4u, 0);   // pipe/sink -> FIFO
+                    return 0;
+                }
                 case SYS_lseek:
                 {
                     var h = CurrentFds().Get((int)a1);
                     if (h is VfsFileHandle vf) return vf.Seek(a2, (int)a3);
                     return -EBADF;
+                }
+                case SYS_getdents64:
+                {
+                    var h = CurrentFds().Get((int)a1);
+                    if (h is DirHandle dh) return DoGetDents(dh, a2, a3);
+                    return -EBADF;                              // -ENOTDIR would need a distinct fd kind
                 }
                 case SYS_close:
                     return CurrentFds().Close((int)a1);
