@@ -323,6 +323,63 @@ public class CodeGen
         return (count, condLoop, condBranch);
     }
 
+    /// <summary>True if statement <paramref name="n"/>'s OWN subtree (its children, but NOT its
+    /// <c>.Next</c> siblings) contains a setjmp call — used to find which top-level body statement
+    /// holds the setjmp without crossing into the following statements.</summary>
+    private static bool StmtSubtreeHasSetjmp(Node n)
+    {
+        if (n == null) return false;
+        if (n.Kind == NodeKind.FunCall && n.Lhs is { Kind: NodeKind.Var, Var: { IsFunction: true } v }
+            && IsSetjmpName(v.Name))
+            return true;
+        return NodeContainsSetjmp(n.Lhs) || NodeContainsSetjmp(n.Rhs) || NodeContainsSetjmp(n.Cond)
+            || NodeContainsSetjmp(n.Then) || NodeContainsSetjmp(n.Els) || NodeContainsSetjmp(n.Init)
+            || NodeContainsSetjmp(n.Inc) || NodeContainsSetjmp(n.Body) || NodeContainsSetjmp(n.Args);
+    }
+
+    /// <summary>The first statement in the body's top-level <c>.Next</c> chain whose subtree holds
+    /// a setjmp (the granularity at which the whole-body try is split).</summary>
+    private static Node FirstSetjmpStmt(Node head)
+    {
+        for (Node n = head; n != null; n = n.Next)
+            if (StmtSubtreeHasSetjmp(n)) return n;
+        return null;
+    }
+
+    /// <summary>True if a statement-chain (n and its <c>.Next</c> siblings) and all their subtrees
+    /// contain NO branch target/source that could cross a try boundary: no <c>goto</c> (also covers
+    /// break/continue, lowered to goto), no user <c>Label</c>, no <c>case</c>. When the hoisted
+    /// prefix is branch-free, nothing branches across the split's try boundary, so the split emits
+    /// only legal IL with NO leave-trampoline machinery needed.</summary>
+    private static bool ChainHasBranchTargets(Node n)
+    {
+        for (; n != null; n = n.Next)
+        {
+            if (n.Kind is NodeKind.Goto or NodeKind.Label or NodeKind.Case) return true;
+            if (ChainHasBranchTargets(n.Lhs) || ChainHasBranchTargets(n.Rhs) || ChainHasBranchTargets(n.Cond)
+                || ChainHasBranchTargets(n.Then) || ChainHasBranchTargets(n.Els) || ChainHasBranchTargets(n.Init)
+                || ChainHasBranchTargets(n.Inc) || ChainHasBranchTargets(n.Body) || ChainHasBranchTargets(n.Args))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>True if every statement in the prefix [<paramref name="head"/>, <paramref name="stop"/>)
+    /// is branch-free (see <see cref="ChainHasBranchTargets"/>) — i.e. safe to hoist OUTSIDE the
+    /// setjmp try region without any control flow crossing the boundary.</summary>
+    private static bool PrefixBranchFree(Node head, Node stop)
+    {
+        for (Node n = head; n != stop; n = n.Next)
+        {
+            if (n.Kind is NodeKind.Goto or NodeKind.Label or NodeKind.Case) return false;
+            if (ChainHasBranchTargets(n.Lhs) || ChainHasBranchTargets(n.Rhs) || ChainHasBranchTargets(n.Cond)
+                || ChainHasBranchTargets(n.Then) || ChainHasBranchTargets(n.Els) || ChainHasBranchTargets(n.Init)
+                || ChainHasBranchTargets(n.Inc) || ChainHasBranchTargets(n.Body) || ChainHasBranchTargets(n.Args))
+                return false;
+        }
+        return true;
+    }
+
     // Default-convention MemberRef signatures for the linker-synthesized helpers.
     private static readonly byte[] RtLongjmp = { 0x00, 0x02, 0x01, 0x18, 0x08 }; // void(native int, int32)
     private static readonly byte[] RtMatch   = { 0x00, 0x01, 0x08, 0x18 };       // int32(native int)
@@ -393,18 +450,43 @@ public class CodeGen
         _setjmpOuterLabels.Clear();
         _setjmpLeaveTrampolines.Clear();
 
-        if (!_setjmpDeferStart)
+        if (_setjmpDeferStart)
         {
-            // Lhead must sit OUTSIDE the try: the handler `leave Lhead`s to resume, and
-            // leaving INTO a try is illegal. A nop separates Lhead from tryStart so the
-            // leave lands before the try and falls into it.
+            // Resume-at-site: the (single) setjmp lowering marks Lhead/tryStart at its call.
+            GenStmt(fn.Body);
+        }
+        else
+        {
+            // Whole-body modes. Native longjmp resumes AT the setjmp call and NEVER re-runs code
+            // sequenced before it; the plain whole-body wrap re-enters at Lhead (function-body
+            // start) and re-runs EVERYTHING — wrong when leading setup has side effects (e.g. bash
+            // parse_and_execute's begin_unwind_frame(PE_TAG) before its setjmp loop: the re-run
+            // duplicates the unwind-protect list -> double free on a later exit/errexit longjmp).
+            // So hoist the leading top-level statements (those before the one CONTAINING the
+            // setjmp) OUTSIDE the try, and start the try at the setjmp-containing statement, so
+            // they run exactly once. Guard: only when that prefix is branch-free (no goto/label/
+            // case), so no control flow crosses the new try boundary (which would be illegal IL);
+            // otherwise fall back to the whole-body wrap (valid IL, prior behavior).
+            Node head = fn.Body.Kind == NodeKind.Block ? fn.Body.Body : null;
+            Node sjStmt = head != null ? FirstSetjmpStmt(head) : null;
+            bool split = sjStmt != null && sjStmt != head && PrefixBranchFree(head, sjStmt);
+
+            if (split)
+                for (Node n = head; n != sjStmt; n = n.Next) GenStmt(n);   // prefix: outside try, once
+
+            // Lhead must sit OUTSIDE the try: the handler `leave Lhead`s to resume, and leaving
+            // INTO a try is illegal. A nop separates Lhead from tryStart so the leave lands before
+            // the try and falls into it.
             _enc.MarkLabel(_setjmpLhead);
             _enc.OpCode(ILOpCode.Nop);
             _enc.MarkLabel(tryStart);
             _setjmpTryOpen = true;
+
+            if (split)
+                for (Node n = sjStmt; n != null; n = n.Next) GenStmt(n);   // setjmp stmt + rest: in try
+            else
+                GenStmt(fn.Body);                                          // whole body in the try
         }
-        // In defer mode, the (single) setjmp lowering marks Lhead/tryStart at its site.
-        GenStmt(fn.Body);
         // Normal fall-through end of the try -> leave to the epilogue.
         _enc.Branch(ILOpCode.Leave, _setjmpEpiLabel);
         // Leave-trampolines for branches that exit the try to a label marked before
