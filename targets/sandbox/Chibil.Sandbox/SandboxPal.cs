@@ -31,9 +31,14 @@ namespace Chibil.Sandbox
         const long SYS_open   = 2;
         const long SYS_close  = 3;
         const long SYS_lseek  = 8;
+        const long SYS_ioctl  = 16;
+        const long SYS_writev = 20;
         const long SYS_dup2   = 33;
+        const long SYS_exit       = 60;
+        const long SYS_exit_group = 231;
         const long SYS_openat = 257;
         const long SYS_pipe2  = 293;
+        const long ENOTTY = 25;
 
         // open() flags (x86-64 Linux)
         const long O_WRONLY = 1, O_RDWR = 2, O_CREAT = 0x40, O_TRUNC = 0x200;
@@ -97,6 +102,28 @@ namespace Chibil.Sandbox
                     if (h == null) return -EBADF;
                     return h.Write(new ReadOnlySpan<byte>((void*)a2, (int)a3));
                 }
+                case SYS_writev:
+                {
+                    var h = CurrentFds().Get((int)a1);
+                    if (h == null) return -EBADF;
+                    long total = 0;
+                    byte* iov = (byte*)a2;                       // struct iovec { void* base; size_t len } (16 bytes)
+                    for (int i = 0; i < (int)a3; i++)
+                    {
+                        ulong* e = (ulong*)(iov + i * 16);
+                        ulong basep = e[0], len = e[1];
+                        if (len == 0) continue;
+                        int w = h.Write(new ReadOnlySpan<byte>((void*)basep, (int)len));
+                        if (w < 0) return total > 0 ? total : w;
+                        total += w;
+                    }
+                    return total;
+                }
+                case SYS_ioctl:
+                    return -ENOTTY;                              // sandbox fds are never ttys
+                case SYS_exit:
+                case SYS_exit_group:
+                    throw new GreenProcessExit((int)a1);        // terminate this green-process, not the host
                 case SYS_open:
                     return DoOpen(ReadCString(a1), a2);
                 case SYS_openat:
@@ -129,7 +156,11 @@ namespace Chibil.Sandbox
                 case SYS_wait:
                     return _table.Wait((int)a1);
             }
-            return -ENOSYS;
+            // Pure memory / random / misc syscalls (mmap, mprotect, munmap, madvise,
+            // getrandom, ...) reuse the proven compute PAL. NOTE: SandboxPal handles
+            // read/write/writev/exit above, so those never reach here (Chibil.Pal would
+            // route them to the host Console / Environment.Exit).
+            return global::Chibil.Pal.Syscall(n, a1, a2, a3, a4, a5, a6);
         }
 
         // Test/inspection surface (kernel-side).

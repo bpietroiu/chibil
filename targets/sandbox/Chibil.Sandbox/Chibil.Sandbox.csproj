@@ -5,4 +5,10 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Delegate pure memory/random syscalls (mmap/mprotect/munmap/madvise/getrandom)
+         to the proven compute PAL; the sandbox kernel overrides I/O, fs and process. -->
+    <ProjectReference Include="..\..\build\Chibil.Pal\Chibil.Pal.csproj" />
+  </ItemGroup>
 </Project>

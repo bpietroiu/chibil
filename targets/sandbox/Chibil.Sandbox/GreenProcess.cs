@@ -4,6 +4,14 @@ using System.Reflection;
 
 namespace Chibil.Sandbox
 {
+    /// <summary>Thrown by the exit/exit_group syscall to unwind a green-process to completion
+    /// with its exit code (instead of terminating the host process).</summary>
+    public sealed class GreenProcessExit : Exception
+    {
+        public int Code { get; }
+        public GreenProcessExit(int code) => Code = code;
+    }
+
     /// <summary>One green-process: a tool's Main running in an isolated ToolLoadContext,
     /// with the SandboxPal current-process context set on the executing thread so the
     /// shared static Syscall resolves to this pid.</summary>
@@ -47,6 +55,10 @@ namespace Chibil.Sandbox
             {
                 object ret = _main.Invoke(null, new object[] { args });
                 return ret is int code ? code : 0;
+            }
+            catch (TargetInvocationException tie) when (tie.InnerException is GreenProcessExit ex)
+            {
+                return ex.Code;   // the tool called exit_group(code)
             }
             finally
             {

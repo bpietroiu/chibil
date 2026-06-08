@@ -41,6 +41,22 @@ namespace Chibil.Sandbox
         protected override void OnLastClose() => _pipe.CloseWriter();
     }
 
+    /// <summary>A write-only sink that accumulates everything written, for the host to read
+    /// back — e.g. seeded at fd 1 to capture a green-process's stdout.</summary>
+    public sealed class BufferSinkHandle : FileHandle
+    {
+        readonly System.IO.MemoryStream _buf = new System.IO.MemoryStream();
+        readonly object _lock = new object();
+
+        public override int Read(Span<byte> dst) => -EBADF;
+        public override int Write(ReadOnlySpan<byte> src)
+        {
+            lock (_lock) { _buf.Write(src); return src.Length; }
+        }
+        protected override void OnLastClose() { }
+        public byte[] ToArray() { lock (_lock) return _buf.ToArray(); }
+    }
+
     /// <summary>An open regular file: a per-fd offset over a shared <see cref="VfsFile"/>.</summary>
     public sealed class VfsFileHandle : FileHandle
     {
