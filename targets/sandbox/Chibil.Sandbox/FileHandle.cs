@@ -40,4 +40,39 @@ namespace Chibil.Sandbox
         public override int Write(ReadOnlySpan<byte> src) => _pipe.Write(src);
         protected override void OnLastClose() => _pipe.CloseWriter();
     }
+
+    /// <summary>An open regular file: a per-fd offset over a shared <see cref="VfsFile"/>.</summary>
+    public sealed class VfsFileHandle : FileHandle
+    {
+        readonly VfsFile _file;
+        readonly bool _readable, _writable;
+        long _off;
+
+        public VfsFileHandle(VfsFile file, bool readable, bool writable)
+        {
+            _file = file; _readable = readable; _writable = writable;
+        }
+
+        public override int Read(Span<byte> dst)
+        {
+            if (!_readable) return -EBADF;
+            int n = _file.ReadAt(_off, dst); _off += n; return n;
+        }
+
+        public override int Write(ReadOnlySpan<byte> src)
+        {
+            if (!_writable) return -EBADF;
+            int n = _file.WriteAt(_off, src); _off += n; return n;
+        }
+
+        /// <summary>lseek: whence 0=SET, 1=CUR, 2=END. Returns the new offset.</summary>
+        public long Seek(long offset, int whence)
+        {
+            long basis = whence == 1 ? _off : whence == 2 ? _file.Length : 0;
+            _off = basis + offset;
+            return _off;
+        }
+
+        protected override void OnLastClose() { }   // the VfsFile persists in the tree
+    }
 }

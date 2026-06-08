@@ -21,12 +21,22 @@ namespace Chibil.Sandbox
         // Process table, attached once by the host.
         static ProcessTable _table;
 
+        // The sandbox's virtual filesystem (one per sandbox process).
+        static VirtualFs _vfs = new VirtualFs();
+        public static VirtualFs Vfs => _vfs;
+
         // Real Linux x86-64 syscall numbers (so tools — and eventually bash — bind unchanged).
         const long SYS_read   = 0;
         const long SYS_write  = 1;
+        const long SYS_open   = 2;
         const long SYS_close  = 3;
+        const long SYS_lseek  = 8;
         const long SYS_dup2   = 33;
+        const long SYS_openat = 257;
         const long SYS_pipe2  = 293;
+
+        // open() flags (x86-64 Linux)
+        const long O_WRONLY = 1, O_RDWR = 2, O_CREAT = 0x40, O_TRUNC = 0x200;
         // Sandbox-internal calls for the spike harness.
         const long SYS_report = 0x1000;
         const long SYS_spawn  = 0x1001;
@@ -34,7 +44,29 @@ namespace Chibil.Sandbox
         const long ENOSYS = 38;
         const long EBADF  = 9;
 
+        static GreenProcess CurrentProc() => _table.Get(_currentPid);
         static FdTable CurrentFds() => _table.Get(_currentPid).Fds;
+
+        static string ReadCString(long ptr)
+        {
+            byte* p = (byte*)ptr;
+            int len = 0;
+            while (p[len] != 0) len++;
+            return System.Text.Encoding.UTF8.GetString(p, len);
+        }
+
+        static long DoOpen(string path, long flags)
+        {
+            var proc = CurrentProc();
+            bool create = (flags & O_CREAT) != 0;
+            bool trunc  = (flags & O_TRUNC) != 0;
+            long acc = flags & 3;                       // O_RDONLY=0 / O_WRONLY=1 / O_RDWR=2
+            bool writable = acc == O_WRONLY || acc == O_RDWR;
+            bool readable = acc == 0 || acc == O_RDWR;
+            VfsFile file = _vfs.Open(path, proc.Cwd, create, trunc, out int err);
+            if (file == null) return err;               // negative errno
+            return proc.Fds.Add(new VfsFileHandle(file, readable, writable));
+        }
 
         /// <summary>Bind target for __chibil_get_tp (no TLS pointer needed in the spike).</summary>
         public static ulong GetTp() => 0;
@@ -65,6 +97,16 @@ namespace Chibil.Sandbox
                     if (h == null) return -EBADF;
                     return h.Write(new ReadOnlySpan<byte>((void*)a2, (int)a3));
                 }
+                case SYS_open:
+                    return DoOpen(ReadCString(a1), a2);
+                case SYS_openat:
+                    return DoOpen(ReadCString(a2), a3);     // a1 = dirfd (treated as AT_FDCWD)
+                case SYS_lseek:
+                {
+                    var h = CurrentFds().Get((int)a1);
+                    if (h is VfsFileHandle vf) return vf.Seek(a2, (int)a3);
+                    return -EBADF;
+                }
                 case SYS_close:
                     return CurrentFds().Close((int)a1);
                 case SYS_dup2:
@@ -93,6 +135,6 @@ namespace Chibil.Sandbox
         // Test/inspection surface (kernel-side).
         public static long GetReport(int pid) => _reports[pid];
         public static int ReportCount => _reports.Count;
-        public static void Reset() => _reports.Clear();
+        public static void Reset() { _reports.Clear(); _vfs = new VirtualFs(); }
     }
 }

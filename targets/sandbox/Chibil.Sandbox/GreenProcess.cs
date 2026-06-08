@@ -18,6 +18,9 @@ namespace Chibil.Sandbox
         /// current pid). Seed fds 0/1/2 here before Run to wire stdio/pipes.</summary>
         public FdTable Fds { get; } = new FdTable();
 
+        /// <summary>Current working directory, for resolving relative paths.</summary>
+        public string Cwd { get; set; } = "/";
+
         public GreenProcess(int pid, string toolDllPath)
         {
             Pid = pid;
