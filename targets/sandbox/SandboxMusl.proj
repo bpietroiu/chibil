@@ -1,0 +1,68 @@
+<Project DefaultTargets="Build">
+  <!--
+    Build a managed-musl PROGRAM (has main) linked against the sandbox kernel
+    (Chibil.Sandbox.SandboxPal), not Chibil.Pal. Mirrors QuickJsManaged.proj but
+    binds the syscall ABI to SandboxPal and produces a runnable tool the in-process
+    green-process host (the xUnit tests) loads.
+
+        dotnet build targets/sandbox/SandboxMusl.proj -c Release -p:ToolName=hello
+  -->
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.props" />
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.targets" />
+
+  <PropertyGroup>
+    <MuslRoot>$(MSBuildThisFileDirectory)..\musl-1.2.6</MuslRoot>
+    <BuildInfra>$(MSBuildThisFileDirectory)..\build</BuildInfra>
+    <MuslObjDir>$(ChibilArtifacts)\managed-musl</MuslObjDir>
+    <SandboxOut>$(ChibilArtifacts)\bin\sandbox</SandboxOut>
+    <ToolName Condition="'$(ToolName)' == ''">hello</ToolName>
+    <ToolDll>$(SandboxOut)\$(ToolName).dll</ToolDll>
+    <SandboxProj>$(MSBuildThisFileDirectory)Chibil.Sandbox\Chibil.Sandbox.csproj</SandboxProj>
+    <SandboxDll>$(ChibilArtifacts)\bin\Chibil.Sandbox\release\Chibil.Sandbox.dll</SandboxDll>
+  </PropertyGroup>
+
+  <Target Name="Build">
+    <!-- Prereqs: the managed-musl object set + the kernel assembly. -->
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\managed-musl\ManagedMusl.proj" />
+    <MSBuild Projects="$(SandboxProj)" Properties="Configuration=Release" />
+
+    <ItemGroup>
+      <MuslInc Include="$(BuildInfra)\musl-compat;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\src\include;$(MuslRoot)\src\internal;$(MuslRoot)\include;$(MuslRoot)\obj\include" />
+    </ItemGroup>
+
+    <!-- The tool TU (a program: has main, so no export-api facade). -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(MSBuildThisFileDirectory)musl-tools\$(ToolName).c"
+                   OutputDir="$(SandboxOut)\obj"
+                   IncludeDirs="@(MuslInc)"
+                   Defines="_GNU_SOURCE;_XOPEN_SOURCE=700"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="ToolObj" />
+    </ChibilCompile>
+
+    <!-- The PAL shim (musl arch shadows / internal stubs). -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(BuildInfra)\musl-compat\pal-shim.c"
+                   OutputDir="$(SandboxOut)\obj"
+                   IncludeDirs="@(MuslInc)"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="ShimObj" />
+    </ChibilCompile>
+
+    <ItemGroup>
+      <MuslObj Include="$(MuslObjDir)\*.obj" Exclude="$(MuslObjDir)\*oldmalloc*" />
+    </ItemGroup>
+
+    <!-- Runnable program bound to the sandbox kernel. -->
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)"
+                Output="$(ToolDll)"
+                Debug="true"
+                Objects="@(ToolObj);@(MuslObj);@(ShimObj)"
+                Binds="__chibil_syscall=Chibil.Sandbox.SandboxPal.Syscall;__chibil_get_tp=Chibil.Sandbox.SandboxPal.GetTp"
+                References="$(SandboxDll);$(ChibilPalDll)" />
+
+    <Message Importance="high" Text="sandbox musl tool -> $(ToolDll) (bound to SandboxPal)" />
+  </Target>
+</Project>
