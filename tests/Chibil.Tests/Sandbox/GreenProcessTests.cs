@@ -16,4 +16,12 @@ public class GreenProcessTests
         Assert.Equal(42, SandboxPal.GetReport(7));
         Assert.Equal(1, SandboxPal.ReportCount);
     }
+
+    [Fact]
+    public void Counter_tool_builds_and_is_a_loadable_assembly()
+    {
+        string dll = SandboxToolBuilder.Build("counter");
+        Assert.True(System.IO.File.Exists(dll));
+        Assert.True(new System.IO.FileInfo(dll).Length > 0);
+    }
 }
