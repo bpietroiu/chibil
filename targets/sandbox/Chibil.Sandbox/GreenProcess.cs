@@ -14,6 +14,10 @@ namespace Chibil.Sandbox
 
         public int Pid { get; }
 
+        /// <summary>This green-process's file-descriptor table (the kernel resolves it via the
+        /// current pid). Seed fds 0/1/2 here before Run to wire stdio/pipes.</summary>
+        public FdTable Fds { get; } = new FdTable();
+
         public GreenProcess(int pid, string toolDllPath)
         {
             Pid = pid;
@@ -43,6 +47,7 @@ namespace Chibil.Sandbox
             }
             finally
             {
+                Fds.CloseAll();   // exiting releases this process's fds (writer close -> reader EOF)
                 SandboxPal.EnterProcess(prev);
             }
         }

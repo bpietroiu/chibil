@@ -15,6 +15,9 @@ namespace Chibil.Sandbox
 
         public void RegisterTool(int id, string toolDllPath) => _tools[id] = toolDllPath;
 
+        /// <summary>The green-process with this pid (the kernel uses it to resolve fd tables).</summary>
+        public GreenProcess Get(int pid) => _procs.TryGetValue(pid, out var gp) ? gp : null;
+
         public GreenProcess CreateRoot(string toolDllPath)
         {
             int pid = Interlocked.Increment(ref _nextPid);

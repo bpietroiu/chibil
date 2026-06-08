@@ -10,7 +10,7 @@ namespace Chibil.Sandbox
     /// static fields here; per-green-process state is resolved via the [ThreadStatic]
     /// current pid set by <see cref="EnterProcess"/> before a green-process runs.
     /// </summary>
-    public static class SandboxPal
+    public static unsafe class SandboxPal
     {
         // Shared kernel state (singleton across all green-processes).
         static readonly ConcurrentDictionary<int, long> _reports = new ConcurrentDictionary<int, long>();
@@ -21,10 +21,20 @@ namespace Chibil.Sandbox
         // Process table, attached once by the host.
         static ProcessTable _table;
 
+        // Real Linux x86-64 syscall numbers (so tools — and eventually bash — bind unchanged).
+        const long SYS_read   = 0;
+        const long SYS_write  = 1;
+        const long SYS_close  = 3;
+        const long SYS_dup2   = 33;
+        const long SYS_pipe2  = 293;
+        // Sandbox-internal calls for the spike harness.
         const long SYS_report = 0x1000;
         const long SYS_spawn  = 0x1001;
         const long SYS_wait   = 0x1002;
         const long ENOSYS = 38;
+        const long EBADF  = 9;
+
+        static FdTable CurrentFds() => _table.Get(_currentPid).Fds;
 
         /// <summary>Bind target for __chibil_get_tp (no TLS pointer needed in the spike).</summary>
         public static ulong GetTp() => 0;
@@ -43,6 +53,32 @@ namespace Chibil.Sandbox
         {
             switch (n)
             {
+                case SYS_read:
+                {
+                    var h = CurrentFds().Get((int)a1);
+                    if (h == null) return -EBADF;
+                    return h.Read(new Span<byte>((void*)a2, (int)a3));
+                }
+                case SYS_write:
+                {
+                    var h = CurrentFds().Get((int)a1);
+                    if (h == null) return -EBADF;
+                    return h.Write(new ReadOnlySpan<byte>((void*)a2, (int)a3));
+                }
+                case SYS_close:
+                    return CurrentFds().Close((int)a1);
+                case SYS_dup2:
+                    return CurrentFds().Dup2((int)a1, (int)a2);
+                case SYS_pipe2:
+                {
+                    var pipe = new Pipe();
+                    var fds = CurrentFds();
+                    int rfd = fds.Add(new PipeReadHandle(pipe));
+                    int wfd = fds.Add(new PipeWriteHandle(pipe));
+                    int* outFds = (int*)a1;        // int pipefd[2]
+                    outFds[0] = rfd; outFds[1] = wfd;
+                    return 0;
+                }
                 case SYS_report:
                     _reports[_currentPid] = a1;
                     return 0;

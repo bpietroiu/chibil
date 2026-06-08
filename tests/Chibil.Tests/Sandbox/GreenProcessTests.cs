@@ -4,6 +4,7 @@ using Xunit;
 
 namespace Chibil.Tests.Sandbox;
 
+[Collection("SandboxKernel")]
 public class GreenProcessTests
 {
     [Fact]

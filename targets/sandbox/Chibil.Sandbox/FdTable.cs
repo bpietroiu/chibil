@@ -22,14 +22,14 @@ namespace Chibil.Sandbox
             }
         }
 
-        /// <summary>Install <paramref name="handle"/> at an explicit fd (taking a reference),
-        /// closing whatever was there. Used to seed a child's stdio/pipe fds on spawn.</summary>
+        /// <summary>Install <paramref name="handle"/> at an explicit fd, consuming the caller's
+        /// reference (like Add) and closing whatever was there. Used to seed a green-process's
+        /// stdio/pipe fds before it runs.</summary>
         public void Set(int fd, FileHandle handle)
         {
             lock (_lock)
             {
                 if (_fds.TryGetValue(fd, out var old) && old != handle) old.Unref();
-                handle.Ref();
                 _fds[fd] = handle;
             }
         }
@@ -64,6 +64,17 @@ namespace Chibil.Sandbox
                 _fds.Remove(fd);
                 h.Unref();
                 return 0;
+            }
+        }
+
+        /// <summary>Close every open fd — called when a green-process exits so its pipe/file
+        /// ends are released (a writer-end close gives the reader EOF).</summary>
+        public void CloseAll()
+        {
+            lock (_lock)
+            {
+                foreach (var h in _fds.Values) h.Unref();
+                _fds.Clear();
             }
         }
     }
