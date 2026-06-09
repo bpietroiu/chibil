@@ -1597,6 +1597,19 @@ public class Parser
     private void Initializer2(ref Token rest, Token tok, Initializer init)
     {
         if (init.Ty.Kind == TypeKind.Array && tok.Kind == TokenKind.Str) { StringInitializer(ref rest, tok, init); return; }
+        // C11 6.7.9p14: the string literal initializing a character array may be enclosed
+        // in (optional) braces — `char a[] = { "str" }` is equivalent to `char a[] = "str"`.
+        // Route it to StringInitializer (inline bytes, correct length) instead of falling
+        // into ArrayInitializer1, which mis-sizes the array to a single element and stores
+        // the string as a DECAYED POINTER (an ADDR64 data relocation) — wrong, and a layout
+        // hazard once a second .data static is present.
+        if (init.Ty.Kind == TypeKind.Array && Util.Equal(tok, "{")
+            && tok.Next.Kind == TokenKind.Str && TypeSystem.IsInteger(init.Ty.Base))
+        {
+            StringInitializer(ref rest, tok.Next, init);              // consume the string
+            while (!ConsumeEnd(ref rest, rest)) rest = SkipExcessElement(rest);  // "}" / ",}" / excess
+            return;
+        }
         if (init.Ty.Kind == TypeKind.Array) { if (Util.Equal(tok, "{")) ArrayInitializer1(ref rest, tok, init); else ArrayInitializer2(ref rest, tok, init, 0); return; }
         if (init.Ty.Kind == TypeKind.Struct)
         {

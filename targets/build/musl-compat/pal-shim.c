@@ -200,9 +200,13 @@ int posix_spawn(int *pid, const char *path, const void *fa, const void *attr,
                 char *const argv[], char *const envp[])
 { (void)pid;(void)path;(void)fa;(void)attr;(void)argv;(void)envp; return 38; } /* ENOSYS */
 
-/* Group DB (src/passwd): pulled by misc/initgroups; never on the JS_Eval path. */
-int getgrouplist(const char *user, unsigned gid, unsigned *groups, int *ngroups)
-{ (void)user;(void)gid; if (ngroups) { if (groups && *ngroups>0) groups[0]=gid; *ngroups = 1; } return 0; }
+/* nscd query: src/passwd references __nscd_query for the name-service-cache fallback, but
+ * __getpw_a / __getgr_a read /etc/passwd & /etc/group FIRST and only reach here when the entry
+ * is absent there. The sandbox has no nscd socket, so report "not found" (NULL, errno cleared);
+ * the getpw and getgr lookups then correctly return no-entry. (nscd_query.c is excluded from the
+ * managed set to avoid its socket machinery; getgrouplist now comes from the real src/passwd.) */
+FILE *__nscd_query(int32_t req, const char *key, int32_t *buf, size_t len, int *swap)
+{ (void)req; (void)key; (void)buf; (void)len; (void)swap; errno = 0; return 0; }
 
 /* Network (src/network): no sockets in the managed PAL. Fail with ENOSYS. */
 int socket(int d, int t, int p) { (void)d;(void)t;(void)p; return -1; }

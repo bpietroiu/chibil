@@ -35,17 +35,10 @@ short ospeed = 0;
 int tcgetattr(int fd, struct termios *t) { (void)fd; (void)t; return -1; }  /* not a tty */
 int tcflow(int fd, int action) { (void)fd; (void)action; return 0; }
 
-/* ── passwd / group DB (src/passwd — host user DB not exposed to the sandbox) ─ */
-#include <pwd.h>
-#include <grp.h>
-struct passwd *getpwnam(const char *name) { (void)name; return 0; }
-struct passwd *getpwuid(uid_t uid) { (void)uid; return 0; }
-struct passwd *getpwent(void) { return 0; }
-void setpwent(void) { }
-void endpwent(void) { }
-struct group *getgrent(void) { return 0; }
-void setgrent(void) { }
-void endgrent(void) { }
+/* passwd / group DB: getpwnam/getpwuid/getpwent + getgrent/… are now the REAL musl impls
+ * (src/passwd added to the managed set); they read the sandbox's virtual /etc/passwd and
+ * /etc/group via the VFS, so bash's `~` / `~user` tilde expansion and id lookups work.
+ * (Former feature-absent stubs removed — they would be duplicate symbols.) */
 
 /* ── dynamic loading (no dlopen in a statically-merged image) ──────────────── */
 void *dlopen(const char *file, int mode) { (void)file; (void)mode; return 0; }
@@ -69,18 +62,10 @@ int getpeername(int fd, struct sockaddr *addr, socklen_t *len) { (void)fd; (void
 const struct in6_addr in6addr_any = {{{0}}};
 const struct in6_addr in6addr_loopback = {{{0}}};
 
-/* ── regular expressions (src/regex — not in the managed set) ──────────────── */
-#include <regex.h>
-int regcomp(regex_t *preg, const char *pat, int cflags) { (void)preg; (void)pat; (void)cflags; return REG_BADPAT; }
-int regexec(const regex_t *preg, const char *str, size_t n, regmatch_t pmatch[], int eflags)
-{ (void)preg; (void)str; (void)n; (void)pmatch; (void)eflags; return REG_NOMATCH; }
-size_t regerror(int e, const regex_t *preg, char *buf, size_t size)
-{ (void)e; (void)preg; if (buf && size) buf[0] = 0; return 0; }
-void regfree(regex_t *preg) { (void)preg; }
-
-/* ── filename matching (src — fnmatch not in the managed set) ──────────────── */
-#include <fnmatch.h>
-int fnmatch(const char *pat, const char *str, int flags) { (void)pat; (void)str; (void)flags; return FNM_NOMATCH; }
+/* regular expressions + filename matching: the real TRE regcomp/regexec/regerror/regfree
+ * and fnmatch are now compiled into the managed musl set (src/regex added to
+ * ManagedMusl.proj), so bash links them and its regex/case/glob matching works for real.
+ * The former feature-absent stubs would now be duplicate symbols, so they are gone. */
 
 /* ── temp files (src/temp — sandbox has no host temp dir surface) ──────────── */
 #include <stdlib.h>

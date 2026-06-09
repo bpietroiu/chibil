@@ -20,6 +20,21 @@ namespace Chibil.Sandbox
         readonly Node _root = new Node { IsDir = true, Children = new Dictionary<string, Node>() };
         readonly object _lock = new object();
 
+        public VirtualFs()
+        {
+            // Virtualized user DB. musl's getpwnam/getpwuid/getpwent + getgr* read /etc/passwd
+            // and /etc/group via the VFS (no syscall), so seeding them here is the whole "user
+            // database" — it backs bash's `~` / `~user` tilde expansion, glob's ~user, and id
+            // lookups. Default: a root user and an unprivileged "sandbox" user (HOME=/home/sandbox).
+            Mkdir("/etc", "/");
+            WriteFile("/etc/passwd", System.Text.Encoding.ASCII.GetBytes(
+                "root:x:0:0:root:/root:/bin/sh\n" +
+                "sandbox:x:1000:1000:sandbox:/home/sandbox:/bin/bash\n"));
+            WriteFile("/etc/group", System.Text.Encoding.ASCII.GetBytes(
+                "root:x:0:\n" +
+                "sandbox:x:1000:\n"));
+        }
+
         static string[] Split(string path, string cwd)
         {
             string full = path.StartsWith("/") ? path : (cwd.TrimEnd('/') + "/" + path);

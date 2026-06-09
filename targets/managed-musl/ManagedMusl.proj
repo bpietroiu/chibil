@@ -12,6 +12,15 @@
     <ItemGroup>
       <!-- The subsystem set from build-managed-musl.sh DIRS. -->
       <MuslSrc Include="$(MuslRoot)\src\string\**\*.c;$(MuslRoot)\src\ctype\**\*.c;$(MuslRoot)\src\errno\**\*.c;$(MuslRoot)\src\stdlib\**\*.c;$(MuslRoot)\src\stdio\**\*.c;$(MuslRoot)\src\math\**\*.c;$(MuslRoot)\src\malloc\**\*.c;$(MuslRoot)\src\mman\**\*.c;$(MuslRoot)\src\internal\**\*.c;$(MuslRoot)\src\locale\**\*.c;$(MuslRoot)\src\multibyte\**\*.c;$(MuslRoot)\src\prng\**\*.c;$(MuslRoot)\src\exit\**\*.c;$(MuslRoot)\src\env\**\*.c;$(MuslRoot)\src\misc\**\*.c;$(MuslRoot)\src\time\**\*.c;$(MuslRoot)\src\fenv\**\*.c;$(MuslRoot)\src\complex\**\*.c;$(MuslRoot)\src\fcntl\**\*.c;$(MuslRoot)\src\unistd\**\*.c;$(MuslRoot)\src\stat\**\*.c;$(MuslRoot)\src\dirent\**\*.c;$(MuslRoot)\src\select\**\*.c;$(MuslRoot)\src\signal\**\*.c;$(MuslRoot)\src\process\**\*.c;$(MuslRoot)\src\random\**\*.c;$(MuslRoot)\src\linux\**\*.c" />
+      <!-- POSIX regex (TRE) + fnmatch + glob: real regcomp/regexec for grep and bash `[[ =~ ]]`,
+           and glob() with ~user expansion (now backed by the virtual /etc/passwd, below). -->
+      <MuslSrc Include="$(MuslRoot)\src\regex\**\*.c" />
+      <!-- passwd/group DB: real getpwnam/getpwuid(_r)/getpwent/getgr* that read /etc/passwd and
+           /etc/group via fopen — the sandbox VFS provides those files (virtualized user DB), so
+           ~user / tilde expansion / glob resolve. Exclude nscd_query.c (the name-service-cache
+           socket path): __getpw_a reads /etc/passwd first and only references __nscd_query for the
+           not-found fallback, which a tiny no-sockets stub (pal-shim) satisfies. -->
+      <MuslSrc Include="$(MuslRoot)\src\passwd\**\*.c" Exclude="$(MuslRoot)\src\passwd\nscd_query.c" />
       <MuslInc Include="$(BuildInfra)\musl-compat;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\src\include;$(MuslRoot)\src\internal;$(MuslRoot)\include;$(MuslRoot)\obj\include" />
     </ItemGroup>
 
