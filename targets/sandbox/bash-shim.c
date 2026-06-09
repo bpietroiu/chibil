@@ -93,7 +93,10 @@ char *mktemp(char *tmpl) { return tmpl; }
 size_t confstr(int name, char *buf, size_t len) { (void)name; if (buf && len) buf[0] = 0; return 0; }
 long pathconf(const char *path, int name) { (void)path; (void)name; return -1; }
 int getdtablesize(void) { return 1024; }
-int eaccess(const char *path, int mode) { (void)path; (void)mode; return -1; }
+/* eaccess (effective-uid access): the sandbox has no uid distinction, so forward to
+ * access(), which routes through SandboxPal's faccessat -> vfs/tool-registry check.
+ * bash's PATH search uses this to decide a candidate is executable. */
+int eaccess(const char *path, int mode) { return access(path, mode); }
 
 /* ── managed-crt startup ──────────────────────────────────────────────────────
  * The synthesized entry point calls C main() DIRECTLY, bypassing musl's

@@ -15,11 +15,17 @@ public class BashTests
     static string BashDll() =>
         Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", "bash.dll");
 
-    static (string stdout, int rc) RunBash(string script)
+    static string CatDll() =>
+        Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", "cat.dll");
+
+    static (string stdout, int rc) RunBash(string script) => RunBash(script, registerCat: false);
+
+    static (string stdout, int rc) RunBash(string script, bool registerCat)
     {
         SandboxPal.Reset();
         var table = new ProcessTable();
         SandboxPal.AttachProcessTable(table);
+        if (registerCat) table.RegisterTool("cat", CatDll());   // M5: managed coreutil external
 
         var sink = new BufferSinkHandle();
         var proc = table.CreateRoot(BashDll());
@@ -134,6 +140,23 @@ public class BashTests
         var (eso, erc) = RunBash("set -e; false; echo no");   // ERREXIT longjmp, same cleanup path
         Assert.Equal("", eso);
         Assert.Equal(1, erc);
+    }
+
+    /// <summary>M5 walking skeleton: a real external command (`cat`, a managed musl coreutil
+    /// green-process) resolved and executed BY bash. Exercises the full disk-command path on the
+    /// PAL: PATH search via statx tool-discovery, the executable-bit check via faccessat, dropping
+    /// the CMD_NO_FORK in-place-exec optimization (no execve on the PAL), spawning the tool with
+    /// stdio inherited (SYS_spawn_tool), and — the subtle one — fcntl(F_DUPFD) so bash's redirect
+    /// save/restore over stdout doesn't permanently close it before the spawn. cat reads files from
+    /// the shared vfs that the preceding redirections created.</summary>
+    [Fact]
+    public void Bash_runs_cat_external_coreutil()
+    {
+        if (!File.Exists(BashDll()) || !File.Exists(CatDll())) return;
+        Assert.Equal("hi\n",   RunBash("echo hi > /f.txt; cat /f.txt", registerCat: true).stdout);
+        Assert.Equal("a\nb\n", RunBash("echo a > /a; echo b > /b; cat /a /b", registerCat: true).stdout);
+        // redirect over stdout then a clean external: stdout must survive the redirect save/restore
+        Assert.Equal("after\n", RunBash("echo x > /q; echo after", registerCat: true).stdout);
     }
 
     /// <summary>Deeply-NESTED command substitution: recursive `fact 5` (5 levels of comsub, each a

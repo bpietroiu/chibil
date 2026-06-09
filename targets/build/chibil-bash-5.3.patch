@@ -1,5 +1,5 @@
 diff --git a/execute_cmd.c b/execute_cmd.c
-index 070f511..28da70c 100644
+index 070f511..8ae3ef5 100644
 --- a/execute_cmd.c
 +++ b/execute_cmd.c
 @@ -660,6 +660,14 @@ execute_command_internal (COMMAND *command, int asynchronous, int pipe_in, int p
@@ -160,7 +160,23 @@ index 070f511..28da70c 100644
    bind_lastarg (lastarg);
    FREE (command_line);
    dispose_words (words);
-@@ -5831,6 +5936,57 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5780,6 +5885,15 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+ 
+   stdpath = (cmdflags & CMD_STDPATH);	/* use command -p path */
+   nofork = (cmdflags & CMD_NO_FORK);	/* Don't fork, just exec, if no pipes */
++#if defined (CHIBIL_SANDBOX)
++  /* CMD_NO_FORK is the "last command in -c / exec-without-fork" optimization: run the
++     external in place by calling execve to replace the shell image. There is no execve on
++     the green-process PAL (it returns ENOSYS), so the in-place path dead-ends. Clearing it
++     forces the disk command through the spawn branch below (chibil_spawn_tool -> a managed
++     green-process), with the parent continuing — the only model the PAL supports. A not-
++     found command (command==0) still falls through to make_child for the not-found hook. */
++  nofork = 0;
++#endif
+   pathname = words->word->word;
+ 
+   p = 0;
+@@ -5831,6 +5945,63 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    else
      {
        fork_flags = async ? FORK_ASYNC : 0;
@@ -199,8 +215,14 @@ index 070f511..28da70c 100644
 +	  /* alloc=0: the vector ALIASES words' strings (no copy), so free only the
 +	     array — the elements are owned by `words` and freed by the caller. */
 +	  sargs = strvec_from_word_list (words, 0, 0, (int *)NULL);
++#if defined (CHIBIL_SANDBOX)
++	  /* M5: the external resolved to a managed coreutil (its basename is a
++	     registered tool) — spawn it as a green-process, not a real posix_spawn. */
++	  pid = chibil_spawn_tool (command_line, command, sargs, pipe_in, pipe_out, fork_flags);
++#else
 +	  pid = make_child_posix_spawn (savestring (command_line), command, sargs, export_env,
 +					pipe_in, pipe_out, fds_to_close, fork_flags);
++#endif
 +	  free (sargs);
 +
 +	  /* Restore the parent's file descriptors (does not affect the child). */
@@ -219,7 +241,7 @@ index 070f511..28da70c 100644
      }
  
 diff --git a/jobs.c b/jobs.c
-index 528c90f..e645982 100644
+index 528c90f..5cf415c 100644
 --- a/jobs.c
 +++ b/jobs.c
 @@ -27,6 +27,11 @@
@@ -234,7 +256,7 @@ index 528c90f..e645982 100644
  #include <errno.h>
  
  #if defined (HAVE_UNISTD_H)
-@@ -2501,6 +2506,465 @@ make_child (char *command, int flags)
+@@ -2501,6 +2506,508 @@ make_child (char *command, int flags)
    return (pid);
  }
  
@@ -246,6 +268,7 @@ index 528c90f..e645982 100644
 +   and an fd map), reaped through the normal waitpid path (SYS_wait4). */
 +extern long __chibil_syscall (long, long, long, long, long, long, long);
 +#define SANDBOX_SYS_spawn_self 0x1003
++#define SANDBOX_SYS_spawn_tool 0x1004
 +#endif
 +/* To re-exec bash for a subshell/comsub on CoreCLR we must relaunch the actual
 +   process that runs us — typically `dotnet bash.dll` — not bash.dll alone (a
@@ -356,6 +379,48 @@ index 528c90f..e645982 100644
 +}
 +
 +#if defined (CHIBIL_SANDBOX)
++/* M5: exec an external command as a managed coreutil green-process. PATH resolved
++   COMMAND to a path; its basename names a registered managed tool (e.g. "cat").
++   SYS_spawn_tool spawns that tool's image with ARGV and the parent's std fds
++   inherited (or this stage's pipe ends). Returns the child pid (registered for
++   wait_for), or -1 if the basename is not a registered tool. */
++pid_t
++chibil_spawn_tool (char *command, char *path, char **argv, int pipe_in, int pipe_out, int flags)
++{
++  sigset_t set, oset;
++  pid_t pid;
++  char *base;
++  int fdmap[6], async_p;
++
++  base = strrchr (path, '/');
++  base = base ? base + 1 : path;
++
++  sigemptyset (&set);
++  sigaddset (&set, SIGCHLD);
++  sigaddset (&set, SIGINT);
++  sigaddset (&set, SIGTERM);
++  sigemptyset (&oset);
++  sigprocmask (SIG_BLOCK, &set, &oset);
++
++  making_children ();
++  async_p = (flags & FORK_ASYNC);
++
++  fdmap[0] = 0; fdmap[1] = (pipe_in  == NO_PIPE) ? 0 : pipe_in;
++  fdmap[2] = 1; fdmap[3] = (pipe_out == NO_PIPE) ? 1 : pipe_out;
++  fdmap[4] = 2; fdmap[5] = 2;
++  pid = (pid_t) __chibil_syscall (SANDBOX_SYS_spawn_tool, (long)(intptr_t) base,
++				  (long)(intptr_t) argv, (long)(intptr_t) fdmap, 3, 0, 0);
++
++  if (pid < 0)			/* basename is not a registered managed tool */
++    {
++      sigprocmask (SIG_SETMASK, &oset, (sigset_t *)NULL);
++      return (-1);
++    }
++
++  chibil_register_spawned (command ? savestring (command) : (char *)NULL, pid, flags, async_p, &oset);
++  return (pid);
++}
++
 +/* Spawn a fresh bash green-process to run STRING — a deparsed subshell body — as a
 +   subshell: an isolated process whose stdin/stdout/stderr are the PARENT's (or a
 +   pipeline stage's pipe_in/pipe_out), and whose variable/function/option changes do
@@ -701,10 +766,10 @@ index 528c90f..e645982 100644
  void
  ignore_tty_job_signals (void)
 diff --git a/jobs.h b/jobs.h
-index 64509e2..f6afa1c 100644
+index 64509e2..ecbb5ad 100644
 --- a/jobs.h
 +++ b/jobs.h
-@@ -295,6 +295,22 @@ extern void list_stopped_jobs (int);
+@@ -295,6 +295,24 @@ extern void list_stopped_jobs (int);
  extern void list_running_jobs (int);
  
  extern pid_t make_child (char *, int);
@@ -722,6 +787,8 @@ index 64509e2..f6afa1c 100644
 +/* Spawn a fresh bash green-process to run a deparsed subshell body STRING as an
 +   isolated subshell, inheriting the parent's std fds (or pipeline ends). */
 +extern pid_t chibil_spawn_subshell (char *string, int pipe_in, int pipe_out, int flags);
++/* M5: exec an external as a managed coreutil green-process (PATH -> basename -> tool). */
++extern pid_t chibil_spawn_tool (char *command, char *path, char **argv, int pipe_in, int pipe_out, int flags);
 +#endif
 +#endif
  

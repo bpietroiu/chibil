@@ -10,12 +10,28 @@ namespace Chibil.Sandbox
     {
         readonly ConcurrentDictionary<int, GreenProcess> _procs = new ConcurrentDictionary<int, GreenProcess>();
         readonly ConcurrentDictionary<int, string> _tools = new ConcurrentDictionary<int, string>();   // tool id → dll path
+        readonly ConcurrentDictionary<string, string> _namedTools = new ConcurrentDictionary<string, string>();  // M5: external name → dll
         readonly ConcurrentDictionary<int, Task<int>> _running = new ConcurrentDictionary<int, Task<int>>();
         readonly ConcurrentDictionary<int, int> _parent = new ConcurrentDictionary<int, int>();         // child pid → parent pid
         readonly ConcurrentDictionary<int, byte> _reaped = new ConcurrentDictionary<int, byte>();       // pids already reaped by waitpid
         int _nextPid;
 
         public void RegisterTool(int id, string toolDllPath) => _tools[id] = toolDllPath;
+
+        /// <summary>M5: register a managed coreutil so bash can exec it by name (e.g. "cat").
+        /// Discovery (stat/access of /…/cat) and SYS_spawn_tool resolve through this map.</summary>
+        public void RegisterTool(string name, string toolDllPath) => _namedTools[name] = toolDllPath;
+
+        /// <summary>True if <paramref name="name"/> is a registered managed external (for the
+        /// kernel's stat/access tool-discovery).</summary>
+        public bool IsTool(string name) => _namedTools.ContainsKey(name);
+
+        /// <summary>Spawn a registered managed external <paramref name="name"/> as a green-process
+        /// with <paramref name="args"/> (argv) and fd inheritance. Returns the pid, or -1 if the
+        /// name is not a registered tool (bash then reports command-not-found).</summary>
+        public int SpawnTool(string name, string[] args, GreenProcess parent,
+            System.Collections.Generic.IReadOnlyList<(int childFd, int parentFd)> fdMap)
+            => _namedTools.TryGetValue(name, out var dll) ? SpawnImage(dll, args, parent, fdMap) : -1;
 
         /// <summary>The green-process with this pid (the kernel uses it to resolve fd tables).</summary>
         public GreenProcess Get(int pid) => _procs.TryGetValue(pid, out var gp) ? gp : null;

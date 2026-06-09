@@ -36,6 +36,7 @@ namespace Chibil.Sandbox
         const long SYS_lseek  = 8;
         const long SYS_getdents64 = 217;
         const long SYS_newfstatat = 262;
+        const long SYS_statx  = 332;
         // struct stat st_mode type bits + a default permission
         const uint S_IFREG = 0x8000, S_IFDIR = 0x4000, S_IFIFO = 0x1000;
         const long SYS_ioctl  = 16;
@@ -62,6 +63,16 @@ namespace Chibil.Sandbox
         const long SYS_spawn  = 0x1001;
         const long SYS_wait   = 0x1002;
         const long SYS_spawn_self = 0x1003;
+        const long SYS_spawn_tool = 0x1004;   // M5: spawn a registered managed external by name
+        const long SYS_access    = 21;
+        const long SYS_faccessat = 269;
+        const long SYS_dup    = 32;
+        const long SYS_dup3   = 292;
+        const long SYS_fcntl  = 72;
+        // fcntl commands (x86-64 Linux)
+        const long F_DUPFD = 0, F_GETFD = 1, F_SETFD = 2, F_GETFL = 3, F_SETFL = 4, F_DUPFD_CLOEXEC = 1030;
+        const long EINVAL = 22;
+        const long ENOENT = 2;
         const long ENOSYS = 38;
         const long EBADF  = 9;
 
@@ -130,12 +141,66 @@ namespace Chibil.Sandbox
             *(long*)(buf + 56) = 4096;     // st_blksize
         }
 
+        // Resolve a path to a (found, full st_mode, size) triple. Real vfs entries take
+        // precedence; a registered managed external (a PATH dir's "cat") then appears as an
+        // executable 0755 regular file so bash's PATH search/exec-bit check finds it.
+        static bool ResolvePath(string path, out uint mode, out long size)
+        {
+            if (_vfs.Stat(path, CurrentProc().Cwd, out bool isDir, out size))
+            {
+                mode = (isDir ? S_IFDIR : S_IFREG) | (isDir ? 0x1EDu : 0x1A4u);
+                return true;
+            }
+            if (_table != null && _table.IsTool(BaseName(path)))
+            {
+                mode = S_IFREG | 0x1EDu;                         // 0755 — executable
+                size = 0;
+                return true;
+            }
+            mode = 0; size = 0;
+            return false;
+        }
+
         static long DoStat(string path, long bufptr)
         {
-            if (!_vfs.Stat(path, CurrentProc().Cwd, out bool isDir, out long size))
-                return -2;                                  // -ENOENT
-            FillStat((byte*)bufptr, (isDir ? S_IFDIR : S_IFREG) | (isDir ? 0x1EDu : 0x1A4u), size);
+            if (ResolvePath(path, out uint mode, out long size))
+            {
+                FillStat((byte*)bufptr, mode, size);
+                return 0;
+            }
+            return -2;                                          // -ENOENT
+        }
+
+        // statx(dirfd, path, flags, mask, struct statx*) — musl 1.2.6's stat()/lstat()/fstatat()
+        // funnel through SYS_statx on x86-64 (kstat time fields are 32-bit < 64-bit time_t), so
+        // this, not SYS_stat, is what bash's PATH search actually issues. struct statx layout per
+        // linux/stat.h: stx_mask@0 blksize@4 nlink@16 mode@28(u16) ino@32 size@40 (256 bytes).
+        static long DoStatx(string path, long bufptr)
+        {
+            if (!ResolvePath(path, out uint mode, out long size))
+                return -ENOENT;
+            byte* b = (byte*)bufptr;
+            for (int i = 0; i < 256; i++) b[i] = 0;
+            *(uint*)(b + 0)    = 0x7ff;                          // stx_mask = STATX_BASIC_STATS
+            *(uint*)(b + 4)    = 4096;                           // stx_blksize
+            *(uint*)(b + 16)   = 1;                              // stx_nlink
+            *(ushort*)(b + 28) = (ushort)mode;                  // stx_mode (type | perm)
+            *(ulong*)(b + 32)  = 1;                              // stx_ino
+            *(ulong*)(b + 40)  = (ulong)size;                   // stx_size
             return 0;
+        }
+
+        static string BaseName(string path)
+        {
+            int i = path.LastIndexOf('/');
+            return i < 0 ? path : path.Substring(i + 1);
+        }
+
+        static long DoAccess(string path)
+        {
+            if (_vfs.Stat(path, CurrentProc().Cwd, out _, out _)) return 0;
+            if (_table != null && _table.IsTool(BaseName(path))) return 0;
+            return -ENOENT;
         }
 
         /// <summary>Bind target for __chibil_get_tp (musl's TLS base / thread-control block).
@@ -217,6 +282,8 @@ namespace Chibil.Sandbox
                     return DoStat(ReadCString(a1), a2);
                 case SYS_newfstatat:
                     return DoStat(ReadCString(a2), a3);     // a1 = dirfd (AT_FDCWD)
+                case SYS_statx:
+                    return DoStatx(ReadCString(a2), a5);    // a1=dirfd a2=path a3=flags a4=mask a5=buf
                 case SYS_fstat:
                 {
                     var h = CurrentFds().Get((int)a1);
@@ -250,8 +317,33 @@ namespace Chibil.Sandbox
                 }
                 case SYS_close:
                     return CurrentFds().Close((int)a1);
+                case SYS_dup:
+                    return CurrentFds().DupFrom((int)a1, 0);
                 case SYS_dup2:
                     return CurrentFds().Dup2((int)a1, (int)a2);
+                case SYS_dup3:
+                    // dup3(old, new, flags) — flags (O_CLOEXEC) are a no-op in the sandbox.
+                    // EINVAL if old==new (the one case dup3 differs from dup2).
+                    return a1 == a2 ? -EINVAL : CurrentFds().Dup2((int)a1, (int)a2);
+                case SYS_fcntl:
+                    // The descriptor-management subset bash needs. F_DUPFD(_CLOEXEC) is how bash
+                    // saves an fd before redirecting over it (then restores via dup2) — without it,
+                    // a redirect over stdout permanently closes it. CLOEXEC/fd-flags are no-ops in
+                    // the single-image sandbox; F_GETFL reports a plain read/write description.
+                    switch (a2)
+                    {
+                        case F_DUPFD:
+                        case F_DUPFD_CLOEXEC:
+                            return CurrentFds().DupFrom((int)a1, (int)a3);
+                        case F_GETFD:
+                        case F_SETFD:
+                        case F_SETFL:
+                            return CurrentFds().Get((int)a1) == null ? -EBADF : 0;
+                        case F_GETFL:
+                            return CurrentFds().Get((int)a1) == null ? -EBADF : O_RDWR;
+                        default:
+                            return CurrentFds().Get((int)a1) == null ? -EBADF : 0;
+                    }
                 case SYS_pipe:      // pipe(int[2])      — musl x86-64 uses this
                 case SYS_pipe2:     // pipe2(int[2], flags) — flags (O_CLOEXEC/O_NONBLOCK) are no-ops here
                 {
@@ -291,6 +383,25 @@ namespace Chibil.Sandbox
                     var self = CurrentProc();
                     return _table.SpawnImage(self.ToolDllPath, argvList.ToArray(), self, fdMap);
                 }
+                case SYS_spawn_tool:
+                {
+                    // Spawn a registered managed external (M5). a1 = char* name; a2 = char** argv
+                    // (NULL-terminated); a3 = int* (childFd,parentFd) pairs; a4 = pair count.
+                    string name = ReadCString(a1);
+                    var argvList = new System.Collections.Generic.List<string>();
+                    long* av = (long*)a2;
+                    for (int i = 0; av[i] != 0; i++) argvList.Add(ReadCString(av[i]));
+                    int pairs = (int)a4;
+                    var fdMap = new (int childFd, int parentFd)[pairs];
+                    int* m = (int*)a3;
+                    for (int i = 0; i < pairs; i++) fdMap[i] = (m[2 * i], m[2 * i + 1]);
+                    int tpid = _table.SpawnTool(name, argvList.ToArray(), CurrentProc(), fdMap);
+                    return tpid < 0 ? -ENOENT : tpid;
+                }
+                case SYS_access:
+                    return DoAccess(ReadCString(a1));
+                case SYS_faccessat:
+                    return DoAccess(ReadCString(a2));       // a1 = dirfd (AT_FDCWD)
                 case SYS_wait:
                     return _table.Wait((int)a1);
                 case SYS_wait4:

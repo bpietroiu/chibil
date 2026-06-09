@@ -39,6 +39,23 @@ namespace Chibil.Sandbox
             lock (_lock) { return _fds.TryGetValue(fd, out var h) ? h : null; }
         }
 
+        /// <summary>dup(2): point the lowest free fd &gt;= <paramref name="minFd"/> at the same
+        /// description as <paramref name="oldFd"/> (shared, refcounted). Returns the new fd, or
+        /// -EBADF if oldFd is not open. Backs SYS_dup (minFd 0) and fcntl(F_DUPFD, minFd) — the
+        /// latter is how bash saves a descriptor before applying a redirection over it.</summary>
+        public int DupFrom(int oldFd, int minFd)
+        {
+            lock (_lock)
+            {
+                if (!_fds.TryGetValue(oldFd, out var h)) return -FileHandle.EBADF;
+                int fd = minFd < 0 ? 0 : minFd;
+                while (_fds.ContainsKey(fd)) fd++;
+                h.Ref();
+                _fds[fd] = h;
+                return fd;
+            }
+        }
+
         /// <summary>Point <paramref name="newFd"/> at the same description as
         /// <paramref name="oldFd"/> (shared). Returns newFd, or -EBADF if oldFd is invalid.</summary>
         public int Dup2(int oldFd, int newFd)
