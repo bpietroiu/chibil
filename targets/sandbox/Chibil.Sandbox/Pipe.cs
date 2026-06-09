@@ -12,6 +12,7 @@ namespace Chibil.Sandbox
     public sealed class Pipe
     {
         public const int EPIPE = 32;
+        public const int Capacity = 65536;     // ring-buffer size; reported by fcntl(F_GETPIPE_SZ)
 
         readonly byte[] _buf;
         readonly object _lock = new object();
@@ -20,7 +21,7 @@ namespace Chibil.Sandbox
         int _writers = 1;
         int _readers = 1;
 
-        public Pipe(int capacity = 65536)
+        public Pipe(int capacity = Capacity)
         {
             if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));
             _buf = new byte[capacity];

@@ -71,6 +71,7 @@ namespace Chibil.Sandbox
         const long SYS_fcntl  = 72;
         // fcntl commands (x86-64 Linux)
         const long F_DUPFD = 0, F_GETFD = 1, F_SETFD = 2, F_GETFL = 3, F_SETFL = 4, F_DUPFD_CLOEXEC = 1030;
+        const long F_SETPIPE_SZ = 1031, F_GETPIPE_SZ = 1032;
         const long EINVAL = 22;
         const long ENOENT = 2;
         const long ENOSYS = 38;
@@ -379,6 +380,14 @@ namespace Chibil.Sandbox
                             return CurrentFds().Get((int)a1) == null ? -EBADF : 0;
                         case F_GETFL:
                             return CurrentFds().Get((int)a1) == null ? -EBADF : O_RDWR;
+                        case F_GETPIPE_SZ:
+                            // bash sizes a here-document/here-string pipe against this before using
+                            // it; a 0 (the old default) made it think the pipe couldn't hold the doc
+                            // and fall back to the (stubbed) mkstemp tempfile -> heredocs produced
+                            // nothing. Report the Pipe's real capacity.
+                            return CurrentFds().Get((int)a1) == null ? -EBADF : Pipe.Capacity;
+                        case F_SETPIPE_SZ:
+                            return CurrentFds().Get((int)a1) == null ? -EBADF : 0;
                         default:
                             return CurrentFds().Get((int)a1) == null ? -EBADF : 0;
                     }

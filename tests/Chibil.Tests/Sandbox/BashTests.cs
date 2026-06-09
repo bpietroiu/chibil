@@ -34,6 +34,8 @@ public class BashTests
 
         var sink = new BufferSinkHandle();
         var proc = table.CreateRoot(BashDll());
+        proc.Fds.Set(0, new DevNullHandle());      // empty stdin — a process has fd0; heredocs/
+                                                   // here-strings save+redirect it (else they bail)
         proc.Fds.Set(1, sink);
         proc.Fds.Set(2, new BufferSinkHandle());   // swallow shell-init chatter
 
@@ -255,6 +257,20 @@ public class BashTests
         // order: `>/dev/null 2>&1` sends both streams to the bit bucket -> nothing captured
         Assert.Equal("",           RunBash("{ echo x; echo y >&2; } >/dev/null 2>&1").stdout);
         Assert.Equal("done\n",     RunBash("{ echo x; echo y >&2; } >/dev/null 2>&1; echo done").stdout);
+    }
+
+    /// <summary>Here-documents (`<<`) and here-strings (`<<<`): bash builds a small one from a
+    /// PIPE (writes the document, closes the writer, redirects the read end onto fd0). Requires the
+    /// process to HAVE an fd0 to save/restore — the root green-process is seeded with empty stdin.</summary>
+    [Fact]
+    public void Bash_heredoc_herestring()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("hs\n",      RunBash("cat <<< hs", registerExternals: true).stdout);
+        Assert.Equal("rv\n",      RunBash("read v <<< rv; echo $v").stdout);          // builtin reader
+        Assert.Equal("L1\nL2\n",  RunBash("cat <<EOF\nL1\nL2\nEOF", registerExternals: true).stdout);
+        Assert.Equal("x=5\n",     RunBash("cat <<EOF\nx=$((2+3))\nEOF", registerExternals: true).stdout); // expansion
+        Assert.Equal("raw $x\n",  RunBash("cat <<'EOF'\nraw $x\nEOF", registerExternals: true).stdout);    // quoted: no expansion
     }
 
     /// <summary>`source` / `.` runs a script file's commands in the current shell. The file is
