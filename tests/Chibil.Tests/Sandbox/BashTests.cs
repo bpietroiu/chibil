@@ -15,7 +15,7 @@ public class BashTests
     static string BashDll() =>
         Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", "bash.dll");
 
-    static readonly string[] Coreutils = { "cat", "wc", "true", "false", "head", "tail", "ls" };
+    static readonly string[] Coreutils = { "cat", "wc", "true", "false", "head", "tail", "ls", "sort", "grep" };
 
     static string ToolDll(string name) =>
         Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", name + ".dll");
@@ -204,6 +204,24 @@ public class BashTests
         Assert.Equal("2\n3\n", RunBash("printf '1\\n2\\n3\\n' > /n; tail -2 /n", registerExternals: true).stdout);
         Assert.Equal("mid\n",  RunBash("printf 'a\\nmid\\nz\\n' | head -2 | tail -1", registerExternals: true).stdout);
         Assert.Equal("a\nb\nc\n", RunBash("echo x>/b; echo x>/a; echo x>/c; ls /", registerExternals: true).stdout);
+    }
+
+    /// <summary>M5: the text-processing coreutils — `sort` (whole-input transform: lexicographic,
+    /// -r reverse, -n numeric, -u unique) and `grep` (streaming fixed-substring match: -v invert,
+    /// -i fold case, -c count, -n line numbers) — and the canonical multi-stage pipelines they
+    /// compose (`grep | sort | head`, `sort -u | wc -l`). Fixed-string, not regex: the managed musl
+    /// set omits the regex engine.</summary>
+    [Fact]
+    public void Bash_text_pipeline_coreutils()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("a\nb\nc\n", RunBash("printf 'c\\na\\nb\\n' | sort", registerExternals: true).stdout);
+        Assert.Equal("1\n2\n10\n", RunBash("printf '10\\n1\\n2\\n' | sort -n", registerExternals: true).stdout);
+        Assert.Equal("2:two\n",   RunBash("printf 'one\\ntwo\\nthree\\n' | grep -n two", registerExternals: true).stdout);
+        Assert.Equal("2\n",       RunBash("printf 'foo\\nbar\\nfoobar\\n' | grep -c foo", registerExternals: true).stdout);
+        // 4-stage pipeline of externals: grep filters, sort orders, head slices
+        Assert.Equal("apple\n",   RunBash("printf 'apple\\nbanana\\napricot\\n' | grep ap | sort | head -1", registerExternals: true).stdout);
+        Assert.Equal("3\n",       RunBash("printf 'b\\na\\nb\\nc\\na\\n' | sort -u | wc -l", registerExternals: true).stdout);
     }
 
     /// <summary>M5 robustness: an unknown command reports "command not found" with $?==127 and the
