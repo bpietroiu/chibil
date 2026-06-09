@@ -1,5 +1,5 @@
 diff --git a/execute_cmd.c b/execute_cmd.c
-index 070f511..cccbb8a 100644
+index 070f511..bbd90e3 100644
 --- a/execute_cmd.c
 +++ b/execute_cmd.c
 @@ -660,6 +660,14 @@ execute_command_internal (COMMAND *command, int asynchronous, int pipe_in, int p
@@ -333,8 +333,27 @@ index 070f511..cccbb8a 100644
        pid = make_child (p = savestring (command_line), fork_flags);
      }
  
+@@ -6130,6 +6372,18 @@ shell_execve (char *command, char **args, char **env)
+   size_t larray;
+ 
+   SETOSTYPE (0);		/* Some systems use for USG/POSIX semantics */
++#if defined (CHIBIL_SANDBOX)
++  /* No execve on the PAL. shell_execve is only reached here via `exec cmd` (normal externals
++     are spawned earlier by chibil_spawn_tool) — emulate the replacement: spawn the command as
++     a green-process inheriting the shell's fds (incl. exec's redirections), wait, and EXIT the
++     shell with its status. Falls through to the (failing) execve only if COMMAND isn't a
++     registered managed tool. */
++  {
++    int chibil_ev = chibil_exec_tool (command, args);
++    if (chibil_ev >= 0)
++      exit (chibil_ev);
++  }
++#endif
+   execve (command, args, env);
+   i = errno;			/* error from execve() */
+   CHECK_TERMSIG;
 diff --git a/jobs.c b/jobs.c
-index 528c90f..5cf415c 100644
+index 528c90f..06ad5a3 100644
 --- a/jobs.c
 +++ b/jobs.c
 @@ -27,6 +27,11 @@
@@ -349,7 +368,7 @@ index 528c90f..5cf415c 100644
  #include <errno.h>
  
  #if defined (HAVE_UNISTD_H)
-@@ -2501,6 +2506,508 @@ make_child (char *command, int flags)
+@@ -2501,6 +2506,537 @@ make_child (char *command, int flags)
    return (pid);
  }
  
@@ -512,6 +531,35 @@ index 528c90f..5cf415c 100644
 +
 +  chibil_register_spawned (command ? savestring (command) : (char *)NULL, pid, flags, async_p, &oset);
 +  return (pid);
++}
++
++/* `exec cmd` replacement: there is no execve on the PAL, so emulate it — spawn the resolved
++   external COMMAND as a green-process that inherits the shell's std fds 0/1/2 (which already
++   carry any redirections exec applied), WAIT for it, and return its exit status. Returns -1 if
++   COMMAND's basename isn't a registered managed tool (the caller then falls back to
++   shell_execve). The caller exits the shell with the returned status — the shell is "replaced". */
++int
++chibil_exec_tool (char *command, char **argv)
++{
++  char *base;
++  int fdmap[6], status;
++  pid_t pid;
++
++  base = strrchr (command, '/');
++  base = base ? base + 1 : command;
++
++  fdmap[0] = 0; fdmap[1] = 0;            /* child stdio <- the shell's (post-redirection) fds */
++  fdmap[2] = 1; fdmap[3] = 1;
++  fdmap[4] = 2; fdmap[5] = 2;
++  pid = (pid_t) __chibil_syscall (SANDBOX_SYS_spawn_tool, (long)(intptr_t) base,
++				  (long)(intptr_t) argv, (long)(intptr_t) fdmap, 3, 0, 0);
++  if (pid < 0)
++    return (-1);
++
++  status = 0;
++  while (waitpid (pid, &status, 0) < 0 && errno == EINTR)
++    ;
++  return (WIFEXITED (status) ? WEXITSTATUS (status) : EXECUTION_FAILURE);
 +}
 +
 +/* Spawn a fresh bash green-process to run STRING — a deparsed subshell body — as a
@@ -859,10 +907,10 @@ index 528c90f..5cf415c 100644
  void
  ignore_tty_job_signals (void)
 diff --git a/jobs.h b/jobs.h
-index 64509e2..ecbb5ad 100644
+index 64509e2..9de5bf3 100644
 --- a/jobs.h
 +++ b/jobs.h
-@@ -295,6 +295,24 @@ extern void list_stopped_jobs (int);
+@@ -295,6 +295,27 @@ extern void list_stopped_jobs (int);
  extern void list_running_jobs (int);
  
  extern pid_t make_child (char *, int);
@@ -882,6 +930,9 @@ index 64509e2..ecbb5ad 100644
 +extern pid_t chibil_spawn_subshell (char *string, int pipe_in, int pipe_out, int flags);
 +/* M5: exec an external as a managed coreutil green-process (PATH -> basename -> tool). */
 +extern pid_t chibil_spawn_tool (char *command, char *path, char **argv, int pipe_in, int pipe_out, int flags);
++/* M5: `exec cmd` replacement — spawn COMMAND inheriting the shell's fds, wait, return its
++   status (or -1 if not a registered tool). */
++extern int chibil_exec_tool (char *command, char **argv);
 +#endif
 +#endif
  

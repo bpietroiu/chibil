@@ -259,6 +259,21 @@ public class BashTests
         Assert.Equal("done\n",     RunBash("{ echo x; echo y >&2; } >/dev/null 2>&1; echo done").stdout);
     }
 
+    /// <summary>M5: `exec cmd` replaces the shell with the command. No execve on the PAL, so it's
+    /// emulated — spawn the command as a green-process inheriting the shell's fds (incl. any
+    /// redirections exec already applied) and exit with its status. The shell IS replaced: nothing
+    /// after `exec cmd` runs.</summary>
+    [Fact]
+    public void Bash_exec_replacement()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("hi\n", RunBash("echo hi > /f; exec cat /f", registerExternals: true).stdout);
+        Assert.Equal("hi\n", RunBash("echo hi > /f; exec cat /f; echo after", registerExternals: true).stdout); // 'after' unreached
+        Assert.Equal("x\n",  RunBash("exec cat <<< x", registerExternals: true).stdout);                          // exec + here-string
+        // exec applies the redirection (stdin from a heredoc), then the command inherits it
+        Assert.Equal("L1\nL2\n", RunBash("exec cat <<EOF\nL1\nL2\nEOF", registerExternals: true).stdout);
+    }
+
     /// <summary>M5: PIPESTATUS / `set -o pipefail` — every pipeline stage's exit status is recorded,
     /// not just the last. External stages were already tracked (spawned green-processes); the gap was
     /// the unforked builtins (echo/printf/true/false/:), which now spawn as green-processes too so
