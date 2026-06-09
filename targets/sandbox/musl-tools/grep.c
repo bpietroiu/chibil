@@ -1,43 +1,15 @@
-/* grep — managed coreutil (M5): print input lines that contain a fixed PATTERN (substring
- * match — not a regex). NB: fixed-string is a tool choice, not a musl limitation — musl ships
- * a full TRE regex engine (src/regex/regcomp.c+regexec.c) and chibil COMPILES it cleanly. The
- * blocker to switching grep (and bash's [[ =~ ]]) to real regcomp/regexec is downstream, in
- * chibil-LINK: adding src/regex to ManagedMusl.proj's glob makes the regex objects available,
- * but linking them hits a chibil-link OverflowException in FieldDataRelocator.BuildCctorIl —
- * a TRE static-initializer bakes a huge value (~0x13181D02_17010000) into an ADDR64 pointer
- * slot, and the addend doesn't fit the int ldc.i4 the .cctor emits. Real regex therefore needs
- * a chibil-link fix (+ getpwnam_r/getpwuid_r stubs for glob.c's ~user expansion) and its own
- * green-gate — deferred. Reads the named files, or stdin if none. Flags: -v invert (print
- * non-matching lines), -i case-insensitive, -c print only the count of matching lines, -n
- * prefix each match with its 1-based line number. The streaming, line-at-a-time member of
- * the coreutil set — the canonical middle of a pipeline (`… | grep foo | …`). */
+/* grep — managed coreutil (M5): print input lines matching a PATTERN, using the REAL POSIX
+ * regex engine (musl's TRE regcomp/regexec, now compiled into the managed musl set). Basic
+ * regex by default; -E selects extended. Reads the named files, or stdin if none. Flags:
+ * -v invert, -i ignore case, -c count only, -n line numbers, -E extended regex. Exit 0 if any
+ * line matched, 1 if none, 2 on error. */
+#include <regex.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 
-static int opt_v, opt_i, opt_c, opt_n;
-
-static char lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
-
-/* Substring search honoring -i. Returns 1 if `pat` occurs in `s` (len `slen`). */
-static int contains(const char *s, long slen, const char *pat)
-{
-    long plen = (long)strlen(pat);
-    if (plen == 0) return 1;
-    for (long i = 0; i + plen <= slen; i++)
-    {
-        long j = 0;
-        for (; j < plen; j++)
-        {
-            char a = s[i + j], b = pat[j];
-            if (opt_i) { a = lower(a); b = lower(b); }
-            if (a != b) break;
-        }
-        if (j == plen) return 1;
-    }
-    return 0;
-}
+static int opt_v, opt_c, opt_n;
 
 static void put_long(long v)
 {
@@ -49,21 +21,25 @@ static void put_long(long v)
     write(1, o, (size_t)j);
 }
 
-/* Stream fd line by line, applying the match; accumulates the match count into *count. */
-static int grep_fd(int fd, const char *pat, long *count, long *lineno)
+/* Stream fd line by line, NUL-terminating each line for regexec. */
+static int grep_fd(int fd, const regex_t *re, long *count, long *lineno)
 {
     char buf[8192], line[8192];
     long llen = 0;
     ssize_t n;
-    while ((n = read(fd, buf, sizeof buf)) > 0)
+    for (;;)
     {
-        for (ssize_t i = 0; i < n; i++)
+        n = read(fd, buf, sizeof buf);
+        if (n < 0) return 1;
+        for (ssize_t i = 0; i <= (n == 0 ? 0 : n); i++)
         {
-            char ch = buf[i];
-            if (ch == '\n' || llen == (long)sizeof line - 1)
+            int eof_flush = (n == 0 && i == 0 && llen > 0);
+            int nl = (i < n && buf[i] == '\n');
+            if (nl || eof_flush || llen == (long)sizeof line - 1)
             {
+                line[llen] = '\0';
                 (*lineno)++;
-                int hit = contains(line, llen, pat);
+                int hit = regexec(re, line, 0, 0, 0) == 0;
                 if (hit != opt_v)
                 {
                     (*count)++;
@@ -75,63 +51,58 @@ static int grep_fd(int fd, const char *pat, long *count, long *lineno)
                     }
                 }
                 llen = 0;
-                if (ch != '\n') line[llen++] = ch;   /* overflow split: keep the char */
+                if (!nl && i < n) line[llen++] = buf[i];   /* overflow split: keep the char */
             }
-            else
-                line[llen++] = ch;
+            else if (i < n)
+                line[llen++] = buf[i];
         }
+        if (n == 0) break;
     }
-    if (llen > 0)   /* trailing partial line (no final newline) */
-    {
-        (*lineno)++;
-        int hit = contains(line, llen, pat);
-        if (hit != opt_v)
-        {
-            (*count)++;
-            if (!opt_c)
-            {
-                if (opt_n) { put_long(*lineno); write(1, ":", 1); }
-                write(1, line, (size_t)llen);
-                write(1, "\n", 1);
-            }
-        }
-    }
-    return n < 0 ? 1 : 0;
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
-    int argi = 1, i, rc = 1;   /* grep exits 1 when no line matched */
+    int argi = 1, i, cflags = 0;
     while (argi < argc && argv[argi][0] == '-' && argv[argi][1] != '\0')
     {
         const char *f = argv[argi] + 1;
         for (; *f; f++)
         {
             if (*f == 'v') opt_v = 1;
-            else if (*f == 'i') opt_i = 1;
             else if (*f == 'c') opt_c = 1;
             else if (*f == 'n') opt_n = 1;
+            else if (*f == 'i') cflags |= REG_ICASE;
+            else if (*f == 'E') cflags |= REG_EXTENDED;
         }
         argi++;
     }
-    if (argi >= argc) return 2;            /* no pattern */
+    if (argi >= argc) return 2;                 /* no pattern */
     const char *pat = argv[argi++];
+
+    regex_t re;
+    if (regcomp(&re, pat, cflags | REG_NOSUB) != 0)
+    {
+        const char *msg = "grep: invalid pattern\n";
+        write(2, msg, strlen(msg));
+        return 2;
+    }
 
     long count = 0, lineno = 0;
     int err = 0;
     if (argi >= argc)
-        err |= grep_fd(0, pat, &count, &lineno);
+        err |= grep_fd(0, &re, &count, &lineno);
     else
         for (i = argi; i < argc; i++)
         {
             int fd = (argv[i][0] == '-' && argv[i][1] == '\0') ? 0 : open(argv[i], O_RDONLY);
             if (fd < 0) { err = 1; continue; }
-            err |= grep_fd(fd, pat, &count, &lineno);
+            err |= grep_fd(fd, &re, &count, &lineno);
             if (fd != 0) close(fd);
         }
+    regfree(&re);
 
     if (opt_c) { put_long(count); write(1, "\n", 1); }
     if (err) return 2;
     return count > 0 ? 0 : 1;
-    (void)rc;
 }

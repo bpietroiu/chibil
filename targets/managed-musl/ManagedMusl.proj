@@ -12,6 +12,10 @@
     <ItemGroup>
       <!-- The subsystem set from build-managed-musl.sh DIRS. -->
       <MuslSrc Include="$(MuslRoot)\src\string\**\*.c;$(MuslRoot)\src\ctype\**\*.c;$(MuslRoot)\src\errno\**\*.c;$(MuslRoot)\src\stdlib\**\*.c;$(MuslRoot)\src\stdio\**\*.c;$(MuslRoot)\src\math\**\*.c;$(MuslRoot)\src\malloc\**\*.c;$(MuslRoot)\src\mman\**\*.c;$(MuslRoot)\src\internal\**\*.c;$(MuslRoot)\src\locale\**\*.c;$(MuslRoot)\src\multibyte\**\*.c;$(MuslRoot)\src\prng\**\*.c;$(MuslRoot)\src\exit\**\*.c;$(MuslRoot)\src\env\**\*.c;$(MuslRoot)\src\misc\**\*.c;$(MuslRoot)\src\time\**\*.c;$(MuslRoot)\src\fenv\**\*.c;$(MuslRoot)\src\complex\**\*.c;$(MuslRoot)\src\fcntl\**\*.c;$(MuslRoot)\src\unistd\**\*.c;$(MuslRoot)\src\stat\**\*.c;$(MuslRoot)\src\dirent\**\*.c;$(MuslRoot)\src\select\**\*.c;$(MuslRoot)\src\signal\**\*.c;$(MuslRoot)\src\process\**\*.c;$(MuslRoot)\src\random\**\*.c;$(MuslRoot)\src\linux\**\*.c" />
+      <!-- POSIX regex (TRE) + fnmatch: real regcomp/regexec for grep and bash `[[ =~ ]]`.
+           Exclude glob.c — nothing here uses musl's glob() (bash has its own), and it would
+           drag in getpwnam_r/getpwuid_r (~user expansion) with no host user DB to back them. -->
+      <MuslSrc Include="$(MuslRoot)\src\regex\**\*.c" Exclude="$(MuslRoot)\src\regex\glob.c" />
       <MuslInc Include="$(BuildInfra)\musl-compat;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\src\include;$(MuslRoot)\src\internal;$(MuslRoot)\include;$(MuslRoot)\obj\include" />
     </ItemGroup>
 

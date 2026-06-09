@@ -207,10 +207,9 @@ public class BashTests
     }
 
     /// <summary>M5: the text-processing coreutils — `sort` (whole-input transform: lexicographic,
-    /// -r reverse, -n numeric, -u unique) and `grep` (streaming fixed-substring match: -v invert,
-    /// -i fold case, -c count, -n line numbers) — and the canonical multi-stage pipelines they
-    /// compose (`grep | sort | head`, `sort -u | wc -l`). Fixed-string, not regex: the managed musl
-    /// set omits the regex engine.</summary>
+    /// -r reverse, -n numeric, -u unique) and `grep` (-v invert, -i fold case, -c count, -n line
+    /// numbers) — and the canonical multi-stage pipelines they compose (`grep | sort | head`,
+    /// `sort -u | wc -l`).</summary>
     [Fact]
     public void Bash_text_pipeline_coreutils()
     {
@@ -222,6 +221,23 @@ public class BashTests
         // 4-stage pipeline of externals: grep filters, sort orders, head slices
         Assert.Equal("apple\n",   RunBash("printf 'apple\\nbanana\\napricot\\n' | grep ap | sort | head -1", registerExternals: true).stdout);
         Assert.Equal("3\n",       RunBash("printf 'b\\na\\nb\\nc\\na\\n' | sort -u | wc -l", registerExternals: true).stdout);
+    }
+
+    /// <summary>M5: REAL POSIX regex — musl's TRE engine (src/regex) is now compiled into the
+    /// managed set, so grep matches regular expressions (anchors, char classes, BRE alternation)
+    /// and bash's `[[ =~ ]]` works for real (it used to always fail against the regcomp stub).
+    /// This is what the chibil braced-string-array codegen fix unblocked.</summary>
+    [Fact]
+    public void Bash_real_regex()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        // grep: anchor + char class + BRE alternation
+        Assert.Equal("apple\napricot\n", RunBash("printf 'apple\\nbanana\\napricot\\n' | grep '^a'", registerExternals: true).stdout);
+        Assert.Equal("a1c\na2c\n",       RunBash("printf 'a1c\\nabc\\na2c\\n' | grep 'a[0-9]c'", registerExternals: true).stdout);
+        Assert.Equal("3\n",              RunBash("printf 'cat\\ncar\\ncot\\n' | grep -c 'c.t\\|car'", registerExternals: true).stdout);
+        // bash [[ =~ ]] — real ERE matching (was always-false against the stub)
+        Assert.Equal("match\n",   RunBash("[[ hello123 =~ [0-9]+ ]] && echo match", registerExternals: true).stdout);
+        Assert.Equal("nomatch\n", RunBash("[[ hello =~ [0-9]+ ]] || echo nomatch", registerExternals: true).stdout);
     }
 
     /// <summary>M5 robustness: an unknown command reports "command not found" with $?==127 and the
