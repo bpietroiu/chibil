@@ -259,6 +259,22 @@ public class BashTests
         Assert.Equal("done\n",     RunBash("{ echo x; echo y >&2; } >/dev/null 2>&1; echo done").stdout);
     }
 
+    /// <summary>M5: PIPESTATUS / `set -o pipefail` — every pipeline stage's exit status is recorded,
+    /// not just the last. External stages were already tracked (spawned green-processes); the gap was
+    /// the unforked builtins (echo/printf/true/false/:), which now spawn as green-processes too so
+    /// they appear in PIPESTATUS. pipefail makes the pipeline's $? the rightmost non-zero stage.</summary>
+    [Fact]
+    public void Bash_pipestatus_pipefail()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("1 0\n",   RunBash("false | true; echo \"${PIPESTATUS[*]}\"", registerExternals: true).stdout);
+        Assert.Equal("0 1 0\n", RunBash("true | false | true; echo \"${PIPESTATUS[*]}\"", registerExternals: true).stdout);
+        Assert.Equal("3\n",     RunBash("false | true | false; echo \"${#PIPESTATUS[@]}\"", registerExternals: true).stdout);
+        // pipefail: $? is the last non-zero stage's status
+        Assert.Equal("1\n",     RunBash("set -o pipefail; false | true; echo $?", registerExternals: true).stdout);
+        Assert.Equal("0\n",     RunBash("set -o pipefail; true | true; echo $?", registerExternals: true).stdout);
+    }
+
     /// <summary>M5: a BARE builtin (not echo/printf/true/false/:) as a pipeline stage — `cmd | read`,
     /// `cmd | wait` — has no fork on the PAL and used to NRE (execute_simple_command's make_child).
     /// Now it spawns as a bash green-process on the pipe ends (like compound stages). Per POSIX the
