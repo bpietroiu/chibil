@@ -15,17 +15,23 @@ public class BashTests
     static string BashDll() =>
         Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", "bash.dll");
 
-    static string CatDll() =>
-        Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", "cat.dll");
+    static string ToolDll(string name) =>
+        Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", name + ".dll");
 
-    static (string stdout, int rc) RunBash(string script) => RunBash(script, registerCat: false);
+    static bool ExternalsBuilt() => File.Exists(ToolDll("cat")) && File.Exists(ToolDll("wc"));
 
-    static (string stdout, int rc) RunBash(string script, bool registerCat)
+    static (string stdout, int rc) RunBash(string script) => RunBash(script, registerExternals: false);
+
+    static (string stdout, int rc) RunBash(string script, bool registerExternals)
     {
         SandboxPal.Reset();
         var table = new ProcessTable();
         SandboxPal.AttachProcessTable(table);
-        if (registerCat) table.RegisterTool("cat", CatDll());   // M5: managed coreutil external
+        if (registerExternals)                                  // M5: managed coreutil externals
+        {
+            table.RegisterTool("cat", ToolDll("cat"));
+            table.RegisterTool("wc",  ToolDll("wc"));
+        }
 
         var sink = new BufferSinkHandle();
         var proc = table.CreateRoot(BashDll());
@@ -152,11 +158,38 @@ public class BashTests
     [Fact]
     public void Bash_runs_cat_external_coreutil()
     {
-        if (!File.Exists(BashDll()) || !File.Exists(CatDll())) return;
-        Assert.Equal("hi\n",   RunBash("echo hi > /f.txt; cat /f.txt", registerCat: true).stdout);
-        Assert.Equal("a\nb\n", RunBash("echo a > /a; echo b > /b; cat /a /b", registerCat: true).stdout);
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("hi\n",   RunBash("echo hi > /f.txt; cat /f.txt", registerExternals: true).stdout);
+        Assert.Equal("a\nb\n", RunBash("echo a > /a; echo b > /b; cat /a /b", registerExternals: true).stdout);
         // redirect over stdout then a clean external: stdout must survive the redirect save/restore
-        Assert.Equal("after\n", RunBash("echo x > /q; echo after", registerCat: true).stdout);
+        Assert.Equal("after\n", RunBash("echo x > /q; echo after", registerExternals: true).stdout);
+    }
+
+    /// <summary>M5: a second managed coreutil (`wc`) — the cat pattern applied to a stdin-consuming
+    /// tool — counting lines/words/bytes of files and of stdin. Confirms the tool-registry path
+    /// generalizes beyond cat.</summary>
+    [Fact]
+    public void Bash_runs_wc_external_coreutil()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("2 /d\n",     RunBash("printf 'a b\\nc\\n' > /d; wc -l /d", registerExternals: true).stdout);
+        Assert.Equal("3 /e\n",     RunBash("printf 'a b c\\n' > /e; wc -w /e", registerExternals: true).stdout);
+        Assert.Equal("1 3 6 /e\n", RunBash("printf 'a b c\\n' > /e; wc /e", registerExternals: true).stdout);
+    }
+
+    /// <summary>M5: real pipelines whose stages are managed green-process externals. The M4.6
+    /// builtin|builtin-group pipeline deadlocked (pipe handoff broken); with externals spawning as
+    /// green-processes — each stage a process with the pipe ends inherited via fdMap — the handoff
+    /// works. Covers external|external, builtin|external, and a 3-stage external chain, plus
+    /// cat|wc (the canonical "stream into a counter").</summary>
+    [Fact]
+    public void Bash_pipelines_with_externals()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("hi\n",  RunBash("echo hi > /f.txt; cat /f.txt | cat", registerExternals: true).stdout);
+        Assert.Equal("piped\n", RunBash("echo piped | cat", registerExternals: true).stdout);
+        Assert.Equal("a\nb\n", RunBash("printf 'a\\nb\\n' > /ab; cat /ab | cat | cat", registerExternals: true).stdout);
+        Assert.Equal("3\n",   RunBash("printf 'x\\ny\\nz\\n' > /c; cat /c | wc -l", registerExternals: true).stdout);
     }
 
     /// <summary>Deeply-NESTED command substitution: recursive `fact 5` (5 levels of comsub, each a
