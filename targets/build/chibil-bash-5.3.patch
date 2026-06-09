@@ -1,5 +1,5 @@
 diff --git a/execute_cmd.c b/execute_cmd.c
-index 070f511..8ae3ef5 100644
+index 070f511..706a80e 100644
 --- a/execute_cmd.c
 +++ b/execute_cmd.c
 @@ -660,6 +660,14 @@ execute_command_internal (COMMAND *command, int asynchronous, int pipe_in, int p
@@ -160,23 +160,53 @@ index 070f511..8ae3ef5 100644
    bind_lastarg (lastarg);
    FREE (command_line);
    dispose_words (words);
-@@ -5780,6 +5885,15 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5808,6 +5913,18 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+   command = search_for_command (pathname, CMDSRCH_HASH|(stdpath ? CMDSRCH_STDPATH : 0));
+   QUIT;
  
-   stdpath = (cmdflags & CMD_STDPATH);	/* use command -p path */
-   nofork = (cmdflags & CMD_NO_FORK);	/* Don't fork, just exec, if no pipes */
 +#if defined (CHIBIL_SANDBOX)
 +  /* CMD_NO_FORK is the "last command in -c / exec-without-fork" optimization: run the
 +     external in place by calling execve to replace the shell image. There is no execve on
-+     the green-process PAL (it returns ENOSYS), so the in-place path dead-ends. Clearing it
-+     forces the disk command through the spawn branch below (chibil_spawn_tool -> a managed
-+     green-process), with the parent continuing — the only model the PAL supports. A not-
-+     found command (command==0) still falls through to make_child for the not-found hook. */
-+  nofork = 0;
++     the green-process PAL (it returns ENOSYS), so for a FOUND external we must instead take
++     the spawn branch below (chibil_spawn_tool -> a managed green-process) with the parent
++     continuing. Only override when command!=0: a NOT-found command must keep its in-process
++     path (pid==0 block) so command_not_found_handle / exit(127) runs here — make_child has
++     no working green form, so routing not-found through it would crash. */
++  if (command)
++    nofork = 0;
 +#endif
-   pathname = words->word->word;
++
+   if (command)
+     {
+       /* If we're optimizing out the fork (implicit `exec'), decrement the
+@@ -5822,6 +5939,26 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+   else if (command == 0 && notfound_str == 0)	/* make sure */
+     init_notfound_str ();
  
-   p = 0;
-@@ -5831,6 +5945,63 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
++#if defined (CHIBIL_SANDBOX)
++  /* No fork on the PAL: a not-found external can't be handled the native way (fork a child
++     that prints the error and exit(127)s) — make_child has no working green form, and
++     exiting in-process would wrongly terminate the shell mid-script. When there's no
++     command_not_found_handle hook (the common case), report it in the PARENT: print the
++     error, set $?=127, and continue to the next command — exactly the observable effect of
++     the forked path. (A defined hook still falls through — rare in -c scripts; deferred.) */
++  if (command == 0 && pipe_in == NO_PIPE && pipe_out == NO_PIPE &&
++      find_function (NOTFOUND_HOOK) == 0)
++    {
++      char *pn = printable_filename (pathname, 0);
++      internal_error ("%s: %s", pn, notfound_str);
++      if (pn != pathname)
++	free (pn);
++      /* return value becomes $? in the caller — Posix.2 says 127 for not-found. */
++      last_command_exit_value = result = EX_NOTFOUND;
++      goto parent_return;
++    }
++#endif
++
+   /* We have to make the child before we check for the non-existence
+      of COMMAND, since we want the error messages to be redirected. */
+   /* If we can get away without forking and there are no pipes to deal with,
+@@ -5831,6 +5968,63 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    else
      {
        fork_flags = async ? FORK_ASYNC : 0;

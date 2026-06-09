@@ -15,10 +15,12 @@ public class BashTests
     static string BashDll() =>
         Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", "bash.dll");
 
+    static readonly string[] Coreutils = { "cat", "wc", "true", "false", "head", "tail", "ls" };
+
     static string ToolDll(string name) =>
         Path.Combine(SandboxToolBuilder.RepoRoot(), "build", "bin", "sandbox", name + ".dll");
 
-    static bool ExternalsBuilt() => File.Exists(ToolDll("cat")) && File.Exists(ToolDll("wc"));
+    static bool ExternalsBuilt() => System.Array.TrueForAll(Coreutils, t => File.Exists(ToolDll(t)));
 
     static (string stdout, int rc) RunBash(string script) => RunBash(script, registerExternals: false);
 
@@ -28,10 +30,7 @@ public class BashTests
         var table = new ProcessTable();
         SandboxPal.AttachProcessTable(table);
         if (registerExternals)                                  // M5: managed coreutil externals
-        {
-            table.RegisterTool("cat", ToolDll("cat"));
-            table.RegisterTool("wc",  ToolDll("wc"));
-        }
+            foreach (var t in Coreutils) table.RegisterTool(t, ToolDll(t));
 
         var sink = new BufferSinkHandle();
         var proc = table.CreateRoot(BashDll());
@@ -190,6 +189,35 @@ public class BashTests
         Assert.Equal("piped\n", RunBash("echo piped | cat", registerExternals: true).stdout);
         Assert.Equal("a\nb\n", RunBash("printf 'a\\nb\\n' > /ab; cat /ab | cat | cat", registerExternals: true).stdout);
         Assert.Equal("3\n",   RunBash("printf 'x\\ny\\nz\\n' > /c; cat /c | wc -l", registerExternals: true).stdout);
+    }
+
+    /// <summary>M5: the coreutil batch — true/false (exit status), head/tail (line slicing, incl. a
+    /// 3-stage `head|tail` external pipeline), and ls (directory listing via the getdents/readdir
+    /// path, sorted, hidden-filtered).</summary>
+    [Fact]
+    public void Bash_coreutil_batch()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("yes\n", RunBash("true && echo yes", registerExternals: true).stdout);
+        Assert.Equal("no\n",  RunBash("false || echo no", registerExternals: true).stdout);
+        Assert.Equal("1\n2\n", RunBash("printf '1\\n2\\n3\\n' > /n; head -2 /n", registerExternals: true).stdout);
+        Assert.Equal("2\n3\n", RunBash("printf '1\\n2\\n3\\n' > /n; tail -2 /n", registerExternals: true).stdout);
+        Assert.Equal("mid\n",  RunBash("printf 'a\\nmid\\nz\\n' | head -2 | tail -1", registerExternals: true).stdout);
+        Assert.Equal("a\nb\nc\n", RunBash("echo x>/b; echo x>/a; echo x>/c; ls /", registerExternals: true).stdout);
+    }
+
+    /// <summary>M5 robustness: an unknown command reports "command not found" with $?==127 and the
+    /// shell CONTINUES — without fork (make_child has no green form) and without exiting in-process
+    /// (which would wrongly kill the shell mid-script). Handled in the parent for the no-pipe case.
+    /// (Known gap, deferred: an unknown command AS a pipeline stage still goes through make_child.)</summary>
+    [Fact]
+    public void Bash_unknown_command_is_127_and_continues()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("127\n",  RunBash("frobnicate; echo $?", registerExternals: true).stdout);
+        Assert.Equal("cont\n", RunBash("nosuchcmd; echo cont", registerExternals: true).stdout);
+        // a real external after a not-found still runs (shell state intact)
+        Assert.Equal("ok\n",   RunBash("nope; echo ok > /o; cat /o", registerExternals: true).stdout);
     }
 
     /// <summary>Deeply-NESTED command substitution: recursive `fact 5` (5 levels of comsub, each a
