@@ -257,6 +257,22 @@ public class BashTests
         Assert.Equal("done\n",     RunBash("{ echo x; echo y >&2; } >/dev/null 2>&1; echo done").stdout);
     }
 
+    /// <summary>`source` / `.` runs a script file's commands in the current shell. The file is
+    /// in the VFS; bash's _evalfile opens it and fstat()s the fd — on musl that goes through
+    /// statx with AT_EMPTY_PATH, which must stat the FD (not resolve the empty path as the cwd
+    /// directory, which made source reject every file as "is a directory").</summary>
+    [Fact]
+    public void Bash_source_dot()
+    {
+        if (!File.Exists(BashDll())) return;
+        Assert.Equal("src\n", RunBash("echo 'echo src' > /s; . /s").stdout);
+        Assert.Equal("src\n", RunBash("echo 'echo src' > /s; source /s").stdout);
+        // sourced file runs in the current shell: it can set vars the caller sees
+        Assert.Equal("v=7\n", RunBash("echo 'x=7' > /lib; . /lib; echo \"v=$x\"").stdout);
+        // and define functions
+        Assert.Equal("hi bob\n", RunBash("echo 'g(){ echo \"hi $1\"; }' > /f; . /f; g bob").stdout);
+    }
+
     /// <summary>/dev/null (and /dev/zero) are character devices, not stored files: writes to
     /// /dev/null are discarded, reads hit EOF; /dev/zero reads zeros. Backs the ubiquitous
     /// `… >/dev/null`, including as a redirect on a pipeline stage.</summary>

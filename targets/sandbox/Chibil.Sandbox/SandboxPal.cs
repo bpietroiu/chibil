@@ -185,11 +185,8 @@ namespace Chibil.Sandbox
         // funnel through SYS_statx on x86-64 (kstat time fields are 32-bit < 64-bit time_t), so
         // this, not SYS_stat, is what bash's PATH search actually issues. struct statx layout per
         // linux/stat.h: stx_mask@0 blksize@4 nlink@16 mode@28(u16) ino@32 size@40 (256 bytes).
-        static long DoStatx(string path, long bufptr)
+        static void WriteStatx(byte* b, uint mode, long size)
         {
-            if (!ResolvePath(path, out uint mode, out long size))
-                return -ENOENT;
-            byte* b = (byte*)bufptr;
             for (int i = 0; i < 256; i++) b[i] = 0;
             *(uint*)(b + 0)    = 0x7ff;                          // stx_mask = STATX_BASIC_STATS
             *(uint*)(b + 4)    = 4096;                           // stx_blksize
@@ -197,6 +194,30 @@ namespace Chibil.Sandbox
             *(ushort*)(b + 28) = (ushort)mode;                  // stx_mode (type | perm)
             *(ulong*)(b + 32)  = 1;                              // stx_ino
             *(ulong*)(b + 40)  = (ulong)size;                   // stx_size
+        }
+
+        static long DoStatx(string path, long bufptr)
+        {
+            if (!ResolvePath(path, out uint mode, out long size))
+                return -ENOENT;
+            WriteStatx((byte*)bufptr, mode, size);
+            return 0;
+        }
+
+        // statx(fd, "", AT_EMPTY_PATH, ...): stat the open fd itself — this is what musl's fstat()
+        // funnels through on x86-64. Must report the FD's real type (a VfsFile is S_IFREG with its
+        // size), NOT resolve the empty path as the cwd directory (which made `source`/`.` reject
+        // every file as "is a directory").
+        static long DoFstatx(int fd, long bufptr)
+        {
+            var h = CurrentFds().Get(fd);
+            if (h == null) return -EBADF;
+            uint mode; long size = 0;
+            if (h is VfsFileHandle vf) { mode = S_IFREG | 0x1A4u; size = vf.File.Length; }
+            else if (h is DirHandle)   { mode = S_IFDIR | 0x1EDu; }
+            else if (h is DevNullHandle || h is DevZeroHandle) { mode = S_IFCHR | 0x1B6u; }
+            else                       { mode = S_IFIFO | 0x1A4u; }   // pipe / sink
+            WriteStatx((byte*)bufptr, mode, size);
             return 0;
         }
 
@@ -293,7 +314,14 @@ namespace Chibil.Sandbox
                 case SYS_newfstatat:
                     return DoStat(ReadCString(a2), a3);     // a1 = dirfd (AT_FDCWD)
                 case SYS_statx:
-                    return DoStatx(ReadCString(a2), a5);    // a1=dirfd a2=path a3=flags a4=mask a5=buf
+                {
+                    // a1=dirfd a2=path a3=flags a4=mask a5=buf. AT_EMPTY_PATH(0x1000) + empty path
+                    // = stat the fd itself (musl fstat()'s route); else resolve the path.
+                    long sp = a2;
+                    if (((byte*)sp)[0] == 0 && (a3 & 0x1000) != 0)
+                        return DoFstatx((int)a1, a5);
+                    return DoStatx(ReadCString(sp), a5);
+                }
                 case SYS_fstat:
                 {
                     var h = CurrentFds().Get((int)a1);
