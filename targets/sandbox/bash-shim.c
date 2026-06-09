@@ -35,17 +35,10 @@ short ospeed = 0;
 int tcgetattr(int fd, struct termios *t) { (void)fd; (void)t; return -1; }  /* not a tty */
 int tcflow(int fd, int action) { (void)fd; (void)action; return 0; }
 
-/* ── passwd / group DB (src/passwd — host user DB not exposed to the sandbox) ─ */
-#include <pwd.h>
-#include <grp.h>
-struct passwd *getpwnam(const char *name) { (void)name; return 0; }
-struct passwd *getpwuid(uid_t uid) { (void)uid; return 0; }
-struct passwd *getpwent(void) { return 0; }
-void setpwent(void) { }
-void endpwent(void) { }
-struct group *getgrent(void) { return 0; }
-void setgrent(void) { }
-void endgrent(void) { }
+/* passwd / group DB: getpwnam/getpwuid/getpwent + getgrent/… are now the REAL musl impls
+ * (src/passwd added to the managed set); they read the sandbox's virtual /etc/passwd and
+ * /etc/group via the VFS, so bash's `~` / `~user` tilde expansion and id lookups work.
+ * (Former feature-absent stubs removed — they would be duplicate symbols.) */
 
 /* ── dynamic loading (no dlopen in a statically-merged image) ──────────────── */
 void *dlopen(const char *file, int mode) { (void)file; (void)mode; return 0; }

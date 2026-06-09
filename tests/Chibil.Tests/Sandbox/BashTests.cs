@@ -203,7 +203,8 @@ public class BashTests
         Assert.Equal("1\n2\n", RunBash("printf '1\\n2\\n3\\n' > /n; head -2 /n", registerExternals: true).stdout);
         Assert.Equal("2\n3\n", RunBash("printf '1\\n2\\n3\\n' > /n; tail -2 /n", registerExternals: true).stdout);
         Assert.Equal("mid\n",  RunBash("printf 'a\\nmid\\nz\\n' | head -2 | tail -1", registerExternals: true).stdout);
-        Assert.Equal("a\nb\nc\n", RunBash("echo x>/b; echo x>/a; echo x>/c; ls /", registerExternals: true).stdout);
+        // "etc" is always present — the kernel seeds /etc/{passwd,group} as the virtual user DB.
+        Assert.Equal("a\nb\nc\netc\n", RunBash("echo x>/b; echo x>/a; echo x>/c; ls /", registerExternals: true).stdout);
     }
 
     /// <summary>M5: the text-processing coreutils — `sort` (whole-input transform: lexicographic,
@@ -238,6 +239,19 @@ public class BashTests
         // bash [[ =~ ]] — real ERE matching (was always-false against the stub)
         Assert.Equal("match\n",   RunBash("[[ hello123 =~ [0-9]+ ]] && echo match", registerExternals: true).stdout);
         Assert.Equal("nomatch\n", RunBash("[[ hello =~ [0-9]+ ]] || echo nomatch", registerExternals: true).stdout);
+    }
+
+    /// <summary>M5: virtualized user DB. musl's getpwnam/getpwuid read /etc/passwd via the VFS,
+    /// which the kernel seeds with a default root + sandbox user — so bash's `~user` tilde
+    /// expansion resolves against the virtual passwd (no host user DB, no stubs). This is what
+    /// adding src/passwd (real getpw*) on top of the regex work enabled.</summary>
+    [Fact]
+    public void Bash_virtual_userdb_tilde_expansion()
+    {
+        if (!File.Exists(BashDll())) return;
+        Assert.Equal("/root\n",         RunBash("echo ~root").stdout);
+        Assert.Equal("/home/sandbox\n", RunBash("echo ~sandbox").stdout);
+        Assert.Equal("yes\n",           RunBash("[ \"$(echo ~root)\" = /root ] && echo yes").stdout);
     }
 
     /// <summary>M5 robustness: an unknown command reports "command not found" with $?==127 and the
