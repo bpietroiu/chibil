@@ -1,6 +1,13 @@
 /* grep — managed coreutil (M5): print input lines that contain a fixed PATTERN (substring
- * match — not a regex; the managed musl set omits the regex engine, and fixed-string is what
- * pipelines mostly need). Reads the named files, or stdin if none. Flags: -v invert (print
+ * match — not a regex). NB: fixed-string is a tool choice, not a musl limitation — musl ships
+ * a full TRE regex engine (src/regex/regcomp.c+regexec.c) and chibil COMPILES it cleanly. The
+ * blocker to switching grep (and bash's [[ =~ ]]) to real regcomp/regexec is downstream, in
+ * chibil-LINK: adding src/regex to ManagedMusl.proj's glob makes the regex objects available,
+ * but linking them hits a chibil-link OverflowException in FieldDataRelocator.BuildCctorIl —
+ * a TRE static-initializer bakes a huge value (~0x13181D02_17010000) into an ADDR64 pointer
+ * slot, and the addend doesn't fit the int ldc.i4 the .cctor emits. Real regex therefore needs
+ * a chibil-link fix (+ getpwnam_r/getpwuid_r stubs for glob.c's ~user expansion) and its own
+ * green-gate — deferred. Reads the named files, or stdin if none. Flags: -v invert (print
  * non-matching lines), -i case-insensitive, -c print only the count of matching lines, -n
  * prefix each match with its 1-based line number. The streaming, line-at-a-time member of
  * the coreutil set — the canonical middle of a pipeline (`… | grep foo | …`). */
