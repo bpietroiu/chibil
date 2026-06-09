@@ -221,6 +221,26 @@ public class BashTests
         Assert.Equal("127\n",   RunBash("echo hi | nosuchcmd; echo $?", registerExternals: true).stdout);
     }
 
+    /// <summary>M5 (async `&` / background jobs): a `&` command spawns a background bash
+    /// green-process the parent does NOT wait for; `wait` reaps it, `$!` is its pid. No fork on
+    /// the PAL — intercepted in execute_connection's `&` case, deparsing the command WITHOUT the
+    /// `&` (deparsing the connection re-backgrounds infinitely and hard-crashes the host). Exercises
+    /// true parent/child green-process concurrency (parent doesn't block until `wait`).</summary>
+    [Fact]
+    public void Bash_background_jobs()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("hi\n",      RunBash("echo hi & wait").stdout);
+        Assert.Equal("bg\nend\n",  RunBash("echo bg & wait; echo end").stdout);
+        Assert.Equal("a\nb\n",    RunBash("{ echo a; echo b; } & wait").stdout);   // compound bg
+        // state transfer into the bg job (vars/functions)
+        Assert.Equal("v=5\n",     RunBash("x=5; echo \"v=$x\" & wait").stdout);
+        // $! is the backgrounded pid; wait on it returns 0
+        Assert.Equal("ok\n",      RunBash("echo x >/dev/null & wait $! && echo ok").stdout);
+        // several sequential background jobs, each waited (concurrency)
+        Assert.Equal("1\n2\n3\n", RunBash("echo 1 & wait; echo 2 & wait; echo 3 & wait").stdout);
+    }
+
     /// <summary>fd-duplicating redirections: `>&2` (write to stderr), `2>&1` (merge stderr into
     /// stdout), and the order-sensitive `>file 2>&1`. Exercises dup2 over the fd table.</summary>
     [Fact]

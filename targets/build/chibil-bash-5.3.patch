@@ -1,5 +1,5 @@
 diff --git a/execute_cmd.c b/execute_cmd.c
-index 070f511..592fcf6 100644
+index 070f511..033a8a6 100644
 --- a/execute_cmd.c
 +++ b/execute_cmd.c
 @@ -660,6 +660,14 @@ execute_command_internal (COMMAND *command, int asynchronous, int pipe_in, int p
@@ -30,7 +30,7 @@ index 070f511..592fcf6 100644
 +         ends (or inherits the parent's std fds) and transfers functions/vars/positional
 +         params, then returns the child pid — so the in-process child block below is dead
 +         and we fall through to the parent's close/wait path. Async still uses make_child
-+         (no green async/job-control yet).
++         (no green async/job-control yet — true background concurrency is unfinished M-fork-4).
 +         savestring: make_command_string returns a STATIC buffer that chibil_spawn_subshell's
 +         chibil_state_dump (named_function_string) would clobber before it reads the body. */
 +      if (asynchronous == 0)
@@ -51,7 +51,29 @@ index 070f511..592fcf6 100644
  	  signal_in_progress (DEBUG_TRAP) == 0 && running_trap == 0)
  	{
  	  FREE (the_printed_command_except_trap);
-@@ -4461,6 +4492,43 @@ is_dirname (char *pathname)
+@@ -2840,7 +2871,21 @@ execute_connection (COMMAND *command, int asynchronous, int pipe_in, int pipe_ou
+ #endif /* JOB_CONTROL */
+ 	tc->flags |= CMD_STDIN_REDIR;
+ 
++#if defined (CHIBIL_SANDBOX)
++      /* No fork: run the async first command as a BACKGROUND bash green-process. Deparse tc
++         itself (NOT the connection) so there is NO trailing `&` — the child runs the command
++         synchronously in the background and does not re-background (which would orphan the real
++         work and churn spawns). chibil_spawn_subshell registers the job (last_made_pid /
++         last_asynchronous_pid -> $! and `wait`); the parent continues without waiting. */
++      {
++	char *sc = savestring (make_command_string (tc));
++	chibil_spawn_subshell (sc, pipe_in, pipe_out, FORK_ASYNC);
++	free (sc);
++	exec_result = EXECUTION_SUCCESS;
++      }
++#else
+       exec_result = execute_command_internal (tc, 1, pipe_in, pipe_out, fds_to_close);
++#endif
+       QUIT;
+ 
+       if (tc->flags & CMD_STDIN_REDIR)
+@@ -4461,6 +4506,43 @@ is_dirname (char *pathname)
    return ret;
  }
  
@@ -95,7 +117,7 @@ index 070f511..592fcf6 100644
  /* The meaty part of all the executions.  We have to start hacking the
     real execution of commands here.  Fork a process, set things up,
     execute the command. */
-@@ -4475,6 +4543,9 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
+@@ -4475,6 +4557,9 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
    sh_builtin_func_t *builtin;
    SHELL_VAR *func;
    volatile int old_builtin, old_command_builtin;
@@ -105,7 +127,7 @@ index 070f511..592fcf6 100644
  
    result = EXECUTION_SUCCESS;
    special_builtin_failed = builtin_is_special = 0;
-@@ -4527,6 +4598,18 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
+@@ -4527,6 +4612,18 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
       should not. */
    dofork = pipe_in != NO_PIPE || pipe_out != NO_PIPE || async;
  
@@ -124,7 +146,7 @@ index 070f511..592fcf6 100644
    /* Something like `%2 &' should restart job 2 in the background, not cause
       the shell to fork here. */
    if (dofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE &&
-@@ -4812,6 +4895,24 @@ run_builtin:
+@@ -4812,6 +4909,24 @@ run_builtin:
    last_shell_builtin = this_shell_builtin;
    this_shell_builtin = builtin;
  
@@ -149,7 +171,7 @@ index 070f511..592fcf6 100644
    if (builtin || func)
      {
        if (builtin)
-@@ -4940,6 +5041,14 @@ execute_from_filesystem:
+@@ -4940,6 +5055,14 @@ execute_from_filesystem:
  			cmdflags);
  
   return_result:
@@ -164,7 +186,7 @@ index 070f511..592fcf6 100644
    bind_lastarg (lastarg);
    FREE (command_line);
    dispose_words (words);
-@@ -5808,6 +5917,18 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5808,6 +5931,18 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    command = search_for_command (pathname, CMDSRCH_HASH|(stdpath ? CMDSRCH_STDPATH : 0));
    QUIT;
  
@@ -183,7 +205,7 @@ index 070f511..592fcf6 100644
    if (command)
      {
        /* If we're optimizing out the fork (implicit `exec'), decrement the
-@@ -5822,6 +5943,26 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5822,6 +5957,26 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    else if (command == 0 && notfound_str == 0)	/* make sure */
      init_notfound_str ();
  
@@ -210,7 +232,7 @@ index 070f511..592fcf6 100644
    /* We have to make the child before we check for the non-existence
       of COMMAND, since we want the error messages to be redirected. */
    /* If we can get away without forking and there are no pipes to deal with,
-@@ -5831,6 +5972,74 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5831,6 +5986,74 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    else
      {
        fork_flags = async ? FORK_ASYNC : 0;
