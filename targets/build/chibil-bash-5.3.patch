@@ -1,5 +1,5 @@
 diff --git a/execute_cmd.c b/execute_cmd.c
-index 070f511..033a8a6 100644
+index 070f511..690c225 100644
 --- a/execute_cmd.c
 +++ b/execute_cmd.c
 @@ -660,6 +660,14 @@ execute_command_internal (COMMAND *command, int asynchronous, int pipe_in, int p
@@ -146,7 +146,34 @@ index 070f511..033a8a6 100644
    /* Something like `%2 &' should restart job 2 in the background, not cause
       the shell to fork here. */
    if (dofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE &&
-@@ -4812,6 +4909,24 @@ run_builtin:
+@@ -4547,6 +4644,26 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
+ 	 the process/job associated with this child. */
+       fork_flags = async ? FORK_ASYNC : 0;
+       xc = the_printed_command_except_trap;
++#if defined (CHIBIL_SANDBOX)
++      /* No fork: a simple stage that reaches here only because it's a PIPELINE STAGE that can't
++         run unforked (a bare builtin like read/wait, or a function) runs as a fresh bash
++         green-process on this stage's pipe ends — the child re-parses the deparsed command with
++         functions/vars transferred. Per POSIX each pipe stage is a subshell, so e.g. `cmd | read y`
++         leaves y unset in the parent. Take the same parent post-fork path (close pipes, return).
++         (Plain externals / the echo|printf|true|false|: allowlist never reach here — they run
++         unforked or via chibil_spawn_tool; async `&` is handled earlier in execute_connection.) */
++      if (pipe_in != NO_PIPE || pipe_out != NO_PIPE)
++	{
++	  char *sc = savestring (xc ? xc : "");
++	  chibil_spawn_subshell (sc, pipe_in, pipe_out, fork_flags);
++	  free (sc);
++	  if (pipe_out != NO_PIPE)
++	    result = last_command_exit_value;
++	  close_pipes (pipe_in, pipe_out);
++	  command_line = (char *)NULL;
++	  return (result);
++	}
++#endif
+       if (make_child (p = xc ? savestring (xc) : savestring (""), fork_flags) == 0)
+ 	{
+ 	  already_forked = 1;
+@@ -4812,6 +4929,24 @@ run_builtin:
    last_shell_builtin = this_shell_builtin;
    this_shell_builtin = builtin;
  
@@ -171,7 +198,7 @@ index 070f511..033a8a6 100644
    if (builtin || func)
      {
        if (builtin)
-@@ -4940,6 +5055,14 @@ execute_from_filesystem:
+@@ -4940,6 +5075,14 @@ execute_from_filesystem:
  			cmdflags);
  
   return_result:
@@ -186,7 +213,7 @@ index 070f511..033a8a6 100644
    bind_lastarg (lastarg);
    FREE (command_line);
    dispose_words (words);
-@@ -5808,6 +5931,18 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5808,6 +5951,18 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    command = search_for_command (pathname, CMDSRCH_HASH|(stdpath ? CMDSRCH_STDPATH : 0));
    QUIT;
  
@@ -205,7 +232,7 @@ index 070f511..033a8a6 100644
    if (command)
      {
        /* If we're optimizing out the fork (implicit `exec'), decrement the
-@@ -5822,6 +5957,26 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5822,6 +5977,26 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    else if (command == 0 && notfound_str == 0)	/* make sure */
      init_notfound_str ();
  
@@ -232,7 +259,7 @@ index 070f511..033a8a6 100644
    /* We have to make the child before we check for the non-existence
       of COMMAND, since we want the error messages to be redirected. */
    /* If we can get away without forking and there are no pipes to deal with,
-@@ -5831,6 +5986,74 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5831,6 +6006,74 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    else
      {
        fork_flags = async ? FORK_ASYNC : 0;

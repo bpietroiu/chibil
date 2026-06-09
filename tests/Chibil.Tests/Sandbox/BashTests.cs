@@ -259,6 +259,21 @@ public class BashTests
         Assert.Equal("done\n",     RunBash("{ echo x; echo y >&2; } >/dev/null 2>&1; echo done").stdout);
     }
 
+    /// <summary>M5: a BARE builtin (not echo/printf/true/false/:) as a pipeline stage — `cmd | read`,
+    /// `cmd | wait` — has no fork on the PAL and used to NRE (execute_simple_command's make_child).
+    /// Now it spawns as a bash green-process on the pipe ends (like compound stages). Per POSIX the
+    /// stage is a subshell, so `echo x | read y` leaves y UNSET in the parent — the point is it no
+    /// longer crashes and the shell continues.</summary>
+    [Fact]
+    public void Bash_builtin_pipeline_stage()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("done\n", RunBash("echo x | read y; echo done", registerExternals: true).stdout);
+        Assert.Equal("done\n", RunBash(": | wait; echo done", registerExternals: true).stdout);
+        // read runs in a subshell -> y not set in the parent (standard non-lastpipe behavior)
+        Assert.Equal("cnt\n",  RunBash("printf 'a\\nb\\n' | wc -l | read n; echo \"cnt$n\"", registerExternals: true).stdout);
+    }
+
     /// <summary>Here-documents (`<<`) and here-strings (`<<<`): bash builds a small one from a
     /// PIPE (writes the document, closes the writer, redirects the read end onto fd0). Requires the
     /// process to HAVE an fd0 to save/restore — the root green-process is seeded with empty stdin.</summary>
