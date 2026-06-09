@@ -1,0 +1,120 @@
+<Project DefaultTargets="Build">
+  <!--
+    Link real GNU bash 5.3 (already chibil-compiled to COFF under targets/bash-5.3/_il)
+    against the managed musl object set + SandboxPal kernel — NO native libc. The M4.5
+    step of the managed-sandbox plan. Mirrors SandboxMusl.proj, but the "tool" is the
+    prebuilt 215-object bash image instead of a single compiled .c.
+
+        dotnet build targets/sandbox/SandboxBash.proj -c Release
+
+    Produces build/bin/sandbox/bash.dll, loadable as a GreenProcess by the xUnit tests.
+  -->
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.props" />
+  <Import Project="$(MSBuildThisFileDirectory)..\..\tools\chibil-build\build\Chibil.Build.targets" />
+
+  <PropertyGroup>
+    <MuslRoot>$(MSBuildThisFileDirectory)..\musl-1.2.6</MuslRoot>
+    <BuildInfra>$(MSBuildThisFileDirectory)..\build</BuildInfra>
+    <MuslObjDir>$(ChibilArtifacts)\managed-musl</MuslObjDir>
+    <BashObjDir>$(MSBuildThisFileDirectory)..\bash-5.3\_il</BashObjDir>
+    <BashRoot>$(MSBuildThisFileDirectory)..\bash-5.3</BashRoot>
+    <SandboxOut>$(ChibilArtifacts)\bin\sandbox</SandboxOut>
+    <BashDll>$(SandboxOut)\bash.dll</BashDll>
+    <SandboxProj>$(MSBuildThisFileDirectory)Chibil.Sandbox\Chibil.Sandbox.csproj</SandboxProj>
+    <SandboxDll>$(ChibilArtifacts)\bin\Chibil.Sandbox\release\Chibil.Sandbox.dll</SandboxDll>
+  </PropertyGroup>
+
+  <Target Name="Build">
+    <!-- Prereqs: the managed-musl object set + the kernel assembly. -->
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\managed-musl\ManagedMusl.proj" />
+    <MSBuild Projects="$(SandboxProj)" Properties="Configuration=Release" />
+
+    <ItemGroup>
+      <MuslInc Include="$(BuildInfra)\musl-compat;$(MuslRoot)\arch\x86_64;$(MuslRoot)\arch\generic;$(MuslRoot)\src\include;$(MuslRoot)\src\internal;$(MuslRoot)\include;$(MuslRoot)\obj\include" />
+      <!-- bash's own include search (mirrors Makefile.chibil INCS = -I. -Iinclude -Ilib). -->
+      <BashInc Include="$(BashRoot);$(BashRoot)\include;$(BashRoot)\lib;$(BashRoot)\builtins;@(MuslInc)" />
+    </ItemGroup>
+
+    <!-- jobs.c recompiled for the sandbox: -DCHIBIL_SANDBOX routes bash's comsub/subshell
+         spawn onto SYS_spawn_self (in-process green-process) instead of posix_spawnp re-exec.
+         Replaces the native _il/jobs.obj in the link below. -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(BashRoot)\jobs.c"
+                   OutputDir="$(SandboxOut)\bash-obj"
+                   IncludeDirs="@(BashInc)"
+                   Defines="HAVE_CONFIG_H;SHELL;CHIBIL_REEXEC=1;CHIBIL_SANDBOX=1"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="SandboxBashJobsObj" />
+    </ChibilCompile>
+
+    <!-- evalstring.c recompiled with the CURRENT chibil: its parse_and_execute holds
+         the setjmp(top_level) loop whose whole-body re-from-top lowering re-ran
+         begin_unwind_frame on an exit/errexit longjmp (double-free). The fixed
+         setjmp lowering (hoist branch-free pre-setjmp prefix out of the try) lives in
+         chibil; recompiling this TU picks it up. Replaces _il/builtins_evalstring.obj. -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(BashRoot)\builtins\evalstring.c"
+                   OutputDir="$(SandboxOut)\bash-obj"
+                   IncludeDirs="@(BashInc)"
+                   Defines="HAVE_CONFIG_H;SHELL;CHIBIL_REEXEC=1"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="SandboxBashEvalObj" />
+    </ChibilCompile>
+
+    <!-- execute_cmd.c recompiled for the sandbox: -DCHIBIL_SANDBOX routes a user
+         subshell ( ... ) onto chibil_spawn_subshell (green-process) instead of
+         make_child. Replaces the native _il/execute_cmd.obj. -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(BashRoot)\execute_cmd.c"
+                   OutputDir="$(SandboxOut)\bash-obj"
+                   IncludeDirs="@(BashInc)"
+                   Defines="HAVE_CONFIG_H;SHELL;CHIBIL_REEXEC=1;CHIBIL_SANDBOX=1"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="SandboxBashExecObj" />
+    </ChibilCompile>
+
+    <!-- The PAL shim (musl arch shadows / internal stubs) — same as SandboxMusl. -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(BuildInfra)\musl-compat\pal-shim.c"
+                   OutputDir="$(SandboxOut)\bash-obj"
+                   IncludeDirs="@(MuslInc)"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="ShimObj" />
+    </ChibilCompile>
+
+    <!-- bash-specific link tail (termcap/passwd/network/regex/… stubs bash
+         references but `-c` never calls). Compiled against the SAME musl headers
+         bash used, so every stub signature matches its call sites exactly. -->
+    <ChibilCompile ChibilDll="$(ChibilDll)"
+                   Sources="$(MSBuildThisFileDirectory)bash-shim.c"
+                   OutputDir="$(SandboxOut)\bash-obj"
+                   IncludeDirs="@(MuslInc)"
+                   Defines="_GNU_SOURCE;_XOPEN_SOURCE=700"
+                   ForceInclude="$(BuildInfra)\musl-chibil-compat.h"
+                   ExtraArgs="--target=coreclr -nostdinc -mlp64">
+      <Output TaskParameter="Objects" ItemName="BashShimObj" />
+    </ChibilCompile>
+
+    <ItemGroup>
+      <!-- The prebuilt bash image (215 TUs, compiled under WSL with the SAME
+           coreclr/nostdinc/mlp64 flags against the same musl-1.2.6 headers). -->
+      <BashObj Include="$(BashObjDir)\*.obj" Exclude="$(BashObjDir)\jobs.obj;$(BashObjDir)\builtins_evalstring.obj;$(BashObjDir)\execute_cmd.obj" />
+      <!-- The managed musl libc implementation (minus the legacy oldmalloc). -->
+      <MuslObj Include="$(MuslObjDir)\*.obj" Exclude="$(MuslObjDir)\*oldmalloc*" />
+    </ItemGroup>
+
+    <!-- bash bound to the sandbox kernel — zero native deps. -->
+    <ChibilLink ChibilLinkDll="$(ChibilLinkDll)"
+                Output="$(BashDll)"
+                Debug="true"
+                Objects="@(BashObj);@(SandboxBashJobsObj);@(SandboxBashEvalObj);@(SandboxBashExecObj);@(MuslObj);@(ShimObj);@(BashShimObj)"
+                Binds="__chibil_syscall=Chibil.Sandbox.SandboxPal.Syscall;__chibil_get_tp=Chibil.Sandbox.SandboxPal.GetTp"
+                References="$(SandboxDll);$(ChibilPalDll)" />
+
+    <Message Importance="high" Text="sandbox bash -> $(BashDll) (bound to SandboxPal, no native libc)" />
+  </Target>
+</Project>
