@@ -191,6 +191,65 @@ public class BashTests
         Assert.Equal("3\n",   RunBash("printf 'x\\ny\\nz\\n' > /c; cat /c | wc -l", registerExternals: true).stdout);
     }
 
+    /// <summary>M5 (make_child gap): a pipeline STAGE that isn't a plain registered external —
+    /// a `{ }` brace group, a `( )` subshell, a `while`/control structure, or even a builtin like
+    /// `read` — has no fork on the PAL and used to NRE (make_child). Now each such synchronous
+    /// stage is deparsed and spawned as a fresh bash green-process on the pipe ends
+    /// (chibil_spawn_subshell). The `echo X | { read y; … }` case is the original M4.6 deadlock.</summary>
+    [Fact]
+    public void Bash_compound_pipeline_stages()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("inbrace\n", RunBash("echo inbrace | { cat; }", registerExternals: true).stdout);
+        Assert.Equal("3\n",       RunBash("printf '1\\n2\\n3\\n' | { wc -l; } | { cat; }", registerExternals: true).stdout);
+        Assert.Equal("GOT-hi\n",  RunBash("echo hi | { read y; echo \"GOT-$y\"; }", registerExternals: true).stdout);
+        Assert.Equal("2\n",       RunBash("printf 'a\\nb\\n' | while read x; do echo \"$x\"; done | wc -l", registerExternals: true).stdout);
+        Assert.Equal("sub\n",     RunBash("echo sub | ( cat )", registerExternals: true).stdout);
+        // external carrying a redirect AS a pipe stage (the chibil_spawn_tool branch is skipped
+        // for redirect+pipe, so this goes through the green-process spawn too)
+        Assert.Equal("OK\n",      RunBash("printf 'x\\ny\\n' | grep x >/dev/null && echo OK", registerExternals: true).stdout);
+    }
+
+    /// <summary>M5 (make_child gap): an unknown command AS a pipeline stage no longer NREs — it's
+    /// spawned as a bash green-process that reports "command not found" (exit 127) and drains its
+    /// pipe end, and the parent shell continues.</summary>
+    [Fact]
+    public void Bash_unknown_command_in_pipeline()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("after\n", RunBash("echo hi | nosuchcmd; echo after", registerExternals: true).stdout);
+        Assert.Equal("127\n",   RunBash("echo hi | nosuchcmd; echo $?", registerExternals: true).stdout);
+    }
+
+    /// <summary>fd-duplicating redirections: `>&2` (write to stderr), `2>&1` (merge stderr into
+    /// stdout), and the order-sensitive `>file 2>&1`. Exercises dup2 over the fd table.</summary>
+    [Fact]
+    public void Bash_stderr_redirection()
+    {
+        if (!File.Exists(BashDll())) return;
+        // 2>&1 merges stderr into stdout (RunBash captures fd1; fd2 is the swallow sink)
+        Assert.Equal("out\nerr\n", RunBash("{ echo out; echo err >&2; } 2>&1").stdout);
+        Assert.Equal("hi\n",       RunBash("echo hi 2>&1").stdout);
+        // a bare `>&2` line goes to stderr, so it must NOT appear on captured stdout
+        Assert.Equal("o\n",        RunBash("echo o; echo e >&2").stdout);
+        // order: `>/dev/null 2>&1` sends both streams to the bit bucket -> nothing captured
+        Assert.Equal("",           RunBash("{ echo x; echo y >&2; } >/dev/null 2>&1").stdout);
+        Assert.Equal("done\n",     RunBash("{ echo x; echo y >&2; } >/dev/null 2>&1; echo done").stdout);
+    }
+
+    /// <summary>/dev/null (and /dev/zero) are character devices, not stored files: writes to
+    /// /dev/null are discarded, reads hit EOF; /dev/zero reads zeros. Backs the ubiquitous
+    /// `… >/dev/null`, including as a redirect on a pipeline stage.</summary>
+    [Fact]
+    public void Bash_dev_null()
+    {
+        if (!File.Exists(BashDll()) || !ExternalsBuilt()) return;
+        Assert.Equal("after\n", RunBash("echo discarded >/dev/null; echo after").stdout);
+        Assert.Equal("", RunBash("cat /dev/null").stdout);                          // reads EOF
+        Assert.Equal("yes\n", RunBash("echo data | { grep data >/dev/null && echo yes; }", registerExternals: true).stdout);
+        Assert.Equal("ok\n", RunBash("[ -e /dev/null ] && echo ok").stdout);        // stat sees it
+    }
+
     /// <summary>M5: the coreutil batch — true/false (exit status), head/tail (line slicing, incl. a
     /// 3-stage `head|tail` external pipeline), and ls (directory listing via the getdents/readdir
     /// path, sorted, hidden-filtered).</summary>

@@ -38,7 +38,7 @@ namespace Chibil.Sandbox
         const long SYS_newfstatat = 262;
         const long SYS_statx  = 332;
         // struct stat st_mode type bits + a default permission
-        const uint S_IFREG = 0x8000, S_IFDIR = 0x4000, S_IFIFO = 0x1000;
+        const uint S_IFREG = 0x8000, S_IFDIR = 0x4000, S_IFIFO = 0x1000, S_IFCHR = 0x2000;
         const long SYS_ioctl  = 16;
         const long SYS_rt_sigaction   = 13;
         const long SYS_rt_sigprocmask = 14;
@@ -90,6 +90,10 @@ namespace Chibil.Sandbox
         static long DoOpen(string path, long flags)
         {
             var proc = CurrentProc();
+            // Character devices: not stored files. /dev/null discards writes + reads EOF;
+            // /dev/zero reads infinite zeros. Ubiquitous (`… >/dev/null`).
+            if (path == "/dev/null") return proc.Fds.Add(new DevNullHandle());
+            if (path == "/dev/zero") return proc.Fds.Add(new DevZeroHandle());
             // A directory open (e.g. opendir) returns a DirHandle for getdents64.
             if (_vfs.Stat(path, proc.Cwd, out bool isDir, out _) && isDir)
                 return proc.Fds.Add(new DirHandle(_vfs.ListDir(path, proc.Cwd)));
@@ -146,6 +150,12 @@ namespace Chibil.Sandbox
         // executable 0755 regular file so bash's PATH search/exec-bit check finds it.
         static bool ResolvePath(string path, out uint mode, out long size)
         {
+            if (path == "/dev/null" || path == "/dev/zero")     // char devices (see DoOpen)
+            {
+                mode = S_IFCHR | 0x1B6u;                         // crw-rw-rw-
+                size = 0;
+                return true;
+            }
             if (_vfs.Stat(path, CurrentProc().Cwd, out bool isDir, out size))
             {
                 mode = (isDir ? S_IFDIR : S_IFREG) | (isDir ? 0x1EDu : 0x1A4u);

@@ -57,6 +57,24 @@ namespace Chibil.Sandbox
         public byte[] ToArray() { lock (_lock) return _buf.ToArray(); }
     }
 
+    /// <summary>/dev/null — the bit bucket. Writes are discarded (but "succeed"), reads hit
+    /// immediate EOF. A real character device, NOT a stored file (a VfsFile would accumulate
+    /// every redirected write in memory and hand it back on read).</summary>
+    public sealed class DevNullHandle : FileHandle
+    {
+        public override int Read(Span<byte> dst) => 0;                       // EOF
+        public override int Write(ReadOnlySpan<byte> src) => src.Length;     // discard, report success
+        protected override void OnLastClose() { }
+    }
+
+    /// <summary>/dev/zero — infinite zeros on read; writes discarded.</summary>
+    public sealed class DevZeroHandle : FileHandle
+    {
+        public override int Read(Span<byte> dst) { dst.Clear(); return dst.Length; }
+        public override int Write(ReadOnlySpan<byte> src) => src.Length;
+        protected override void OnLastClose() { }
+    }
+
     /// <summary>An open regular file: a per-fd offset over a shared <see cref="VfsFile"/>.</summary>
     public sealed class VfsFileHandle : FileHandle
     {

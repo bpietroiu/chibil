@@ -1,5 +1,5 @@
 diff --git a/execute_cmd.c b/execute_cmd.c
-index 070f511..706a80e 100644
+index 070f511..592fcf6 100644
 --- a/execute_cmd.c
 +++ b/execute_cmd.c
 @@ -660,6 +660,14 @@ execute_command_internal (COMMAND *command, int asynchronous, int pipe_in, int p
@@ -17,23 +17,27 @@ index 070f511..706a80e 100644
    if (command->type == cm_subshell && (command->flags & CMD_NO_FORK))
      return (execute_in_subshell (command, asynchronous, pipe_in, pipe_out, fds_to_close));
  
-@@ -698,9 +706,28 @@ execute_command_internal (COMMAND *command, int asynchronous, int pipe_in, int p
+@@ -698,9 +706,32 @@ execute_command_internal (COMMAND *command, int asynchronous, int pipe_in, int p
  	/* Otherwise we defer setting line_number */
        tcmd = make_command_string (command);
        fork_flags = asynchronous ? FORK_ASYNC : 0;
 +#if defined (CHIBIL_SANDBOX)
-+      /* CoreCLR has no fork: run a user subshell ( ... ) as a fresh bash green-process
-+         (a separate, isolated process) instead of forking. Deparse the subshell BODY
-+         and spawn it with the parent's std fds inherited (or this stage's pipe ends);
-+         chibil_spawn_subshell returns the child pid, so the in-process child block
-+         below is dead and we fall through to the parent's close/wait path. Synchronous
-+         user subshells only; async/group/control-structure forks keep make_child. */
-+      if (command->type == cm_subshell && asynchronous == 0)
++      /* CoreCLR has no fork: run a forked SYNCHRONOUS child as a fresh bash green-process
++         instead. This covers every case that reaches here — a () subshell, a { } brace
++         group or a control structure (while/if/for) used as a pipeline stage, and forced-
++         subshell contexts. For a () subshell deparse its BODY; otherwise deparse the whole
++         command (tcmd, already built above). chibil_spawn_subshell wires this stage's pipe
++         ends (or inherits the parent's std fds) and transfers functions/vars/positional
++         params, then returns the child pid — so the in-process child block below is dead
++         and we fall through to the parent's close/wait path. Async still uses make_child
++         (no green async/job-control yet).
++         savestring: make_command_string returns a STATIC buffer that chibil_spawn_subshell's
++         chibil_state_dump (named_function_string) would clobber before it reads the body. */
++      if (asynchronous == 0)
 +	{
-+	  /* savestring: make_command_string returns a STATIC buffer that
-+	     chibil_spawn_subshell's chibil_state_dump (named_function_string)
-+	     would clobber before it reads the body. */
-+	  char *sbody = savestring (make_command_string (command->value.Subshell->command));
++	  char *sbody = savestring (command->type == cm_subshell
++		? make_command_string (command->value.Subshell->command)
++		: tcmd);
 +	  paren_pid = chibil_spawn_subshell (sbody, pipe_in, pipe_out, fork_flags);
 +	  free (sbody);
 +	  p = (char *)NULL;
@@ -47,7 +51,7 @@ index 070f511..706a80e 100644
  	  signal_in_progress (DEBUG_TRAP) == 0 && running_trap == 0)
  	{
  	  FREE (the_printed_command_except_trap);
-@@ -4461,6 +4488,43 @@ is_dirname (char *pathname)
+@@ -4461,6 +4492,43 @@ is_dirname (char *pathname)
    return ret;
  }
  
@@ -91,7 +95,7 @@ index 070f511..706a80e 100644
  /* The meaty part of all the executions.  We have to start hacking the
     real execution of commands here.  Fork a process, set things up,
     execute the command. */
-@@ -4475,6 +4539,9 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
+@@ -4475,6 +4543,9 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
    sh_builtin_func_t *builtin;
    SHELL_VAR *func;
    volatile int old_builtin, old_command_builtin;
@@ -101,7 +105,7 @@ index 070f511..706a80e 100644
  
    result = EXECUTION_SUCCESS;
    special_builtin_failed = builtin_is_special = 0;
-@@ -4527,6 +4594,18 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
+@@ -4527,6 +4598,18 @@ execute_simple_command (SIMPLE_COM *simple_command, int pipe_in, int pipe_out, i
       should not. */
    dofork = pipe_in != NO_PIPE || pipe_out != NO_PIPE || async;
  
@@ -120,7 +124,7 @@ index 070f511..706a80e 100644
    /* Something like `%2 &' should restart job 2 in the background, not cause
       the shell to fork here. */
    if (dofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE &&
-@@ -4812,6 +4891,24 @@ run_builtin:
+@@ -4812,6 +4895,24 @@ run_builtin:
    last_shell_builtin = this_shell_builtin;
    this_shell_builtin = builtin;
  
@@ -145,7 +149,7 @@ index 070f511..706a80e 100644
    if (builtin || func)
      {
        if (builtin)
-@@ -4940,6 +5037,14 @@ execute_from_filesystem:
+@@ -4940,6 +5041,14 @@ execute_from_filesystem:
  			cmdflags);
  
   return_result:
@@ -160,7 +164,7 @@ index 070f511..706a80e 100644
    bind_lastarg (lastarg);
    FREE (command_line);
    dispose_words (words);
-@@ -5808,6 +5913,18 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5808,6 +5917,18 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    command = search_for_command (pathname, CMDSRCH_HASH|(stdpath ? CMDSRCH_STDPATH : 0));
    QUIT;
  
@@ -179,7 +183,7 @@ index 070f511..706a80e 100644
    if (command)
      {
        /* If we're optimizing out the fork (implicit `exec'), decrement the
-@@ -5822,6 +5939,26 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5822,6 +5943,26 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    else if (command == 0 && notfound_str == 0)	/* make sure */
      init_notfound_str ();
  
@@ -206,7 +210,7 @@ index 070f511..706a80e 100644
    /* We have to make the child before we check for the non-existence
       of COMMAND, since we want the error messages to be redirected. */
    /* If we can get away without forking and there are no pipes to deal with,
-@@ -5831,6 +5968,63 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
+@@ -5831,6 +5972,74 @@ execute_disk_command (WORD_LIST *words, REDIRECT *redirects, char *command_line,
    else
      {
        fork_flags = async ? FORK_ASYNC : 0;
@@ -266,6 +270,17 @@ index 070f511..706a80e 100644
 +	    last_command_exit_value = EX_NOEXEC;
 +	  goto parent_return;
 +	}
++#endif
++#if defined (CHIBIL_SANDBOX)
++      /* No fork: a pipeline STAGE that isn't a plain registered external — an unknown
++         command, or an external carrying a redirection (so the chibil_spawn_tool branch
++         above was skipped) — runs here. Spawn it as a fresh bash green-process on this
++         stage's pipe ends; the child parses command_line and handles the external+redirect,
++         or reports "command not found" (exit 127), natively. (No-pipe not-found / redirect
++         cases were already handled above, in the parent or via chibil_spawn_tool.) */
++      if (pipe_in != NO_PIPE || pipe_out != NO_PIPE)
++	{ pid = chibil_spawn_subshell (command_line, pipe_in, pipe_out, fork_flags); p = (char *)NULL; }
++      else
 +#endif
        pid = make_child (p = savestring (command_line), fork_flags);
      }
